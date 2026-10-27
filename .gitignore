@@ -7,3 +7,5 @@ dist/
 # Python 字节码
 __pycache__/
 *.pyc
+# WorkBuddy 会话/记忆数据
+.workbuddy/
