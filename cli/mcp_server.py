@@ -18,6 +18,7 @@ import json
 import sys
 import time
 
+import errors  # CLI/MCP 共用的错误分类与格式化
 from helptext import VERSION
 
 SERVER_NAME = "hy-mem"
@@ -28,6 +29,15 @@ PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
+
+
+class ParamError(ValueError):
+    """调用方参数不对（缺参/空参/类型不符）。
+
+    单独建类而不是裸 raise ValueError：参数错和运行时错的建议完全不同——
+    参数错只需直说哪里错了，不该套上「先跑 doctor」这类运行时建议误导宿主。
+    继承 ValueError 保持向后兼容。
+    """
 
 
 # --------------------------------------------------------------------------
@@ -56,7 +66,7 @@ def _tool_add_memory(args: dict) -> str:
 
     text = str(args.get("text") or "").strip()
     if not text:
-        raise ValueError("text 不能为空")
+        raise ParamError("text 不能为空：写入记忆必须提供要记的内容")
     tags = [t for t in (args.get("tags") or []) if str(t).strip()]
     use_async = args.get("async", True) is not False
     client = _client()
@@ -116,7 +126,7 @@ def _tool_add_memory(args: dict) -> str:
 def _tool_search_memory(args: dict) -> str:
     query = str(args.get("query") or "").strip()
     if not query:
-        raise ValueError("query 不能为空")
+        raise ParamError("query 不能为空：检索必须提供查询词")
     limit = max(1, min(int(args.get("limit") or 5), 20))
     min_score = args.get("min_score")
     from hy_mem_cli import _flatten_search
@@ -128,6 +138,15 @@ def _tool_search_memory(args: dict) -> str:
         u = _identity()["user_id"]
         r = client.search(query, limit=limit, min_score=min_score, user_ids=[u])
         items = _flatten_search(r)[:limit]
+        if not items:
+            # SDK 吞掉嵌入端异常静默返回空列表（见 cmd_search 同款防护）——
+            # 空手时补一次真实探测，端点挂了把真实原因当错误报出去，
+            # 别让宿主把「密钥失效」误读成「没有相关记忆」。
+            from hy_mem_cli import _embedding_unhealthy
+
+            why = _embedding_unhealthy()
+            if why:
+                raise RuntimeError(f"检索失败：嵌入端点不可用（{why}）—— 这不代表没有相关记忆")
         out = [
             {
                 "memory_id": it.get("memory_id"),
@@ -168,7 +187,7 @@ def _tool_list_memories(args: dict) -> str:
 def _tool_get_memory(args: dict) -> str:
     mid = str(args.get("memory_id") or "").strip()
     if not mid:
-        raise ValueError("memory_id 不能为空")
+        raise ParamError("memory_id 不能为空：请传入 list 或 search 返回的 memory_id")
     client = _client()
     try:
         r = client.get(mid)
@@ -182,9 +201,9 @@ def _tool_get_memory(args: dict) -> str:
 def _tool_delete_memory(args: dict) -> str:
     mid = str(args.get("memory_id") or "").strip()
     if not mid:
-        raise ValueError("memory_id 不能为空")
+        raise ParamError("memory_id 不能为空：请传入 list 或 search 返回的 memory_id")
     if args.get("confirm") is not True:
-        raise ValueError("删除是破坏性操作：必须显式传 confirm=true")
+        raise ParamError("删除是破坏性操作：必须显式传 confirm=true")
     from hy_mem_cli import store
 
     client = _client()
@@ -356,9 +375,12 @@ def handle(msg: dict) -> dict | None:
             return _err(id_, INVALID_PARAMS, f"未知工具：{name}")
         try:
             return _resp(id_, _tool_result(handler(params.get("arguments") or {})))
+        except ParamError as e:  # 参数错直说哪里错，不套运行时建议
+            return _resp(id_, _tool_result(f"参数错误：{e}", is_error=True))
         except Exception as e:  # noqa: BLE001  工具失败以 isError 报给宿主，不断连接
             print(f"hy-mem mcp: {name} 失败: {type(e).__name__}: {e}", file=sys.stderr)
-            return _resp(id_, _tool_result(f"{type(e).__name__}: {e}", is_error=True))
+            # 错误码 + 异常原文 + 修复建议，宿主拿到就能转述给用户
+            return _resp(id_, _tool_result(errors.format_tool_error(e), is_error=True))
     if method == "prompts/list":
         return None if is_notification else _resp(id_, {"prompts": []})
     if method == "resources/list":
@@ -394,7 +416,7 @@ def serve() -> int:
                 resp = handle(msg)
             except Exception as e:  # noqa: BLE001  派发层兜底，绝不让进程死
                 print(f"hy-mem mcp: 派发异常 {type(e).__name__}: {e}", file=sys.stderr)
-                resp = _err(msg.get("id") if isinstance(msg, dict) else None, -32603, "内部错误")
+                resp = _err(msg.get("id") if isinstance(msg, dict) else None, -32603, f"内部错误：{errors.error_detail(e)}")
         if resp is not None:
             # ensure_ascii=True：协议输出纯 ASCII（中文转 \uXXXX），不受宿主
             # 控制台代码页影响——exe 的 stdout 编码随环境漂移，False 会产生

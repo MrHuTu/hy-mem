@@ -59,10 +59,9 @@ class _Palette:
 
 c = _Palette()
 
-EXIT_OK = 0
-EXIT_USAGE = 1
-EXIT_RUNTIME = 2
-EXIT_INTERNAL = 3
+# 退出码在 errors.py 定义（CLI/MCP 共用一份口径），这里导入保持原名字可用
+from errors import EXIT_INTERNAL, EXIT_OK, EXIT_RUNTIME, EXIT_USAGE  # noqa: E402
+from errors import classify_error, error_detail  # noqa: E402,F401  分类口径单一来源
 
 
 def _resolve_home() -> Path:
@@ -242,15 +241,16 @@ _EXIT_CODES = {
 }
 
 
-def fail(msg: str, code: int = EXIT_RUNTIME, hint: str = "", extra: dict | None = None) -> int:
+def fail(msg: str, code: int = EXIT_RUNTIME, hint: str = "", extra: dict | None = None, err_code: str | None = None) -> int:
     """报错。--json 时在 stdout 也留一份结构化错误，agent 不必去解析 stderr。
 
     error.code 用稳定的字符串枚举（E_USAGE / E_RUNTIME / E_INTERNAL），
     和退出码语义一一对应；数字退出码仍在进程返回值里，两者不要混着读。
+    err_code 允许调用方给出比数字退出码更精确的枚举（如 E_CONFIG）；
     extra 用于附加机器可读的细节（例如配置缺项清单），合并进 error 对象。
     """
     if _JSON:
-        err = {"code": _EXIT_CODES.get(code, "E_RUNTIME"), "message": msg, "hint": hint}
+        err = {"code": err_code or _EXIT_CODES.get(code, "E_RUNTIME"), "message": msg, "hint": hint}
         if extra:
             err.update(extra)
             if extra.get("kind") == "config":
@@ -2533,42 +2533,8 @@ def _force_utf8() -> None:
             pass
 
 
-# 退出码语义（对齐标准自包含 CLI 规范）：agent 靠它决定「重试 / 换招 / 报 bug」
-_RUNTIME_TYPES = {
-    "RuntimeError", "ValueError", "OSError", "ConnectionError", "TimeoutError",
-    "SSLError", "HTTPError", "URLError", "JSONDecodeError", "OperationalError",
-}
-_INTERNAL_TYPES = {
-    "TypeError", "AttributeError", "KeyError", "IndexError", "ImportError",
-    "ModuleNotFoundError", "NameError", "NotImplementedError", "RecursionError",
-}
-
-
-def classify_error(e: BaseException) -> tuple[int, str, str]:
-    """异常 → (退出码, 错误码, 人话提示)。
-
-    2 与 3 的分界线是「能不能靠改配置/换网络解决」：端点、密钥、维度、文件
-    权限属于 2；TypeError/KeyError 这类只可能是程序自己写错了，属于 3。
-    """
-    name = type(e).__name__
-    if name == "Aborted":
-        return EXIT_OK, "CANCELLED", ""
-    if name == "UnicodeEncodeError":
-        # 典型是 HTTP 头里有非 ASCII（http.client / httpx 都按 latin-1/ascii 编码
-        # 请求头），**请求根本没发出去**。这是「输入内容不对」，不是网络故障，
-        # 所以给 1（改配置能解决）而不是 2。
-        # 2026-10-27：中文粘进密钥就是这么一路冒到顶层的。
-        return (
-            EXIT_USAGE,
-            "E_CONFIG",
-            "密钥或地址里含非 ASCII 字符（中文/全角/零宽），只能是 ASCII；"
-            "重跑 hy-mem setup --step embedding 重新填一次",
-        )
-    if name in _INTERNAL_TYPES:
-        return EXIT_INTERNAL, "E_INTERNAL", "这多半是程序缺陷：加 --verbose 复跑可拿到堆栈"
-    if name in _RUNTIME_TYPES:
-        return EXIT_RUNTIME, "E_RUNTIME", "先跑 `hy-mem doctor`；嵌入密钥无效用 `hy-mem setup --step embedding`"
-    return EXIT_RUNTIME, "E_RUNTIME", "加 --verbose 复跑可看到详细堆栈"
+# classify_error / error_detail 已上移 cli/errors.py（CLI 与 MCP 共用分类口径），
+# 文件顶部导入，这里不再保留副本。
 
 
 def cmd_mcp(args) -> int:
@@ -2714,18 +2680,13 @@ def main(argv=None) -> int:
             print("hy-mem: 已取消", file=sys.stderr)
             return EXIT_OK
         code, err_code, hint = classify_error(e)
-        if getattr(args, "json", False):
-            print(
-                json.dumps(
-                    {"ok": False, "error": {"code": err_code, "message": f"{type(e).__name__}: {e}", "hint": hint}},
-                    ensure_ascii=False,
-                )
-            )
         if getattr(args, "verbose", False):
             import traceback
 
             traceback.print_exc()
-        return fail(f"{type(e).__name__}: {e}", code)
+        # --json 的结构化错误由 fail() 统一输出（_JSON 已置位）——别在这里
+        # 手工再 print 一份：曾经两处各打一行，agent 会收到两行 JSON。
+        return fail(error_detail(e), code, hint=hint, err_code=err_code)
 
 
 if __name__ == "__main__":
