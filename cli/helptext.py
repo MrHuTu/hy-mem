@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 
 PURPOSE = (
     "跨会话长期记忆库。把用户偏好、项目事实、决策与踩坑写进去，下次会话靠语义检索取回。"
@@ -352,6 +352,22 @@ CMD_META: dict[str, dict] = {
         "examples": ["hy-mem forget --yes -u test_probe"],
         "output": {"resp": "{ok, removed}"},
         "notes": ["破坏性操作，必须 --yes；范围由 -u/-a/-s 决定，建议先 list 确认范围。"],
+    },
+    "update": {
+        "group": "写入",
+        "when": "记忆内容有误或过时、用户纠正了某个事实时；新增信息用 add，别用 update。",
+        "mutates": True,
+        "examples": ["hy-mem update 3f9a2c1b 用户的项目已切换到 iisw_be2", "echo 新内容 | hy-mem update 3f9a2c1b"],
+        "output": {"resp": "{ok, ...SDK 返回}"},
+        "notes": ["整条替换正文，不是追加。走演化链：旧版本进 SHADOW 保留，hy-mem history <id> 可查。"],
+    },
+    "history": {
+        "group": "读取",
+        "when": "审计一条记忆被改过几次、原来的内容是什么。",
+        "mutates": False,
+        "examples": ["hy-mem --json history 3f9a2c1b"],
+        "output": {"resp": "{count, memory_id, history[]}"},
+        "notes": ["没有变更记录时返回空列表（说明从没被 update 过）。"],
     },
     "finalize": {
         "group": "写入",

@@ -316,6 +316,43 @@ def main() -> int:
     entry = next((c for c in cmds if isinstance(c, dict) and c.get("name") == "user"), {})
     check("user 也有语义说明", bool(entry.get("when")), str(list(entry))[:80])
 
+    # ---- 13. SDK 对齐命令：update / history / add 透传参数 ----
+    print("\nSDK 对齐（update / history / add 透传）")
+    p = run(["--help-json"])
+    ok, obj = one_json_object(p.stdout)
+    cmds = {c["name"]: c for c in (obj or {}).get("commands", [])} if ok else {}
+    check("help --json 收录 update", "update" in cmds)
+    check("help --json 收录 history", "history" in cmds)
+    upd = cmds.get("update", {})
+    check("update 标记 mutates", upd.get("mutates") is True, str(upd.get("mutates")))
+
+    # update 缺新内容（stdin 为空）→ 用法错 exit 1，不碰 SDK
+    p = run(["update", "some-id"], stdin="")
+    check("update 缺内容 exit 1", p.returncode == 1, f"exit={p.returncode}")
+    check("update 缺内容提示从 stdin 读", "stdin" in p.stderr or "新内容" in p.stderr, p.stderr.strip()[:80])
+
+    # history 缺 memory_id → argparse 用法错 exit 1
+    p = run(["history"])
+    check("history 缺 id exit 1", p.returncode == 1, f"exit={p.returncode}")
+
+    # add 坏 --metadata：进队列前就拦，exit 1
+    p = run(["--json", "add", "x", "--metadata", "{bad"])
+    check("add 坏 metadata exit 1", p.returncode == 1, f"exit={p.returncode}")
+    ok, obj = one_json_object(p.stdout)
+    err = (obj or {}).get("error") or {} if ok else {}
+    check("坏 metadata 报合法 JSON 提示", "JSON" in str(err.get("message", "")), str(err.get("message"))[:80])
+
+    # add 坏 --memory-at：同样进队列前拦截
+    p = run(["--json", "add", "x", "--memory-at", "not-a-date"])
+    check("add 坏 memory-at exit 1", p.returncode == 1, f"exit={p.returncode}")
+
+    # search 坏 --since：用法错 exit 1（不该静默当不过滤）
+    p = run(["--json", "search", "q", "--since", "bad-time"])
+    check("search 坏 since exit 1", p.returncode == 1, f"exit={p.returncode}")
+    ok, obj = one_json_object(p.stdout)
+    err = (obj or {}).get("error") or {} if ok else {}
+    check("坏 since 报时间格式提示", "时间格式" in str(err.get("message", "")), str(err.get("message"))[:80])
+
     bad = results.count(False)
     print(f"\n{'全部通过' if bad == 0 else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")
     return 1 if bad else 0

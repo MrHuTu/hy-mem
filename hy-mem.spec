@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import copy_metadata
 
 datas = []
-hiddenimports = ['store', 'config', 'tui', 'presets', 'setup_wizard', 'menu', 'storage_ops', 'install_ops', 'skill_ops', 'helptext', 'local_embedder', 'runtime_check', 'netprobe']
+hiddenimports = ['store', 'config', 'tui', 'presets', 'setup_wizard', 'menu', 'storage_ops', 'install_ops', 'skill_ops', 'mcp_server', 'helptext', 'local_embedder', 'runtime_check', 'netprobe']
 datas += collect_data_files('chromadb')
 datas += copy_metadata('hy-memory')
 datas += copy_metadata('chromadb')

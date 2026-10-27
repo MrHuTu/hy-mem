@@ -20,10 +20,12 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import netprobe
 import store
+from mcp_server import _in_range, _item_ts, _parse_time as _parse_when
 
 
 class _Palette:
@@ -462,6 +464,51 @@ def identity_lists(args) -> dict:
     return d
 
 
+def _parse_memory_at(v) -> "datetime | None":
+    """--memory-at 的值 → datetime。支持 2026-10-27 / 2026-10-27 14:30:00 / ISO T 分隔。"""
+    if v is None or not str(v).strip():
+        return None
+    s = str(v).strip()
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError(
+        f"--memory-at 时间格式不认识：{s!r}（支持 2026-10-27、2026-10-27 14:30:00 这类写法）"
+    )
+
+
+def _add_kwargs(args) -> dict:
+    """add 的三个 SDK 透传参数 → client.add 关键字参数。
+
+    metadata 要 JSON 对象；memory_at 是补录历史时间（影响检索排序与时间过滤）；
+    request_id 是幂等写入口（同一 id 重试不会写重）。解析错在这里当场报，
+    不让坏数据进队列。
+    """
+    kw: dict = {}
+    raw_md = getattr(args, "metadata", None)
+    if raw_md:
+        try:
+            md = json.loads(raw_md)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"--metadata 必须是合法 JSON 对象：{e}") from e
+        if not isinstance(md, dict):
+            raise ValueError("--metadata 必须是 JSON 对象，如 '{\"project\":\"iisw\"}'")
+        kw["metadata"] = md
+    mat = _parse_memory_at(getattr(args, "memory_at", None))
+    if mat is not None:
+        kw["memory_at"] = mat
+    rid = (getattr(args, "request_id", None) or "").strip()
+    if rid:
+        kw["request_id"] = rid
+    return kw
+
+
 # --------------------------------------------------------------------------
 # 子命令
 # --------------------------------------------------------------------------
@@ -892,9 +939,19 @@ def cmd_add(args) -> int:
     if not text:
         return fail("没有输入内容（参数或 stdin）", EXIT_USAGE)
     tags = [t for t in (args.tag or []) if t.strip()]
+    # metadata / memory_at / request_id 在进队列前就解析校验——坏参数当场报，
+    # 别等 worker 消费时才炸（那时 job 已经进死信，排查成本高得多）
+    try:
+        extra = _add_kwargs(args)
+    except ValueError as e:
+        return fail(str(e), EXIT_USAGE)
     use_async = bool(getattr(args, "async_mode", False)) or os.getenv("HY_MEM_ASYNC") == "1"
 
     if use_async:
+        # 队列 payload 必须可 JSON 序列化：datetime 转回 ISO 字符串，worker 端再解析
+        queued_extra = dict(extra)
+        if "memory_at" in queued_extra:
+            queued_extra["memory_at"] = queued_extra["memory_at"].isoformat()
         parts = _split_lines(text) if args.split else [text]
 
         def _enqueue_all(conn):
@@ -906,6 +963,7 @@ def cmd_add(args) -> int:
                         "source": args.source,
                         "identity": identity(args),
                         "tags": tags,
+                        **queued_extra,
                     },
                     mode=args.mode,
                     max_attempts=int(os.getenv("HY_MEM_QUEUE_MAX_ATTEMPTS") or 3),
@@ -949,7 +1007,7 @@ def cmd_add(args) -> int:
         for p in parts:
             # 写锁：SDK 内部无锁，reconcile 是读改写，多进程并发会丢更新
             with store.WriteLock():
-                last = client.add(p, source=args.source, **identity(args))
+                last = client.add(p, source=args.source, **extra, **identity(args))
             ids = _ids_of(last)
             all_ids.extend(ids)
             if tags:
@@ -1044,10 +1102,20 @@ def cmd_search(args) -> int:
         # 标签在 SDK 里不是查询条件，只能后过滤 → 必须多取，否则过滤后可能空手
         fetch_limit = args.limit if not want_tags else min(200, max(args.limit * 10, 30))
 
+        # 时间窗：since 走 SDK 原生 created_after（检索端就裁掉，省得起一堆再扔），
+        # until 与无时间戳兜底放行逻辑在本地过滤（与 MCP search_memory 同一套助手）。
+        try:
+            since = _parse_when(getattr(args, "since", None))
+            until = _parse_when(getattr(args, "until", None))
+        except ValueError as e:
+            return fail(str(e), EXIT_USAGE)  # 坏时间格式是用法错，exit 1
+        kw = {"created_after": since} if since is not None else {}
+
         r = client.search(
             args.query,
             limit=fetch_limit,
             min_score=min_score,
+            **kw,
             **identity_lists(args),
         )
         items = _flatten_search(r)
@@ -1064,6 +1132,8 @@ def cmd_search(args) -> int:
                     EXIT_RUNTIME,
                 )
         _remember_auto(items)
+        if since is not None or until is not None:
+            items = [x for x in items if _in_range(_item_ts(x), since, until)]
         if want_tags:
             items = _filter_by_tags(items, want_tags, args.tag_mode)
         items = items[: args.limit]
@@ -1116,7 +1186,7 @@ def cmd_list(args) -> int:
     try:
         want_tags = [t for t in (args.tag or []) if t.strip()]
         fetch_limit = args.limit if not want_tags else min(500, max(args.limit * 10, 50))
-        r = client.list_memories(limit=fetch_limit, offset=args.offset, **identity(args))
+        r = client.list_memories(limit=fetch_limit, offset=args.offset, order=args.order, **identity(args))
         vdb = r.get("vdb") or {}
         items = vdb.get("memories") or []
         source = "vdb"
@@ -1188,6 +1258,53 @@ def cmd_delete(args) -> int:
         with store.WriteLock():
             r = client.delete(args.memory_id)
         return ok(r, args.json, f"已删除 {args.memory_id}")
+    finally:
+        client.close()
+
+
+def cmd_update(args) -> int:
+    """改一条记忆的内容。走 SDK 演化链：旧版本进 SHADOW 保留，不丢历史。"""
+    rc = require_ready("更新记忆")
+    if rc is not None:
+        return rc
+    content = _read_text(getattr(args, "content", None))
+    if not content:
+        return fail("没有新内容（位置参数或 stdin）", EXIT_USAGE)
+    client = make_client(args.mode)
+    try:
+        # 改前先确认存在，给出「未找到」而不是 SDK 的深层报错
+        if client.get(args.memory_id) is None:
+            return fail(f"未找到 {args.memory_id}（可先 hy-mem list 拿 id）")
+        with store.WriteLock():
+            r = client.update(args.memory_id, content)
+        return ok(
+            r, args.json,
+            f"已更新 {args.memory_id}（旧版本保留在演化链，hy-mem history {args.memory_id[:8]} 可查）",
+        )
+    finally:
+        client.close()
+
+
+def cmd_history(args) -> int:
+    """查一条记忆的变更历史（演化链）：每次改动的旧版本都在这里。"""
+    rc = require_ready("查询记忆历史")
+    if rc is not None:
+        return rc
+    client = make_client(args.mode)
+    try:
+        items = client.history(args.memory_id) or []
+        if args.json:
+            return ok({"count": len(items), "memory_id": args.memory_id, "history": items}, True)
+        if not items:
+            print(f"（{args.memory_id} 没有变更记录——从没被 update 过）")
+            return EXIT_OK
+        lines = []
+        for i, it in enumerate(items, 1):
+            body = str(it.get("memory") or it.get("content") or it.get("text") or "").replace("\n", " ")
+            when = it.get("gmt_created") or it.get("created_at") or it.get("when") or ""
+            event = it.get("event") or it.get("action") or ""
+            lines.append(f"{i:>2}. [{when}]{' ' + str(event) if event else ''} {body[:140]}")
+        return ok(items, False, "\n".join(lines))
     finally:
         client.close()
 
@@ -1512,11 +1629,24 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str]]:
         return result, []
 
     tags = [t for t in (payload.get("tags") or []) if str(t).strip()]
+    # add 透传参数：metadata 原样；memory_at 是 ISO 字符串要转回 datetime；
+    # request_id 原样（幂等写，同一 id 重复消费不会写重——重试场景的关键护栏）
+    add_kw: dict = {}
+    if payload.get("metadata"):
+        add_kw["metadata"] = payload["metadata"]
+    if payload.get("memory_at"):
+        try:
+            add_kw["memory_at"] = datetime.fromisoformat(str(payload["memory_at"]))
+        except ValueError:
+            pass  # 坏时间戳不入参（解析在入队前已拦截，这里是防御）
+    if payload.get("request_id"):
+        add_kw["request_id"] = str(payload["request_id"])
     before = _snapshot_ids(client, ident) if tags else set()
     with store.WriteLock():
         result = client.add(
             payload["text"],
             source=payload.get("source") or "cli",
+            **add_kw,
             **ident,
         )
     ids = _ids_of(result)
@@ -2398,6 +2528,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只入队立即返回（pro 模式单条 6~9s），由 worker 异步消费",
     )
+    ps.add_argument("--metadata", default=None, help="附加元数据，JSON 对象：--metadata '{\"project\":\"iisw\"}'")
+    ps.add_argument("--memory-at", dest="memory_at", default=None, help="记忆发生时间（补录历史用）：2026-10-27 或 2026-10-27 14:30:00")
+    ps.add_argument("--request-id", dest="request_id", default=None, help="幂等写 id：同一 id 重复提交只落一条")
     ps.set_defaults(func=cmd_add)
 
     ps = sub.add_parser("search", help="语义检索")
@@ -2411,11 +2544,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ps.add_argument("--tag", action="append", default=None, help="按标签过滤（自动多取候选再筛）")
     ps.add_argument("--tag-mode", choices=["all", "any"], default="all", help="多个标签是 AND 还是 OR")
+    ps.add_argument("--since", default=None, help="只要这段时间之后：30m/12h/7d/30d/1y 或 2026-01-01")
+    ps.add_argument("--until", default=None, help="只要这段时间之前，格式同 --since")
     ps.set_defaults(func=cmd_search)
 
     ps = sub.add_parser("list", help="列出记忆")
     ps.add_argument("-n", "--limit", type=int, default=20)
     ps.add_argument("--offset", type=int, default=0)
+    ps.add_argument("--order", choices=["desc", "asc"], default="desc", help="desc 最新在前（默认）/ asc 最旧在前")
     ps.add_argument("--tag", action="append", default=None, help="按标签过滤")
     ps.add_argument("--tag-mode", choices=["all", "any"], default="all")
     ps.set_defaults(func=cmd_list)
@@ -2428,6 +2564,15 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("memory_id", help="记忆 id；不可恢复")
     ps.add_argument("--dry-run", action="store_true", help="只确认这条记忆存在并打印它，不真删")
     ps.set_defaults(func=cmd_delete)
+
+    ps = sub.add_parser("update", help="改一条记忆的内容（旧版本保留在演化链）")
+    ps.add_argument("memory_id", help="记忆 id（list 命令里能看到）")
+    ps.add_argument("content", nargs="?", help="新内容；省略则从 stdin 读")
+    ps.set_defaults(func=cmd_update)
+
+    ps = sub.add_parser("history", help="查一条记忆的变更历史（演化链版本）")
+    ps.add_argument("memory_id", help="记忆 id")
+    ps.set_defaults(func=cmd_history)
 
     ps = sub.add_parser("forget", help="按范围批量删（需 --yes）")
     ps.add_argument("--yes", action="store_true", help="确认执行；不加只打印影响范围")

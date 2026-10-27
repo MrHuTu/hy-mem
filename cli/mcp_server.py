@@ -72,9 +72,10 @@ def _parse_time(v) -> float | None:
 
 
 def _item_ts(m: dict) -> float | None:
-    """条目 → unix 秒。SDK 各路径时间字段名不一，实测 list/get 行是
-    gmt_created（字符串 unix 秒）；其余候选是防御性兼容。"""
-    for k in ("gmt_created", "created_at", "memory_at", "createdTime", "when", "updated_at"):
+    """条目 → unix 秒。优先 memory_at（补录的「记忆发生时间」，add --memory-at
+    写入，语义上时间过滤就该按它）；没有补录才退回 gmt_created（实测 list/get
+    行是字符串 unix 秒）；其余候选是防御性兼容。"""
+    for k in ("memory_at", "gmt_created", "created_at", "createdTime", "when", "updated_at"):
         v = m.get(k)
         if v is None:
             continue
@@ -128,13 +129,22 @@ def _client():
 
 def _tool_add_memory(args: dict) -> str:
     """写入记忆。默认走异步队列（毫秒返回，worker 自动拉起落库）。"""
-    from hy_mem_cli import _spawn_detached_worker
+    from hy_mem_cli import _spawn_detached_worker, _parse_memory_at
 
     text = str(args.get("text") or "").strip()
     if not text:
         raise ParamError("text 不能为空：写入记忆必须提供要记的内容")
     tags = [t for t in (args.get("tags") or []) if str(t).strip()]
     use_async = args.get("async", True) is not False
+    # SDK 透传参数：metadata（对象）/ memory_at（补录时间）/ request_id（幂等）
+    metadata = args.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ParamError("metadata 必须是对象（object），如 {\"project\": \"iisw\"}")
+    request_id = str(args.get("request_id") or "").strip() or None
+    try:
+        memory_at = _parse_memory_at(args.get("memory_at"))
+    except ValueError as e:
+        raise ParamError(str(e))
     client = _client()
     if not use_async:
         from hy_mem_cli import _ids_of, _new_ids_only, _bind_tags
@@ -150,8 +160,12 @@ def _tool_add_memory(args: dict) -> str:
                 }
             except Exception:  # noqa: BLE001
                 before = set()
+        add_kw = (
+            {"metadata": metadata, "memory_at": memory_at, "request_id": request_id}
+        )
+        add_kw = {k: v for k, v in add_kw.items() if v is not None}
         with store.WriteLock():
-            last = client.add(text, source="mcp", **_identity())
+            last = client.add(text, source="mcp", **add_kw, **_identity())
         ids = _ids_of(last)
         if tags:
             _bind_tags(_new_ids_only(ids, before), tags, "user")
@@ -161,8 +175,27 @@ def _tool_add_memory(args: dict) -> str:
     # 异步：入队 + 无人消费时自动拉起临时 worker（与 CLI add --async 同一套）
     from hy_mem_cli import store
 
+    queued_extra = {}
+    if metadata:
+        queued_extra["metadata"] = metadata
+    if memory_at is not None:
+        queued_extra["memory_at"] = memory_at.isoformat()  # 队列 payload 必须 JSON 可序列化
+    if request_id:
+        queued_extra["request_id"] = request_id
+
     def _enq(conn):
-        return [store.enqueue(conn, {"text": text, "source": "mcp", "identity": _identity(), "tags": tags})]
+        return [
+            store.enqueue(
+                conn,
+                {
+                    "text": text,
+                    "source": "mcp",
+                    "identity": _identity(),
+                    "tags": tags,
+                    **queued_extra,
+                },
+            )
+        ]
 
     job_ids = store.transient_write(_enq)
     conn = store.connect()
@@ -305,6 +338,30 @@ def _tool_delete_memory(args: dict) -> str:
     return json.dumps({"deleted": mid, "result": r}, ensure_ascii=False, default=str)
 
 
+def _tool_update_memory(args: dict) -> str:
+    """更新一条记忆的内容。走 SDK 演化链：旧版本进 SHADOW 保留，可追溯。"""
+    mid = str(args.get("memory_id") or "").strip()
+    content = str(args.get("content") or "").strip()
+    if not mid:
+        raise ParamError("memory_id 不能为空：请传入 list 或 search 返回的 memory_id")
+    if not content:
+        raise ParamError("content 不能为空：请提供修改后的记忆正文")
+    if args.get("confirm") is not True:
+        raise ParamError("更新会改变检索结果：必须显式传 confirm=true")
+    from hy_mem_cli import store
+
+    client = _client()
+    if client.get(mid) is None:
+        return json.dumps({"found": False, "memory_id": mid}, ensure_ascii=False)
+    with store.WriteLock():
+        r = client.update(mid, content)
+    return json.dumps(
+        {"updated": mid, "note": "旧版本保留在演化链（get_recent_history/history 可查）", "result": r},
+        ensure_ascii=False,
+        default=str,
+    )
+
+
 def _tool_get_version(_args: dict) -> str:
     """版本与安装信息。自动升级链路的第一步：比对版本、定位要替换的安装根。"""
     import os
@@ -352,6 +409,12 @@ TOOLS = [
                 "text": {"type": "string", "description": "记忆正文，一条一个主题"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签"},
                 "async": {"type": "boolean", "description": "默认 true；false 时同步等待落库（8~40s）"},
+                "metadata": {"type": "object", "description": "附加元数据对象，如 {\"project\": \"iisw\"}"},
+                "memory_at": {
+                    "type": "string",
+                    "description": "记忆发生时间（补录历史用）：2026-10-27 或 2026-10-27T14:30:00",
+                },
+                "request_id": {"type": "string", "description": "幂等写 id：同一 id 重复提交只落一条"},
             },
             "required": ["text"],
         },
@@ -427,6 +490,22 @@ TOOLS = [
             "required": ["memory_id", "confirm"],
         },
     },
+    {
+        "name": "update_memory",
+        "description": (
+            "更新一条记忆的内容（走演化链，旧版本保留可追溯）。会改变检索结果，必须 confirm=true。"
+            "记忆内容有误或过时、用户纠正了某个事实时用；新增信息请用 add_memory。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "string", "description": "要改的记忆 id（list/search 返回的）"},
+                "content": {"type": "string", "description": "修改后的完整正文（整条替换，不是追加）"},
+                "confirm": {"type": "boolean", "description": "必须显式传 true"},
+            },
+            "required": ["memory_id", "content", "confirm"],
+        },
+    },
 ]
 
 _HANDLERS = {
@@ -435,6 +514,7 @@ _HANDLERS = {
     "list_memories": _tool_list_memories,
     "get_memory": _tool_get_memory,
     "delete_memory": _tool_delete_memory,
+    "update_memory": _tool_update_memory,
     "get_version": _tool_get_version,
 }
 
