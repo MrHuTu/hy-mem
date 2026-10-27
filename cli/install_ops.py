@@ -76,10 +76,20 @@ def render_launcher(kind: str = "") -> str:
     return f'#!/bin/sh\nexec {cmd} "$@"\n'
 
 
+def _read_raw(path: Path) -> str:
+    """读文件原始内容，**不做换行翻译**。
+
+    read_text() 默认 universal-newline 会把 \r\n 归一成 \n，导致 CRLF 启动器
+    （.cmd）与渲染结果永远比对不等 → install 每次都「重写」、scan 每次都误判
+    stale，幂等被破坏。必须按字节读。
+    """
+    return path.read_bytes().decode("utf-8", errors="replace")
+
+
 def _write_one(path: Path, body: str) -> tuple[bool, str]:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.read_text(encoding="utf-8", errors="replace") == body:
+        if path.exists() and _read_raw(path) == body:
             return True, f"{path.name} 已是最新"
         path.write_text(body, encoding="utf-8", newline="")
         if os.name != "nt" or path.suffix == "":
@@ -161,3 +171,102 @@ def which() -> str | None:
             except OSError:
                 continue
     return None
+
+
+# ---------------------------------------------------------------------------
+# 旧启动器接管
+#
+# 真实事故（2026-10-27）：源码模式曾把启动器写进 ~/.local/bin，后来 venv 被清、
+# exe 版另装到 %LOCALAPPDATA%\hy-mem\bin —— 但 ~/.local/bin 在 PATH 里排前面，
+# `hy-mem` 一直打到已失效的旧壳上。install 只顾自己的一亩三分地、不回收旧壳，
+# 用户就得手工排雷。这里把「发现旧壳 → 改指当前安装」收进 install 流程。
+# ---------------------------------------------------------------------------
+
+_LAUNCHER_NAMES = ("hy-mem.cmd", "hy-mem")  # hy-mem.exe 是二进制，不在接管范围
+
+
+def _is_hymem_launcher_text(text: str) -> bool:
+    """判断文件内容是不是 hy-mem 启动器（而非别人的同名程序）。"""
+    return ("hy_mem_cli.py" in text) or ("hy-mem.exe" in text)
+
+
+def _points_to_current(text: str, kind: str) -> bool:
+    """启动器内容是否已指向当前安装（避免无谓改写）。
+
+    kind 必须按文件自身类型给：.cmd 比对 cmd 渲染、无扩展名比对 sh 渲染，
+    否则 Git Bash 用的 sh 壳会被永远误判为 stale，破坏幂等。
+    """
+    return text == render_launcher(kind)
+
+
+def scan_launchers() -> list[tuple[Path, str]]:
+    """扫 PATH 上所有 hy-mem 启动器（跳过默认落点，那是 install 自己的地盘）。
+
+    返回 [(路径, 分类)]，分类：
+      current —— 已指向当前安装，无需处理
+      stale   —— 是 hy-mem 启动器但指向别处（多半已失效），可接管
+      foreign —— 内容不像 hy-mem 启动器（同名异姓），绝不动
+    """
+    try:
+        ours = str(bin_dir().resolve()).lower()
+    except Exception:  # noqa: BLE001
+        ours = ""
+    found: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for raw in os.getenv("PATH", "").split(os.pathsep):
+        raw = raw.strip().strip('"')
+        if not raw:
+            continue  # 空项 = 当前目录，与 which() 同口径
+        try:
+            d = Path(raw).resolve()
+        except Exception:  # noqa: BLE001
+            continue
+        key = str(d).lower()
+        if key in seen or key == ours:
+            continue
+        seen.add(key)
+        for name in _LAUNCHER_NAMES:
+            f = d / name
+            if not f.is_file():
+                continue
+            try:
+                text = _read_raw(f)
+            except OSError:
+                found.append((f, "foreign"))  # 读不了的不碰
+                continue
+            if not _is_hymem_launcher_text(text):
+                found.append((f, "foreign"))
+            elif _points_to_current(text, "cmd" if f.suffix == ".cmd" else "sh"):
+                found.append((f, "current"))
+            else:
+                found.append((f, "stale"))
+    return found
+
+
+def adopt_stale() -> tuple[list[Path], list[str]]:
+    """把 PATH 上残留的旧 hy-mem 启动器就地改写为指向当前安装。
+
+    只改「确认是 hy-mem 启动器」的文本文件；同名外部程序与二进制一律不动。
+    返回 (已接管的路径, 逐条说明)。
+    """
+    fixed: list[Path] = []
+    notes: list[str] = []
+    for f, kind in scan_launchers():
+        if kind == "current":
+            continue
+        if kind != "stale":
+            notes.append(f"跳过 {f}（不是 hy-mem 启动器，不动）")
+            continue
+        body = render_launcher("cmd" if f.suffix == ".cmd" else "sh")
+        try:
+            f.write_text(body, encoding="utf-8", newline="")
+            if f.suffix == "":
+                try:
+                    f.chmod(0o755)
+                except OSError:
+                    pass
+            fixed.append(f)
+            notes.append(f"已接管 {f} → 指向当前安装")
+        except OSError as e:
+            notes.append(f"改写 {f} 失败：{type(e).__name__}: {e}")
+    return fixed, notes
