@@ -40,7 +40,16 @@ hy-mem doctor             # 端到端自检：SDK / 数据目录 / 嵌入端点 
 | **原地升级**（新 zip 解压覆盖旧目录） | `config.json`、`data/` 根本不在包里，原样保留，什么都不用做 |
 | **换目录升级**（解压到新目录） | 首次运行任意命令时自动探测：PATH 上若还指向旧安装（有 `config.json`），就沿用其配置，`storage.dataDir` 改指旧数据目录——**记忆原位复用，不拷贝** |
 
-换目录升级时 stderr 会打三行说明（检测到旧安装 / 配置写到哪 / 数据目录在哪）。接管只在「当前无 config.json」时发生一次，之后不再探测。两个退出开关：`HY_MEM_NO_ADOPT=1`（禁用自动接管，走全新向导）、`HY_MEM_CONFIG=<文件>`（本就自管配置，接管自动让位）。接管完成后旧安装目录可整个删掉——数据已通过 `dataDir` 引用，但删除前先把旧 `data/` 挪到新位置并改一次 `hy-mem config set storage.dataDir=<新路径>`。
+换目录升级时 stderr 会打四行说明（检测到旧安装 / 配置写到哪 / 数据目录在哪 / migrate 提示）。接管只在「当前无 config.json」时发生一次，之后不再探测。两个退出开关：`HY_MEM_NO_ADOPT=1`（禁用自动接管，走全新向导）、`HY_MEM_CONFIG=<文件>`（本就自管配置，接管自动让位）。
+
+接管后数据仍留在旧安装目录（`dataDir` 指过去，不拷贝）。想收进当前安装、之后彻底删掉旧目录，跑一次：
+
+```bash
+hy-mem migrate          # 数据复制到 <安装根>/data 并改写 dataDir；原目录保留作备份
+hy-mem version --json   # 版本与安装信息（自动升级比对用）
+```
+
+`migrate` 在后台 worker 运行中会拒绝执行（防止新旧目录数据分家），等它空闲自退后再跑；目标目录非空也拒绝。
 
 命令跑不起来时按这个顺序查：`hy-mem --version`（找不到 → 走 install）→ `hy-mem skill`（宿主没看到帮助 → 走 skill --install）→ `hy-mem doctor`（配置问题）→ `hy-mem tui-test`（只影响人在终端里的按键）。
 

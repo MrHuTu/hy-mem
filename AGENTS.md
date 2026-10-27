@@ -26,7 +26,7 @@
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
 | 源码规模 | **21 个 py，9844 行**（`cli/` 15 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
-| 子命令 | **25** 个（0.9.6 新增 `mcp`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
+| 子命令 | **27** 个（0.9.6 新增 `mcp` / `version` / `migrate`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
 | 测试用例 | **268**（UI 92 / setup 103 / CLI 73） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **351 MB**（exe 本体 27.5 MB）；对外分发的是 `dist/hy-mem-0.9.5-win64.zip` **152 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
@@ -52,7 +52,7 @@ D:\tools_open\agent-bridge\
 │
 ├── cli\                       ← 全部业务代码（全部可改，改完必须跑测试）
 │   ├── _pyi_entry.py          ← 打包入口。只做两件事：冻结进程强制 UTF-8、转发 main
-│   ├── hy_mem_cli.py   (2530) ← 大脑：25 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
+│   ├── hy_mem_cli.py   (2732) ← 大脑：27 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
 │   ├── helptext.py      (579) ← 命令规格单一真源（`help` / `help --json` 的数据源）
 │   ├── config.py        (461) ← config.json 读写 + env 映射 + 校验 + 身份默认值
 │   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0
@@ -62,9 +62,9 @@ D:\tools_open\agent-bridge\
 │   ├── runtime_check.py (323) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
 │   ├── store.py         (333) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
 │   ├── storage_ops.py   (197) ← 数据目录运维：用量 / 剩余空间 / 迁移 / 备份 / 重建
-│   ├── install_ops.py   (416) ← 生成 PATH 启动器（`hy-mem install`，双入口 + 旧壳接管 + 升级时沿用旧安装配置/数据）
+│   ├── install_ops.py   (417) ← 生成 PATH 启动器（`hy-mem install`，双入口 + 旧壳接管 + 升级时沿用旧安装配置/数据）
 │   ├── skill_ops.py     (106) ← SKILL.md 定位 / 一致性 / 分发到 5 个宿主
-│   ├── mcp_server.py    (~330) ← MCP stdio 服务（`hy-mem mcp`）：JSON-RPC 2.0，4 个记忆工具，进程内直调 SDK，日志走 stderr
+│   ├── mcp_server.py    (387) ← MCP stdio 服务（`hy-mem mcp`）：JSON-RPC 2.0，5 个工具（4 记忆 + get_version），进程内直调 SDK，日志走 stderr
 │   ├── presets.py       (239) ← 向量/LLM/模式预设（数字全部实测，别凭想象改 dims）
 │   └── local_embedder.py (112) ← 本地 ONNX 嵌入（零 key 备选，512 维，fastembed）
 │
@@ -224,7 +224,7 @@ D:\tools_open\agent-bridge\
 
 ---
 
-## 7. 命令面（25 个）
+## 7. 命令面（27 个）
 
 | 分组 | 命令 |
 |---|---|
