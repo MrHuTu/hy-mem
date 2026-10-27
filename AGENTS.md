@@ -3,7 +3,7 @@
 > **读者**：没有历史上下文的 AI（或接手的人）。
 > **目标**：只读这一份，就能改代码、跑测试、打 exe、排障、判断该不该动。
 > **边界**：本文件是**开发者视角**。面向调用方（智能体实际怎么用命令）的说明在 `skill/hy-mem/SKILL.md`，那份会被打包进产物发出去，两者不重复。
-> **最后校准**：2026-10-27，对应 hy-mem **0.9.6**。文中所有数字都是实测值，附了复核命令。
+> **最后校准**：2026-10-28，对应 hy-mem **0.9.8**。文中所有数字都是实测值，附了复核命令。
 
 ---
 
@@ -19,14 +19,14 @@
 
 | 项 | 值 | 复核方式 |
 |---|---|---|
-| 版本 | `0.9.6`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
+| 版本 | `0.9.8`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
 | 语言/运行时 | Python **3.12.10**，venv 在 `.venv/` | `.venv/Scripts/python.exe -V` |
 | 核心 SDK | `hy-memory 2.0.5` | `.venv/Scripts/python.exe -m pip show hy-memory` |
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
 | 源码规模 | **21 个 py，11337 行**（`cli/` 15 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
-| 子命令 | **29** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
+| 子命令 | **29** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes`，改为单 supervisor 进程 + 消费线程池，重试改延迟队列 `jobs.not_before`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
 | 测试用例 | **279**（UI 92 / setup 103 / CLI 84） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **351 MB**（exe 本体 27.5 MB）；对外分发的是 `dist/hy-mem-0.9.5-win64.zip` **152 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
@@ -247,6 +247,9 @@ D:\tools_open\agent-bridge\
 | `scripts/test_ui.py` | **92** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航 | `.venv/Scripts/python.exe scripts/test_ui.py` |
 | `scripts/test_setup.py` | **103** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像** | `.venv/Scripts/python.exe scripts/test_setup.py` |
 | `scripts/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
+| `scripts/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe scripts/test_queue.py` |
+| `scripts/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe scripts/test_concurrency.py [exe]` |
+| `scripts/test_mcp.py` | **18** | MCP stdio 七工具端到端：握手/tools/list/add→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe scripts/test_mcp.py [exe]` |
 
 ```bash
 # 源码模式

@@ -191,15 +191,16 @@ hy-mem add --async --tag infra "消息队列用 RocketMQ，4.9.4"
 
 ```
 add --async  →  写 SQLite 队列（立即返回 job_id）
-                ↳ 队列无人消费时**自动拉起后台 worker**（并发上限 3，空闲 90s 自退出，
-                  30s 抢不到任务也提前退出；无黑窗。上限可用 HY_MEM_MAX_WORKERS 调）
-worker       →  单写者消费，串行落库，失败重试，超次数进死信
+                ↳ 队列无人消费时**自动拉起后台消费进程**（恒 1 个 supervisor 进程，
+                  进程内 3 个消费线程；空闲 90s 自退出，30s 抢不到任务也提前退出；
+                  无黑窗。线程数可用 HY_MEM_MAX_WORKERS 调，手动跑可用 --lanes 覆盖）
+worker       →  supervisor + 线程池消费，串行落库，失败延迟重试，超次数进死信
 ```
 
 **0.9.6 起 `add --async` 不再需要手动跑 worker**：入队时检测心跳，没有活着的 worker 就自动拉起一个临时的。`--json` 输出里 `workerSpawned: true` 表示已拉起、`workerLive: true` 表示已有 worker 在跑。手动跑 worker 仍然可用（调试/补漏）。
 
 ```bash
-# 消费队列：清空即退出
+# 消费队列：清空即退出（延迟重试任务留待下次）
 hy-mem worker --once
 
 # 常驻：空闲 60s 自动退出（适合桌面端按需拉起）
@@ -207,6 +208,9 @@ hy-mem worker --idle-exit 60
 
 # 只处理 3 个任务后退出（限流）
 hy-mem worker --max 3
+
+# 手动指定消费线程数（默认取 HY_MEM_MAX_WORKERS=3）
+hy-mem worker --lanes 2
 
 # 查看队列 / 等清空 / 重投死信
 hy-mem queue
@@ -218,9 +222,10 @@ hy-mem retry dead        # 全部死信重投
 
 规则：
 
-- **同一时刻只应有一个 worker**。多 worker 不会重复消费（原子 `UPDATE ... WHERE status='pending'` 抢占），但会让写入排队无意义地变长。
-- worker 崩溃留下的 `running` 任务，下次启动自动回收（`HY_MEM_STALE_SEC`，默认 900s）。
-- 队列库 = `MEMORY_DATA_DIR/hy_mem_queue.db`，与记忆库同一个 data 目录，备份一起拷。
+- **0.9.8 起 worker 是「单 supervisor 进程 + 多消费线程」**。SDK 的 reconcile 是读改写序列，所有写入被跨进程写锁串行（锁覆盖整个 add 含 LLM 抽取），所以多消费**进程**是伪并发——只会排队，还各付一份 SDK 初始化与 chroma 竞态。消费线程只让锁外部分（snapshot 读、入账、退避调度）与在途写入重叠；吞吐上限恒为「一次一条写」。
+- **失败退避是延迟队列不是 sleep**：失败任务回到 `pending` 并带上 `not_before`（2/4/8…上限 30s 指数退避），到期前对 worker「不存在」，worker 立刻去领下一个任务——一个失败任务不再阻塞整个队列（Celery ETA/countdown 同款模式）。`hy-mem queue` 的 stats 里 `delayed` 就是这类「暂不可领」的数量。
+- worker 崩溃留下的 `running` 任务，下次启动自动回收（`HY_MEM_STALE_SEC`，默认 900s）；`retry` / 回收都会清 `not_before`，立即变回可领。
+- 队列库 = `MEMORY_DATA_DIR/hy_mem_queue.db`，与记忆库同一个 data 目录，备份一起拷。0.9.8 之前的旧库连接时自动补 `not_before` 列（幂等迁移，无需手动处理）。
 
 ### 入队 ≠ 入库（最容易被误解的一条）
 
@@ -260,7 +265,7 @@ hy-mem worker --once    # 消费掉（pro + 推理模型每条约 10~50s）
 - 时间过滤与翻页：`search_memory` 和 `list_memories` 都支持 `since` / `until`（两种写法：相对值 `30m`/`12h`/`7d`/`30d`/`1y`，或 ISO 日期 `2026-01-01`）与 `offset` 翻页；响应带 `has_more` / `next_offset`，还有更多就带 offset 接着翻。`list_memories` 另支持 `order`（`desc` 最新在前 / `asc` 最旧在前）。时间过滤优先按 `memory_at`（补录的发生时间），没有补录才按写入时间。
 - 工具失败时返回明确错误：`错误 [错误码] 原因` + `建议：修复方式`，宿主可直接转述给用户；参数错（空 query、缺 confirm）只说哪里错、不套运行时建议。
 - 身份：MCP 会话固定用默认身份（config 的 identity.userId），与 CLI 不传 `-u` 时同口径。
-- 命令行与 MCP 可共存：同一套 queue.db + WriteLock + 向量库；多子代理并发安全（WAL + busy_timeout + 跨进程写锁 + 启动自检探针按进程隔离 + 写入瞬态自动重试）。
+- 命令行与 MCP 可共存：同一套 queue.db + WriteLock + 向量库；多子代理并发安全（WAL + busy_timeout + 跨进程写锁 + 启动自检探针按进程隔离 + 写入瞬态自动重试）。0.9.8 起异步消费是「单 supervisor 进程 + 多消费线程」，多进程并发 add 只会拉起一个消费进程。
 
 ## 标签与归档
 
