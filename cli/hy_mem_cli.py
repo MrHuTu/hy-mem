@@ -1812,6 +1812,18 @@ def cmd_install(args) -> int:
     else:
         lines.append("PATH 里还没有这个目录，加一下（然后把下面这条命令写进 SKILL.md 也行）：")
         lines.append("  " + str(install_ops.path_hint(path.parent)))
+    # 回收 PATH 上残留的旧 hy-mem 启动器（比如源码模式留在 ~/.local/bin 的壳），
+    # 否则它们排在 PATH 前面时会把调用引到失效入口——见 install_ops.adopt_stale 注释。
+    adopted, adopt_notes = install_ops.adopt_stale()
+    payload["adopted"] = [str(p) for p in adopted]
+    payload["adoptNotes"] = adopt_notes
+    if adopted:
+        lines.append("")
+        lines.append(f"接管了 {len(adopted)} 个旧启动器：")
+        lines.extend("  " + n for n in adopt_notes)
+    elif adopt_notes:
+        lines.append("")
+        lines.extend("  " + n for n in adopt_notes)
     return ok(payload, args.json, "\n".join(lines))
 
 
