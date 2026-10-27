@@ -370,6 +370,15 @@ def handle(msg: dict) -> dict | None:
 
 def serve() -> int:
     """主循环：逐行读 stdin → 派发 → 写 stdout（一行一个响应）。"""
+    # MCP stdio 规范：字节流是 UTF-8。不显式声明的话 exe 会按控制台代码页
+    # （cp936）解 stdin——宿主发来的 UTF-8 中文部分字节恰好是合法 GBK 序列、
+    # 部分不是，产生孤立代理字符后在 sqlite 落库/编码时炸（时好时坏，纯看
+    # 字节运气）。stdout 同时固定 LF，去掉 Windows 文本模式的 \r。
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+        sys.stdout.reconfigure(encoding="utf-8", newline="\n")
+    except Exception:  # noqa: BLE001  非 tty/被重定向的极端场景保底
+        pass
     print(f"hy-mem mcp server {SERVER_VERSION} ready (stdio)", file=sys.stderr)
     for line in sys.stdin:
         line = line.strip()
