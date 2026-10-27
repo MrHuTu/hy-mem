@@ -325,6 +325,42 @@ def resolve_llm_key(cfg: dict) -> str:
     return ""
 
 
+# 从聊天窗口/文档粘密钥时最容易带进来的不可见字符
+_INVISIBLE = {
+    "\ufeff": "BOM 标记",
+    "\u200b": "零宽空格",
+    "\u200c": "零宽连接符",
+    "\u200d": "零宽连字",
+    "\u00a0": "不换行空格",
+    "\u3000": "全角空格",
+}
+
+
+def secret_charset_problem(raw: str) -> str | None:
+    """密钥只可能是 ASCII 可见字符；返回问题描述，None 表示没问题。
+
+    为什么必须校验：key 最终进 HTTP 头 `Authorization: Bearer <key>`，而
+    `http.client` 用 **latin-1** 编码头，遇到中文会在「发请求」那一刻抛
+    `UnicodeEncodeError: 'latin-1' codec can't encode characters in position 7-9`
+    —— 第 7 位之后正好是 key 的头几个字符（"Bearer " 占 7 位）。请求根本没
+    发出，但报错长得像网络故障，界面上只剩 `HTTP 0` 或一串偏移量。
+    2026-10-27 有用户在向导里把中文粘进密钥框，就这么卡住。
+
+    放在 config 里而不是 tui 里，是因为三处都要用同一套判定：
+    向导输入口（`tui.ask_secret`）、配置闸门（`readiness`）、doctor 探活。
+    """
+    for pos, ch in enumerate(raw):
+        if ch in _INVISIBLE:
+            return f"第 {pos + 1} 位是{_INVISIBLE[ch]}（多半是粘自聊天窗口）"
+        if ord(ch) > 127:
+            return f"第 {pos + 1} 位是「{ch}」（非 ASCII 字符）"
+        if ch.isspace():
+            return f"第 {pos + 1} 位是空白字符"
+        if ord(ch) < 32:
+            return f"第 {pos + 1} 位是控制字符（0x{ord(ch):02x}）"
+    return None
+
+
 def to_env(cfg: dict) -> dict[str, str]:
     emb = cfg.get("embedding") or {}
     llm = cfg.get("llm") or {}

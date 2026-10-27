@@ -28,12 +28,14 @@ os.environ["HY_MEM_TUI"] = "0"
 (TMP / "home").mkdir(parents=True, exist_ok=True)
 
 import config as cfgmod  # noqa: E402
+import netprobe  # noqa: E402
 import setup_wizard  # noqa: E402
 import storage_ops  # noqa: E402
 import tui  # noqa: E402
 
 # stub() 会把 probe_llm 换成桩，这里先留一份真身，供第 7 节的判定逻辑测试用。
 _REAL_PROBE_LLM = setup_wizard.probe_llm
+_REAL_PROBE_EMB = setup_wizard.probe_embedding
 
 results: list[bool] = []
 
@@ -161,35 +163,46 @@ def main() -> int:
     print("\n推理模型探测")
 
     def fake_post(content="", reasoning="", finish="stop", status=200):
-        def _p(url, body, key, timeout, insecure):
+        def _p(url, payload, key="", timeout=45, insecure=False, key_label="API Key"):
             msg = {"role": "assistant", "content": content}
             if reasoning:
                 msg["reasoning_content"] = reasoning
-            return status, {"choices": [{"message": msg, "finish_reason": finish}]}, 0.4
+            # 现在只有两种结果：Sent（发出去了，带真实状态码）/ NotSent（没发出）。
+            # 这里返回 Sent —— 状态码是服务器给的，不会再出现 0。
+            return netprobe.Sent(status, {"choices": [{"message": msg, "finish_reason": finish}]}, 0.4)
 
         return _p
 
-    orig_post = setup_wizard._post_json
+    orig_post = netprobe.post_json
     base = {"baseUrl": "https://x/v1", "model": "m", "apiKey": "k"}
     try:
-        setup_wizard._post_json = fake_post("可用")
+        netprobe.post_json = fake_post("可用")
         ok1, d1 = _REAL_PROBE_LLM(dict(base))
         check("content 有内容 → 可用", ok1, d1)
 
-        setup_wizard._post_json = fake_post("", "想了一大段", "length")
+        netprobe.post_json = fake_post("", "想了一大段", "length")
         ok2, d2 = _REAL_PROBE_LLM(dict(base))
         check("推理模型 content 空 → 仍判可用", ok2, d2)
         check("提示里点明是推理模型", "推理模型" in d2, d2)
 
-        setup_wizard._post_json = fake_post("", "", "stop")
+        netprobe.post_json = fake_post("", "", "stop")
         ok3, d3 = _REAL_PROBE_LLM(dict(base))
         check("真·空响应 → 不可用", not ok3, d3)
 
-        setup_wizard._post_json = fake_post("", "", "stop", 401)
+        netprobe.post_json = fake_post("", "", "stop", 401)
         ok4, d4 = _REAL_PROBE_LLM(dict(base))
         check("HTTP 401 → 不可用", not ok4, d4)
+
+        # 请求没发出（DNS 失败）时，文案里不能出现任何 HTTP 状态码
+        netprobe.post_json = lambda *a, **k: netprobe.NotSent(
+            "请求没有发出：域名解析失败（检查 baseUrl 拼写）", cause="dns"
+        )
+        ok5, d5 = _REAL_PROBE_LLM(dict(base))
+        check("未发出 → 不可用", not ok5, d5)
+        check("未发出的文案里没有 HTTP", "HTTP" not in d5, d5)
+        check("未发出的文案点明原因", "没有发出" in d5 and "解析" in d5, d5)
     finally:
-        setup_wizard._post_json = orig_post
+        netprobe.post_json = orig_post
 
     # ---- 8. 队列积压要能被看见 ----
     # 起因：异步写入只入队不落库，用户写完立刻检索 → 0 条，以为记忆丢了。
@@ -328,6 +341,117 @@ def main() -> int:
             os.environ["MEMORY_DATA_DIR"] = _dd
         else:
             os.environ.pop("MEMORY_DATA_DIR", None)
+
+    # ---- N. 密钥粘进中文：预检就拦住，绝不出 "HTTP 0" ----
+    # 真触发点：http.client 用 latin-1 编码请求头，key 含非 ASCII 时在「发请求」
+    # 那一刻抛 UnicodeEncodeError，请求根本没出去（2026-10-27 用户实测踩到）。
+    # 现在不等异常发生 —— netprobe.precheck 在组包之前就判定「进不了 HTTP 报文」。
+    print("\n密钥含非 ASCII（中文粘贴） / 请求未发出")
+    _r = netprobe.post_json("https://example.invalid/v1/embeddings", {"model": "m"}, "没有啊", 5)
+    check("判定为「未发出」", isinstance(_r, netprobe.NotSent), type(_r).__name__)
+    check("原因归类为 precheck", getattr(_r, "cause", "") == "precheck", getattr(_r, "cause", ""))
+    check("指到具体位置（第 1 位）", "第 1 位" in _r.reason, _r.reason)
+    check("文案里不出现 HTTP", "HTTP" not in _r.reason, _r.reason)
+
+    for _bad, _label in (
+        ("sk-ab\u3000cd", "全角空格"),
+        ("sk-ab\u200bcd", "零宽空格"),
+        ("\ufeffsk-ab", "BOM 标记"),
+        ("sk-ab cd", "半角空格"),
+    ):
+        _rb = netprobe.post_json("https://example.invalid/v1/embeddings", {}, _bad, 1)
+        check(f"{_label} 被拦下", isinstance(_rb, netprobe.NotSent) and _rb.cause == "precheck", _rb.reason)
+
+    # 地址里混进中文（路径含中文）同样在预检挡住
+    _ru = netprobe.post_json("https://example.invalid/v1/嵌入", {}, "sk-ok", 1)
+    check("地址含中文被拦下", isinstance(_ru, netprobe.NotSent) and "路径" in _ru.reason, _ru.reason)
+
+    # 真正会「没发出」的另一类：主机不可达。文案要指向网络原因，不是 HTTP。
+    _rd = netprobe.post_json("https://no-such-host-hymem.invalid/v1/embeddings", {"model": "m"}, "sk-ok", 2)
+    check("不可达主机 → 未发出", isinstance(_rd, netprobe.NotSent), type(_rd).__name__)
+    check("不可达主机不出现 HTTP", "HTTP" not in _rd.reason, _rd.reason)
+
+    # 各网络分支的文案单测 —— 不依赖本机 DNS/代理行为（有的网络会把不存在的
+    # 域名劫持成一个假 IP，于是表现为超时而非解析失败）。
+    import socket as _socket
+
+    _dns = netprobe._from_net_error(_socket.gaierror(11001, "getaddrinfo failed"), 5, 0.0)
+    check("DNS 文案点明解析", "解析" in _dns.reason, _dns.reason)
+    check("DNS 文案给出下一步", "baseUrl" in _dns.reason, _dns.reason)
+    check("DNS 归类正确", _dns.cause == "dns", _dns.cause)
+
+    _ref = netprobe._from_net_error(ConnectionRefusedError(10061, "Connection refused"), 5, 0.0)
+    check("拒连文案点明端口", "拒绝" in _ref.reason, _ref.reason)
+
+    _tls = netprobe._from_net_error(Exception("certificate verify failed"), 5, 0.0)
+    check("证书文案点明 TLS", "证书" in _tls.reason, _tls.reason)
+
+    _to = netprobe._from_net_error(TimeoutError("timed out"), 5, 0.0)
+    check("超时文案带秒数", "5s" in _to.reason, _to.reason)
+
+    # 走代理时 urllib 会把「代理自己报的 502」塞进 reason，不能让人误读成目标服务 502
+    _px = netprobe._from_net_error(Exception("Tunnel connection failed: 502 Bad Gateway"), 5, 0.0)
+    check("代理失败点明是代理", "代理" in _px.reason, _px.reason)
+    check("代理失败不甩 502 原文", "502" not in _px.reason, _px.reason)
+
+    # 类型层面就堵死：不许构造 status=0 的「成功结果」
+    try:
+        netprobe.Sent(0, {}, 0.1)
+        check("Sent 拒绝 status=0", False, "竟然构造成功了")
+    except ValueError:
+        check("Sent 拒绝 status=0", True)
+
+    _ok, _msg, _dims = _REAL_PROBE_EMB(
+        {"provider": "openai", "baseUrl": "https://example.invalid/v1", "model": "m", "apiKey": "没有啊"},
+        timeout=5,
+    )
+    check("probe 判定不可用", not _ok, _msg)
+    check("不再出现裸的 HTTP 0", "HTTP 0" not in _msg, _msg)
+    check("说是「请求没有发出」", "没有发出" in _msg, _msg)
+
+    _ok2, _msg2 = _REAL_PROBE_LLM(
+        {"baseUrl": "https://example.invalid/v1", "model": "m", "apiKey": "sk-中文key"},
+        timeout=5,
+    )
+    check("LLM 侧同样给人话", (not _ok2) and "非 ASCII" in _msg2, _msg2)
+
+    # ---- O. 状态码要自带「下一步」，不能只甩英文原文 ----
+    print("\nHTTP 状态码 → 下一步")
+    check("401 指向密钥", "密钥" in netprobe.status_hint(401), netprobe.status_hint(401))
+    check("404 指向路径", "路径" in netprobe.status_hint(404), netprobe.status_hint(404))
+    check("429 指向限流", "限流" in netprobe.status_hint(429), netprobe.status_hint(429))
+    check("未知码不硬编提示", netprobe.status_hint(418) == "", netprobe.status_hint(418))
+
+    _h = netprobe.explain(netprobe.Sent(401, {"error": {"message": "invalid key"}}, 0.1))
+    check("explain = 状态码 + 原文 + 下一步", _h.startswith("HTTP 401") and "invalid key" in _h and "密钥" in _h, _h)
+    _hn = netprobe.explain(netprobe.NotSent("请求没有发出：域名解析失败"))
+    check("explain 对未发出不加 HTTP 字样", _hn == "请求没有发出：域名解析失败", _hn)
+
+    # ---- P. 源码守卫：出站请求只能从 netprobe 走 ----
+    # 这几条是「杜绝」的机制保证：以后谁想再加一个 HTTP 调用点，如果自己拼
+    # urlopen / 又造出 status=0 的约定，测试直接失败，而不是等用户双击闪退。
+    print("\n出站请求收口（源码守卫）")
+    import re as _re
+
+    _urlopen_offenders, _zero_offenders = [], []
+    # 不只扫 urlopen：直接 import urllib.request / requests / httpx 也算自己造轮子
+    _net_import = _re.compile(
+        r"^\s*(?:import|from)\s+(?:urllib\.request|requests|httpx)\b", _re.M
+    )
+    for _p in sorted((ROOT / "cli").glob("*.py")):
+        if _p.name == "netprobe.py":
+            continue
+        _src = _p.read_text(encoding="utf-8")
+        if "urlopen(" in _src or _net_import.search(_src):
+            _urlopen_offenders.append(_p.name)
+        if _re.search(r"status\s*==\s*0", _src) or _re.search(r"return\s+0,\s*\{", _src):
+            _zero_offenders.append(_p.name)
+    check("cli/ 下只有 netprobe 能发 HTTP", not _urlopen_offenders, str(_urlopen_offenders))
+    check("cli/ 下不再有 status==0 的约定", not _zero_offenders, str(_zero_offenders))
+
+    _net = (ROOT / "cli" / "netprobe.py").read_text(encoding="utf-8")
+    check("netprobe 拒绝 status<100", "self.status < 100" in _net)
+    check("netprobe 发送前预检", "precheck(url, key" in _net or "precheck(" in _net)
 
     bad = results.count(False)
     print(f"\n{'全部通过' if not bad else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")

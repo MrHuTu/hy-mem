@@ -60,6 +60,8 @@ import sys
 import time
 import unicodedata
 
+import config as cfgmod
+
 # ANSI 控制序列
 _MOUSE_ON = "\x1b[?1000h\x1b[?1006h"
 _MOUSE_OFF = "\x1b[?1000l\x1b[?1006l"
@@ -1116,6 +1118,22 @@ def ask(
         return raw
 
 
+def _secret_problem(raw: str) -> str | None:
+    """密钥字符集校验；返回人话描述，None 表示没问题。
+
+    判定逻辑在 `config.secret_charset_problem`（向导、配置闸门、doctor 共用一份），
+    这里只负责在交互场景补一句「接下来怎么办」。
+    """
+    base = cfgmod.secret_charset_problem(raw)
+    if not base:
+        return None
+    if "非 ASCII" in base:
+        return base + "，密钥只能是英文字母、数字、- 和 _（是不是把中文说明或模型名粘进来了？）"
+    if "空白" in base:
+        return base + "，密钥中间不该有空格或换行"
+    return base + "，请重新粘贴"
+
+
 def ask_secret(question: str, default: str = "", hint: str | None = None) -> str:
     """密钥输入。回显为 *，有 default 时直接回车保留原值。
 
@@ -1128,6 +1146,9 @@ def ask_secret(question: str, default: str = "", hint: str | None = None) -> str
       * 复制 —— 鼠标拖选后右键（Windows Terminal 也可 Ctrl+Shift+C）。
         我们默认**不抢鼠标**，所以终端自己的选择和复制一直可用。
     也正因为不抢鼠标，输入行不会因为拖拽事件被反复重绘。
+
+    输入后先做字符集校验（见 `_secret_problem`），不合格就**当场重问**，
+    不落盘、也不发那一次注定失败的请求。
     """
     print(c.dim("  粘贴：Ctrl+V 或右键直接贴；复制：鼠标拖选后右键。Ctrl+C 是中断，别用它复制。"))
     if hint:
@@ -1136,13 +1157,19 @@ def ask_secret(question: str, default: str = "", hint: str | None = None) -> str
         prompt = f"  {c.gray('›')} {question} {c.dim('[已设置，回车保留 / 输入新值覆盖]')}: "
     else:
         prompt = f"  {c.gray('›')} {question}: "
-    raw = (_line_edit(prompt, secret=True) or "").strip()
-    if raw:
+    while True:
+        raw = (_line_edit(prompt, secret=True) or "").strip()
+        if not raw:
+            if default:
+                note("沿用原值")
+            return default
+        problem = _secret_problem(raw)
+        if problem:
+            err(problem)
+            print(c.dim("  重新粘贴即可；要退出向导按 Ctrl+C，稍后用 hy-mem setup 重来。"))
+            continue
         note(f"已读取 {len(raw)} 个字符" + (f"，{raw[:6]}…{raw[-4:]}" if len(raw) > 12 else ""))
         return raw
-    if default:
-        note("沿用原值")
-    return default
 
 
 def confirm(question: str, default: bool = False, *, allow_cancel: bool = False) -> bool:

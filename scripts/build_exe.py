@@ -74,6 +74,7 @@ ARGS = [
     "--hidden-import", "helptext",
     "--hidden-import", "local_embedder",
     "--hidden-import", "runtime_check",
+    "--hidden-import", "netprobe",
     # SDK 及其动态子模块
     "--collect-submodules", "hy_memory",
     "--collect-submodules", "chromadb",

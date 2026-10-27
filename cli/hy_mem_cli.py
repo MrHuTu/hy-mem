@@ -22,6 +22,7 @@ import sys
 import time
 from pathlib import Path
 
+import netprobe
 import store
 
 
@@ -314,6 +315,32 @@ def readiness(cfg: dict | None = None) -> dict:
                 "LLM 密钥未设置（配置文件与环境变量都没有）",
                 "hy-mem setup --step llm   或   set " + (llm.get("keyEnv") or "MEMORY_LLM_API_KEY") + "=<key>",
             )
+
+    # 字符集闸门：key 进的是 HTTP 头，http.client 用 latin-1 编码，中文/全角/零宽
+    # 会在**请求发出前**炸成 UnicodeEncodeError（报的是 "position 7-9" 这种偏移量），
+    # 用户只看到 HTTP 0，当成网络故障查半天。放在闸门里，一次拦住所有调用路径
+    # （add / search / doctor 都先过 require_ready）。
+    def charset(item: str, label: str, value, fix: str) -> None:
+        if not value:
+            return
+        bad = cfgmod.secret_charset_problem(str(value))
+        if bad:
+            add(item, f"{label}{bad} —— 只能是 ASCII 字符", fix)
+
+    charset(
+        "embedding.apiKey",
+        "向量模型密钥",
+        emb.get("apiKey") or os.getenv("MEMORY_EMBEDDER_API_KEY"),
+        "hy-mem setup --step embedding",
+    )
+    if mode in ("pro", "ultra"):
+        charset("llm.apiKey", "LLM 密钥", cfgmod.resolve_llm_key(cfg), "hy-mem setup --step llm")
+    for item, label, value, fix in (
+        ("embedding.baseUrl", "向量模型入口", emb.get("baseUrl"), "hy-mem setup --step embedding"),
+        ("embedding.model", "向量模型名", emb.get("model"), "hy-mem setup --step embedding"),
+    ):
+        if value and not str(value).isascii():
+            add(item, f"{label}含非 ASCII 字符，URL/模型名只能是 ASCII", fix)
     return {"ok": not missing, "mode": mode, "missing": missing}
 
 
@@ -574,31 +601,28 @@ def cmd_doctor(args) -> int:
         if not key:
             check("embedding_live", False, "MEMORY_EMBEDDER_API_KEY 为空", fatal=False)
         else:
-            try:
-                import urllib.request
-
-                body = json.dumps({"model": model, "input": "健康检查"}).encode()
-                req = urllib.request.Request(
-                    f"{base}/embeddings",
-                    data=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {key}",
-                    },
-                )
-                t0 = time.time()
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    payload = json.loads(resp.read().decode())
-                ms = int((time.time() - t0) * 1000)
-                vec = (payload.get("data") or [{}])[0].get("embedding") or []
+            res = netprobe.post_json(
+                f"{base}/embeddings",
+                {"model": model, "input": "健康检查"},
+                key,
+                timeout=30,
+                key_label="MEMORY_EMBEDDER_API_KEY",
+            )
+            if isinstance(res, netprobe.NotSent):
+                # 请求没离开本机（密钥/地址含非 ASCII、DNS、连接被拒、超时）。
+                # 它和「服务器返回了错误码」是两回事，绝不能写成 HTTP 0。
+                check("embedding_live", False, res.reason)
+            elif res.status != 200:
+                check("embedding_live", False, netprobe.explain(res))
+            else:
+                ms = int(res.seconds * 1000)
+                vec = (res.payload.get("data") or [{}])[0].get("embedding") or []
                 dims = len(vec)
                 good = dims > 0 and (want_dims == 0 or dims == want_dims)
                 detail = f"{dims} 维 / {ms}ms"
                 if want_dims and dims != want_dims:
                     detail += f"（与 MEMORY_EMBEDDING_DIMS={want_dims} 不一致！会导致写入失败）"
                 check("embedding_live", good, detail)
-            except Exception as e:  # noqa: BLE001
-                check("embedding_live", False, f"请求失败: {e}")
 
     # 4. 模式与 LLM（lite 不需要 LLM）
     mode = args.mode or os.getenv("MEMORY_MODE", "pro")
@@ -611,34 +635,29 @@ def cmd_doctor(args) -> int:
             check("llm_config", False, f"{mode} 模式必须配 LLM（缺 base_url/key/model）")
         else:
             check("llm_config", True, f"{lmod} @ {lm}")
-            try:
-                import urllib.request
-
-                body = json.dumps(
-                    {
-                        "model": lmod,
-                        "messages": [{"role": "user", "content": "回复ok"}],
-                        # 不能给小值。推理模型（deepseek-v4 / kimi-k2.5 / claude 系）
-                        # 会先把输出配额花在 thinking 上，8 个 token 连思考都写不完，
-                        # 于是 content 永远是空串。这个坑曾让 doctor 对一个完全可用
-                        # 的模型报「环境不可用」，而真实抽取流程（agent_max_tokens
-                        # 默认 2000）一直是好的 —— 纯粹是探针自身太抠。
-                        "max_tokens": 512,
-                    }
-                ).encode()
-                req = urllib.request.Request(
-                    f"{lm}/chat/completions",
-                    data=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {lk}",
-                    },
-                )
-                t0 = time.time()
-                with urllib.request.urlopen(req, timeout=45) as resp:
-                    payload = json.loads(resp.read().decode())
-                ms = int((time.time() - t0) * 1000)
-                _ch = (payload.get("choices") or [{}])[0]
+            res = netprobe.post_json(
+                f"{lm}/chat/completions",
+                {
+                    "model": lmod,
+                    "messages": [{"role": "user", "content": "回复ok"}],
+                    # 不能给小值。推理模型（deepseek-v4 / kimi-k2.5 / claude 系）
+                    # 会先把输出配额花在 thinking 上，8 个 token 连思考都写不完，
+                    # 于是 content 永远是空串。这个坑曾让 doctor 对一个完全可用
+                    # 的模型报「环境不可用」，而真实抽取流程（agent_max_tokens
+                    # 默认 2000）一直是好的 —— 纯粹是探针自身太抠。
+                    "max_tokens": 512,
+                },
+                lk,
+                timeout=45,
+                key_label="MEMORY_LLM_API_KEY",
+            )
+            if isinstance(res, netprobe.NotSent):
+                check("llm_live", False, res.reason)
+            elif res.status != 200:
+                check("llm_live", False, netprobe.explain(res))
+            else:
+                ms = int(res.seconds * 1000)
+                _ch = (res.payload.get("choices") or [{}])[0]
                 _msg = _ch.get("message") or {}
                 reply = str(_msg.get("content") or "").strip()
                 think = str(_msg.get("reasoning_content") or "").strip()
@@ -656,8 +675,6 @@ def cmd_doctor(args) -> int:
                         False,
                         f"{ms}ms 空响应 finish_reason={fin!r}：端点通但模型没给内容",
                     )
-            except Exception as e:  # noqa: BLE001
-                check("llm_live", False, f"调用失败: {type(e).__name__}: {str(e)[:120]}")
 
     # 5. 异步队列与写锁（worker 依赖这两个，坏了会静默丢任务）
     try:
@@ -2364,6 +2381,17 @@ def classify_error(e: BaseException) -> tuple[int, str, str]:
     name = type(e).__name__
     if name == "Aborted":
         return EXIT_OK, "CANCELLED", ""
+    if name == "UnicodeEncodeError":
+        # 典型是 HTTP 头里有非 ASCII（http.client / httpx 都按 latin-1/ascii 编码
+        # 请求头），**请求根本没发出去**。这是「输入内容不对」，不是网络故障，
+        # 所以给 1（改配置能解决）而不是 2。
+        # 2026-10-27：中文粘进密钥就是这么一路冒到顶层的。
+        return (
+            EXIT_USAGE,
+            "E_CONFIG",
+            "密钥或地址里含非 ASCII 字符（中文/全角/零宽），只能是 ASCII；"
+            "重跑 hy-mem setup --step embedding 重新填一次",
+        )
     if name in _INTERNAL_TYPES:
         return EXIT_INTERNAL, "E_INTERNAL", "这多半是程序缺陷：加 --verbose 复跑可拿到堆栈"
     if name in _RUNTIME_TYPES:

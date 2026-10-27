@@ -23,14 +23,11 @@
 
 from __future__ import annotations
 
-import json
 import os
-import ssl
 import time
-import urllib.error
-import urllib.request
 
 import config as cfgmod
+import netprobe
 import presets
 import storage_ops
 import tui
@@ -41,49 +38,13 @@ PROBE_TEXT = "招商活动报名审批流用自研 FSM 落库"
 
 # --------------------------------------------------------------------------
 # 远程探测
+#
+# 真实 HTTP 请求统一走 netprobe，只有两种结果：
+#   Sent    —— 请求发出去了，带服务器给的真实状态码（一定 >= 100）；
+#   NotSent —— 请求没离开本机，带可展示的原因。
+# 这里**故意不再有** status=0 这种「既不是成功也不是 HTTP 错误」的中间态：
+# 2026-10-27 的 HTTP 0 事故就是它造成的（中文粘进密钥 → latin-1 编码失败）。
 # --------------------------------------------------------------------------
-def _ssl_ctx(insecure: bool) -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    if insecure:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-def _post_json(url: str, payload: dict, key: str, timeout: int, insecure: bool) -> tuple[int, dict, float]:
-    body = json.dumps(payload, ensure_ascii=False).encode()
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx(insecure)) as resp:
-            return resp.status, json.loads(resp.read().decode()), time.time() - t0
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode(errors="replace")
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = {"raw": raw[:300]}
-        return e.code, parsed, time.time() - t0
-    except Exception as e:  # noqa: BLE001
-        return 0, {"error": f"{type(e).__name__}: {e}"}, time.time() - t0
-
-
-def _err_brief(payload: dict) -> str:
-    if not isinstance(payload, dict):
-        return str(payload)[:200]
-    e = payload.get("error")
-    if isinstance(e, dict):
-        return str(e.get("message") or e.get("code") or e)[:220]
-    if e:
-        return str(e)[:220]
-    if payload.get("raw"):
-        return str(payload["raw"])[:220]
-    return json.dumps(payload, ensure_ascii=False)[:220]
-
-
 def probe_embedding(emb: dict, timeout: int = 45) -> tuple[bool, str, int]:
     """真实请求一次嵌入。返回 (是否可用, 说明, 实测维度)。
 
@@ -109,22 +70,24 @@ def probe_embedding(emb: dict, timeout: int = 45) -> tuple[bool, str, int]:
     key = str(emb.get("apiKey") or "")
     if not base or not model:
         return False, "baseUrl / model 未填", 0
-    status, payload, dt = _post_json(
+    res = netprobe.post_json(
         f"{base}/embeddings",
         {"model": model, "input": [PROBE_TEXT]},
         key,
         timeout,
         bool(emb.get("insecureTls")),
+        key_label="向量模型密钥",
     )
-    ms = int(dt * 1000)
-    if status != 200:
-        hint = ""
-        if status == 404:
-            hint = "（404 通常是入口路径不对：百炼 MaaS 要用 /compatible-mode/v1，不是 /api/v1）"
-        return False, f"HTTP {status}: {_err_brief(payload)}{hint}", 0
+    if isinstance(res, netprobe.NotSent):
+        # 请求压根没离开本机（编码/DNS/连接/超时）。这里绝不能显示成 HTTP 错误。
+        return False, res.reason, 0
+    ms = int(res.seconds * 1000)
+    if res.status != 200:
+        return False, netprobe.explain(res), 0
+    payload = res.payload
     data = payload.get("data") or []
     if not data:
-        return False, "响应中没有 data 字段", 0
+        return False, "响应中没有 data 字段（这个地址可能不是 OpenAI 兼容的 /embeddings 接口）", 0
     vec = data[0].get("embedding") or []
     if not vec:
         return False, "响应中 embedding 为空", 0
@@ -143,7 +106,7 @@ def probe_llm(llm: dict, timeout: int = 45) -> tuple[bool, str]:
         return False, "baseUrl / model 未填"
     if not key:
         return False, "密钥为空（配置里的 apiKey 与 keyEnv 指向的变量都取不到）"
-    status, payload, dt = _post_json(
+    res = netprobe.post_json(
         f"{base}/chat/completions",
         {
             "model": model,
@@ -154,10 +117,14 @@ def probe_llm(llm: dict, timeout: int = 45) -> tuple[bool, str]:
         key,
         timeout,
         bool(llm.get("insecureTls")),
+        key_label="LLM 密钥",
     )
-    ms = int(dt * 1000)
-    if status != 200:
-        return False, f"HTTP {status}: {_err_brief(payload)}"
+    if isinstance(res, netprobe.NotSent):
+        return False, res.reason
+    ms = int(res.seconds * 1000)
+    if res.status != 200:
+        return False, netprobe.explain(res)
+    payload = res.payload
     choices = payload.get("choices") or []
     reply = think = fin = ""
     if choices:

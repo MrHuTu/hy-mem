@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -59,9 +60,15 @@ class LocalEmbeddingService:
         if self._model is None:
             # 国内直连 huggingface 基本会挂，默认走镜像；离线环境可设 HF_HUB_OFFLINE=1
             os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-            from fastembed import TextEmbedding
+            # 我们已经用 HF_HUB_DISABLE_PROGRESS_BARS=1 关掉进度条，但 fastembed /
+            # transformers 内部还会调 huggingface_hub 的 enable_progress_bars()，
+            # 于是每次都在控制台吐一条 UserWarning（"…has priority"）。它既不是
+            # 错误也不是用户能处理的事，向导里看着像报错，直接压掉。
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=".*[Cc]annot enable progress bars.*")
+                from fastembed import TextEmbedding
 
-            self._model = TextEmbedding(model_name=self._model_name, cache_dir=self._cache_dir)
+                self._model = TextEmbedding(model_name=self._model_name, cache_dir=self._cache_dir)
         return self._model
 
     def _embed_sync(self, text: str) -> List[float]:

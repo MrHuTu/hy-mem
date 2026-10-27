@@ -260,6 +260,52 @@ def main() -> int:
     check("人话里给修复命令", "setup --step embedding" in p.stdout, p.stdout.strip()[:120])
     check("人话里说明为什么拦", "配置不全" in p.stdout or "还没配好" in p.stdout)
 
+    # ---- 11b. 密钥含中文：闸门当场拦，不让它走到 HTTP 层 ----
+    # 真因：key 进 Authorization 头，http.client 用 latin-1 编码，中文会在请求
+    # 发出前炸成 UnicodeEncodeError（position 7-9），界面上只剩 HTTP 0。
+    print("\n密钥含非 ASCII（中文粘贴）")
+    cn_cfg = sandbox / "cfg-cn.json"
+    cn_cfg.write_text(
+        json.dumps(
+            {
+                "mode": "pro",
+                "embedding": {
+                    "provider": "openai",
+                    "baseUrl": "https://example.invalid/v1",
+                    "model": "m",
+                    "apiKey": "没有啊",
+                    "dims": 1024,
+                },
+                "llm": {
+                    "baseUrl": "https://example.invalid/v1",
+                    "model": "m",
+                    "apiKey": "sk-中文",
+                },
+                "storage": {"dataDir": str(sandbox / "data")},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    iso_cn = {
+        "HY_MEM_CONFIG": str(cn_cfg),
+        "HY_MEM_ENV_FILE": str(sandbox / "no-such.env"),
+        "MEMORY_EMBEDDER_API_KEY": None,
+        "MEMORY_LLM_API_KEY": None,
+        "YSJX_API_KEY": None,
+    }
+    t0 = time.time()
+    p = run(["--json", "search", "任意查询"], env_extra=iso_cn, timeout=60)
+    dt = time.time() - t0
+    ok, obj = one_json_object(p.stdout)
+    err = (obj or {}).get("error", {}) if ok and isinstance(obj, dict) else {}
+    missing = [m.get("item") for m in err.get("missing", [])] if isinstance(err, dict) else []
+    check("中文密钥被闸门拦下（exit 1）", p.returncode == 1, f"exit={p.returncode}")
+    check("列出 embedding.apiKey", "embedding.apiKey" in missing, str(missing))
+    check("列出 llm.apiKey", "llm.apiKey" in missing, str(missing))
+    check("判据是字符集不是缺项", "ASCII" in json.dumps(err, ensure_ascii=False), str(err)[:120])
+    check("不联网、直接返回", dt < 10, f"{dt:.1f}s")
+
     # ---- 12. help --json 收录新命令 ----
     print("\nhelp --json 收录新命令")
     p = run(["--help-json"])

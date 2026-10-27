@@ -330,6 +330,33 @@ def main() -> int:
     assert tui.dwidth("a中") == 3
     print("  PASS  dwidth/vwidth/trunc")
 
+    # 密钥字符集校验：中文/全角/零宽/空白都要当场拦下，否则会在发请求时炸成
+    # UnicodeEncodeError（'latin-1' codec can't encode ...），界面上只显示 HTTP 0。
+    print("\n密钥字符集校验")
+    cases_ok = [
+        ("sk-ws-abc123XYZ_-", True),
+        ("a" * 64, True),
+        ("", True),  # 空串由调用方决定沿用默认值，不算问题
+    ]
+    for s, want in cases_ok:
+        got = tui._secret_problem(s) is None
+        results.append(got == want)
+        print(("  PASS  " if got == want else "  FAIL  ") + f"合法密钥放行 {s[:16]!r}")
+
+    cases_bad = [
+        ("没有啊", "非 ASCII"),
+        ("sk-中文", "非 ASCII"),
+        ("sk-abc def", "空白"),
+        ("\ufeffsk-abc", "BOM"),
+        ("sk\u200b-abc", "零宽空格"),
+        ("sk\u3000abc", "全角空格"),
+    ]
+    for s, needle in cases_bad:
+        msg = tui._secret_problem(s) or ""
+        ok = bool(msg) and (needle in msg or "非 ASCII" in msg)
+        results.append(ok)
+        print(("  PASS  " if ok else "  FAIL  ") + f"拦下 {s[:10]!r:<14}{msg[:34]}")
+
     bad = results.count(False)
     print(f"\n{'全部通过' if not bad else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")
     return 1 if bad else 0

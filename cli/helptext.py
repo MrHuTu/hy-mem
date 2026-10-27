@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 
-VERSION = "0.9.3"
+VERSION = "0.9.5"
 
 PURPOSE = (
     "跨会话长期记忆库。把用户偏好、项目事实、决策与踩坑写进去，下次会话靠语义检索取回。"
