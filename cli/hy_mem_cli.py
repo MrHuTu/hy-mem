@@ -438,7 +438,23 @@ def make_client(mode: str | None):
         kwargs["mode"] = mode
     if svc is not None:
         kwargs["embedding_service"] = svc
-    return HyMemoryClient(**kwargs)
+    # SDK 在 __init__ 里初始化 hy_memory.log（TimedRotatingFileHandler）和
+    # chroma 向量库连接。多进程同秒并发初始化时 Windows 上会互踩：
+    #   - 日志打开/轮转 → PermissionError (Errno 13)
+    #   - chroma WAL -shm 重建窗口 → code 8 readonly database
+    # 实测并发风暴命中率约 1/4——指数退避重试，让先到者完成初始化。
+    last: Exception | None = None
+    for i in range(5):
+        try:
+            return HyMemoryClient(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            s = str(e).lower()
+            if not (isinstance(e, PermissionError)
+                    or "readonly" in s or "locked" in s or "busy" in s):
+                raise
+            last = e
+            time.sleep(0.2 * (i + 1))
+    raise last  # type: ignore[misc]
 
 
 def identity(args) -> dict:
@@ -900,14 +916,40 @@ def _filter_by_tags(items: list[dict], tags: list[str] | None, tag_mode: str = "
     return out
 
 
-def _spawn_detached_worker(idle_exit: float = 600.0) -> bool:
+def _worker_cap() -> int:
+    """同时存活的 detached worker 上限。HY_MEM_MAX_WORKERS 可覆盖。"""
+    try:
+        return max(1, int(os.getenv("HY_MEM_MAX_WORKERS") or 3))
+    except ValueError:
+        return 3
+
+
+def _spawn_detached_worker(idle_exit: float = 90.0) -> bool:
     """拉起一个脱管的后台 worker（空闲自退出），成功返回 True。
 
     为什么不常驻：智能体场景下「临时拉起 + 空闲自杀」最干净 —— add --async
     入队后立即返回毫秒级，落库由后台进程在 6~9s 内完成，不留僵尸进程。
     单写者由 WriteLock 与 SQLite 抢占兜底，即使拉重了也无害。
+
+    上限闸门：存活 worker（心跳 15s 内）达到 HY_MEM_MAX_WORKERS（默认 3）
+    就不再拉起——风暴竞态下最多超额 1~2 个，30s 内没抢到任务会自退。
     """
     import install_ops
+
+    # 上限闸门（WriteLock 内占位，串行化风暴竞态）：存活 worker 数达
+    # HY_MEM_MAX_WORKERS（默认 3）就不再拉起。占位行 15s 过期，Popen
+    # 失败也不会永久卡死后续拉起。
+    try:
+        with store.WriteLock():
+            conn = store.connect()
+            try:
+                slot = store.claim_worker_slot(conn, _worker_cap())
+            finally:
+                conn.close()
+    except Exception:  # noqa: BLE001  闸门失败宁可多拉不多丢
+        slot = True
+    if not slot:
+        return False
 
     argv = install_ops.target_command() + [
         "worker",
@@ -917,14 +959,26 @@ def _spawn_detached_worker(idle_exit: float = 600.0) -> bool:
     try:
         if os.name == "nt":
             flags = 0x08000000  # CREATE_NO_WINDOW：不闪黑框
+            # stderr 落文件而非 DEVNULL：worker 若在启动期静默死亡（日志
+            # 文件竞态/readonly 等），这里就是唯一现场
+            try:
+                err_f = open(store.data_dir() / "logs" / "worker.err", "ab")
+            except OSError:
+                err_f = subprocess.DEVNULL
             subprocess.Popen(
                 argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True,
+                stderr=err_f, creationflags=flags, close_fds=True,
             )
         else:
+            err_f = None
+            try:
+                (store.data_dir() / "logs").mkdir(parents=True, exist_ok=True)
+                err_f = open(store.data_dir() / "logs" / "worker.err", "ab")
+            except OSError:
+                err_f = None
             subprocess.Popen(
                 argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True,
+                stderr=err_f or subprocess.DEVNULL, start_new_session=True,
             )
         return True
     except OSError:
@@ -1686,18 +1740,26 @@ def cmd_worker(args) -> int:
             clients[key] = make_client(mode)
         return clients[key]
 
-    recovered = 0 if args.no_recover else store.requeue_stale(conn)
+    # 启动期回收僵死任务套瞬态重试：新建库/风暴期 WAL -shm 重建窗口会让
+    # 这条 UPDATE 撞 readonly（code 8），worker 没 --once 时异常直接退进程
+    # （stderr 是 DEVNULL，死得无声无息），曾实测导致任务卡 pending
+    if args.no_recover:
+        recovered = 0
+    else:
+        recovered = store.transient_write(lambda c: store.requeue_stale(c))
     if recovered:
         print(f"hy-mem: 回收 {recovered} 个僵死任务", file=sys.stderr)
+    store.worker_purge_stale(conn)  # 清理硬杀残留的注册行
 
     processed = ok_n = failed = 0
     last_active = time.time()
     started = time.time()
+    claimed_any = False
     exit_code = EXIT_OK
 
     try:
         while True:
-            # 心跳：供 add --async 判断「有无活着的 worker」决定是否自动拉起
+            # 心跳兼注册：供 add --async 判断「有无活着的 worker / 几个」
             try:
                 store.heartbeat(conn, wid)
             except Exception:  # noqa: BLE001  心跳失败不影响消费主流程
@@ -1712,10 +1774,19 @@ def cmd_worker(args) -> int:
                     break
                 if args.timeout and time.time() - started >= args.timeout:
                     break
+                # 空闲快速释放：拉起后 30s 内从没抢到过任务且队列空 → 尽早退出。
+                # 风暴竞态多拉的那几个 worker 不必空耗内存到 idle-exit。
+                if (
+                    not claimed_any
+                    and time.time() - started >= 30
+                    and store.queue_stats(conn)["pending"] == 0
+                ):
+                    break
                 time.sleep(args.poll)
                 continue
 
             job_id, kind = row["id"], row["kind"]
+            claimed_any = True
             last_active = time.time()
             t0 = time.time()
             try:
@@ -1740,6 +1811,7 @@ def cmd_worker(args) -> int:
                 time.sleep(min(2 ** int(row["attempts"] or 1), 30))
             processed += 1
     finally:
+        store.worker_leave(conn, wid)  # 注销注册行，立即腾出 worker 名额
         for c in clients.values():
             try:
                 c.close()

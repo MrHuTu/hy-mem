@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS worker_hb (
     ts     REAL NOT NULL,
     worker TEXT
 );
+
+CREATE TABLE IF NOT EXISTS worker_reg (
+    id  TEXT PRIMARY KEY,
+    ts  REAL NOT NULL,
+    pid INTEGER
+);
 """
 
 
@@ -288,23 +294,79 @@ def queue_stats(conn) -> dict:
 
 
 # --------------------------------------------------------------------------
-# worker 心跳（add --async 判断要不要自动拉起临时 worker 用）
+# worker 心跳/注册（add --async 判断要不要自动拉起临时 worker、以及
+# worker 数量上限，都用这张表）
 # --------------------------------------------------------------------------
 def heartbeat(conn, worker_id: str) -> None:
-    """worker 每轮循环调用：单行 UPSERT，开销可忽略。"""
+    """worker 每轮循环调用：按 worker 注册行 UPSERT，开销可忽略。
+
+    单行 worker_hb（历史）升级为按 worker 一行的 worker_reg——同一张表
+    同时回答「最近的 worker 活着吗」（worker_age）和「活着几个」（count）。
+    """
+    import os as _os
+
     conn.execute(
-        "INSERT INTO worker_hb (id, ts, worker) VALUES (1, ?, ?) "
-        "ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, worker=excluded.worker",
-        (time.time(), worker_id),
+        "INSERT INTO worker_reg (id, ts, pid) VALUES (?, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, pid=excluded.pid",
+        (worker_id, time.time(), _os.getpid()),
     )
 
 
 def worker_age(conn) -> float | None:
-    """距上次 worker 心跳的秒数；从无心跳返回 None。"""
-    row = conn.execute("SELECT ts FROM worker_hb WHERE id = 1").fetchone()
+    """距最近一次 worker 心跳的秒数；从无心跳返回 None。"""
+    row = conn.execute("SELECT MAX(ts) AS ts FROM worker_reg").fetchone()
     if row is None or not row["ts"]:
         return None
     return max(0.0, time.time() - row["ts"])
+
+
+def count_live_workers(conn, fresh: float = 15.0) -> int:
+    """心跳在 fresh 秒内的 worker 数——拉起闸门的上限判断用。"""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM worker_reg WHERE ts > ?", (time.time() - fresh,)
+    ).fetchone()
+    return int(row["n"] or 0)
+
+
+def worker_leave(conn, worker_id: str) -> None:
+    """worker 退出时注销自己；失败不影响退出流程。"""
+    try:
+        conn.execute("DELETE FROM worker_reg WHERE id = ?", (worker_id,))
+    except sqlite3.OperationalError:  # noqa: BLE001
+        pass
+
+
+def worker_purge_stale(conn, older_than: float = 300.0) -> None:
+    """清理硬杀残留的注册行（心跳停更超过 older_than 秒）。"""
+    try:
+        conn.execute("DELETE FROM worker_reg WHERE ts < ?", (time.time() - older_than,))
+    except sqlite3.OperationalError:  # noqa: BLE001
+        pass
+
+
+def claim_worker_slot(conn, cap: int, fresh: float = 15.0) -> bool:
+    """拉起 worker 前的占位闸门——必须在 WriteLock 内调用（串行化竞态）。
+
+    清理过期行 → 数存活 worker → 未达 cap 则写一行 '_spawn_intent' 占位。
+    占位行 15s 后自然过期（真实 worker 首次心跳 ~2s 就会顶上自己的行），
+    即使 Popen 失败也只占 15s 名额，不会永久卡死拉起。
+    """
+    try:
+        cutoff = time.time() - fresh
+        conn.execute("DELETE FROM worker_reg WHERE ts < ?", (cutoff,))
+        n = conn.execute(
+            "SELECT COUNT(*) AS n FROM worker_reg WHERE ts > ?", (cutoff,)
+        ).fetchone()
+        if int(n["n"] or 0) >= cap:
+            return False
+        conn.execute(
+            "INSERT INTO worker_reg (id, ts, pid) VALUES ('_spawn_intent', ?, NULL) "
+            "ON CONFLICT(id) DO UPDATE SET ts=excluded.ts",
+            (time.time(),),
+        )
+        return True
+    except sqlite3.OperationalError:  # noqa: BLE001  闸门自身故障宁可多拉
+        return True
 
 
 def list_jobs(conn, status: str | None = None, limit: int = 20) -> list[dict]:
