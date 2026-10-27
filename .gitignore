@@ -9,3 +9,7 @@ __pycache__/
 *.pyc
 # WorkBuddy 会话/记忆数据
 .workbuddy/
+
+# 密钥文件——永不入库
+config.json
+.env
