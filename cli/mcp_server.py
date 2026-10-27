@@ -387,7 +387,10 @@ def serve() -> int:
                 print(f"hy-mem mcp: 派发异常 {type(e).__name__}: {e}", file=sys.stderr)
                 resp = _err(msg.get("id") if isinstance(msg, dict) else None, -32603, "内部错误")
         if resp is not None:
-            sys.stdout.write(json.dumps(resp, ensure_ascii=False, default=str) + "\n")
+            # ensure_ascii=True：协议输出纯 ASCII（中文转 \uXXXX），不受宿主
+            # 控制台代码页影响——exe 的 stdout 编码随环境漂移，False 会产生
+            # 孤代理字符打断 JSON-RPC 行。解码后内容不变，只是线上更冗长。
+            sys.stdout.write(json.dumps(resp, ensure_ascii=True, default=str) + "\n")
             sys.stdout.flush()
         else:
             print(f"hy-mem mcp: {msg.get('method')} 处理 {int((time.time()-t0)*1000)}ms (notification)", file=sys.stderr)
