@@ -254,8 +254,9 @@ hy-mem worker --once    # 消费掉（pro + 推理模型每条约 10~50s）
 ```
 
 - 协议：JSON-RPC 2.0 换行分隔（MCP stdio 标准），宿主按会话拉起、随会话退出，不常驻。
-- 工具：`add_memory`（默认异步毫秒返回）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `get_version`。
-- 时间过滤与翻页：`search_memory` 和 `list_memories` 都支持 `since` / `until`（两种写法：相对值 `30m`/`12h`/`7d`/`30d`/`1y`，或 ISO 日期 `2026-01-01`）与 `offset` 翻页；响应带 `has_more` / `next_offset`，还有更多就带 offset 接着翻。`list_memories` 另支持 `order`（`desc` 最新在前 / `asc` 最旧在前）。
+- 工具：`add_memory`（默认异步毫秒返回）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `update_memory`（改内容，走演化链，须 `confirm: true`）/ `get_version`。
+- 写入附加参数（`add_memory`）：`metadata`（对象，附加元数据）、`memory_at`（补录记忆发生时间，`2026-03-01` 这类写法；时间过滤按它算）、`request_id`（幂等写 id，同一 id 重复提交只落一条）。
+- 时间过滤与翻页：`search_memory` 和 `list_memories` 都支持 `since` / `until`（两种写法：相对值 `30m`/`12h`/`7d`/`30d`/`1y`，或 ISO 日期 `2026-01-01`）与 `offset` 翻页；响应带 `has_more` / `next_offset`，还有更多就带 offset 接着翻。`list_memories` 另支持 `order`（`desc` 最新在前 / `asc` 最旧在前）。时间过滤优先按 `memory_at`（补录的发生时间），没有补录才按写入时间。
 - 工具失败时返回明确错误：`错误 [错误码] 原因` + `建议：修复方式`，宿主可直接转述给用户；参数错（空 query、缺 confirm）只说哪里错、不套运行时建议。
 - 身份：MCP 会话固定用默认身份（config 的 identity.userId），与 CLI 不传 `-u` 时同口径。
 - 命令行与 MCP 可共存：同一套 queue.db + WriteLock + 向量库；多子代理并发安全（WAL + busy_timeout + 跨进程写锁 + 启动自检探针按进程隔离 + 写入瞬态自动重试）。

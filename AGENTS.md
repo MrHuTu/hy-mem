@@ -25,9 +25,9 @@
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **21 个 py，9844 行**（`cli/` 15 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
-| 子命令 | **27** 个（0.9.6 新增 `mcp` / `version` / `migrate`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **268**（UI 92 / setup 103 / CLI 73） | 见 §8 |
+| 源码规模 | **21 个 py，11337 行**（`cli/` 15 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
+| 子命令 | **29** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
+| 测试用例 | **279**（UI 92 / setup 103 / CLI 84） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **351 MB**（exe 本体 27.5 MB）；对外分发的是 `dist/hy-mem-0.9.5-win64.zip` **152 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **110 s**（含压缩包 23 s） | 构建日志末行 |
@@ -52,7 +52,7 @@ D:\tools_open\agent-bridge\
 │
 ├── cli\                       ← 全部业务代码（全部可改，改完必须跑测试）
 │   ├── _pyi_entry.py          ← 打包入口。只做两件事：冻结进程强制 UTF-8、转发 main
-│   ├── hy_mem_cli.py   (2732) ← 大脑：27 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
+│   ├── hy_mem_cli.py   (2842) ← 大脑：29 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
 │   ├── helptext.py      (579) ← 命令规格单一真源（`help` / `help --json` 的数据源）
 │   ├── config.py        (461) ← config.json 读写 + env 映射 + 校验 + 身份默认值
 │   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0
@@ -224,12 +224,12 @@ D:\tools_open\agent-bridge\
 
 ---
 
-## 7. 命令面（27 个）
+## 7. 命令面（29 个）
 
 | 分组 | 命令 |
 |---|---|
 | 元信息 / 交互 | `help` `menu` `setup` `config` `user` `doctor` `install` `skill` `tui-test` |
-| 写入 / 读取 | `add` `search` `list` `get` `delete` `forget` `finalize` |
+| 写入 / 读取 | `add` `search` `list` `get` `delete` `update` `forget` `finalize` `history` |
 | 异步队列 | `worker` `queue` `drain` `retry` |
 | 标签 / 统计 | `tags` `untag` `archive` `stats` |
 
@@ -246,7 +246,7 @@ D:\tools_open\agent-bridge\
 |---|---|---|---|
 | `scripts/test_ui.py` | **92** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航 | `.venv/Scripts/python.exe scripts/test_ui.py` |
 | `scripts/test_setup.py` | **103** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像** | `.venv/Scripts/python.exe scripts/test_setup.py` |
-| `scripts/test_cli.py` | **73** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
+| `scripts/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
 
 ```bash
 # 源码模式
