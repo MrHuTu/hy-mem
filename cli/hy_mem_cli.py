@@ -1861,11 +1861,19 @@ def cmd_install(args) -> int:
     else:
         lines.append("PATH 里还没有这个目录，加一下（然后把下面这条命令写进 SKILL.md 也行）：")
         lines.append("  " + str(install_ops.path_hint(path.parent)))
+    # 先接管旧安装的配置与数据，再回收旧启动器 —— 顺序不能反：
+    # adopt_stale 把启动器改指当前安装后，旧安装就从 PATH 上「消失」了，
+    # 之后就再也找不到它的 config.json / data 在哪。
+    adopted_install, install_notes = install_ops.adopt_previous_install()
     # 回收 PATH 上残留的旧 hy-mem 启动器（比如源码模式留在 ~/.local/bin 的壳），
     # 否则它们排在 PATH 前面时会把调用引到失效入口——见 install_ops.adopt_stale 注释。
     adopted, adopt_notes = install_ops.adopt_stale()
-    payload["adopted"] = [str(p) for p in adopted]
-    payload["adoptNotes"] = adopt_notes
+    payload["adoptedInstall"] = adopted_install
+    payload["adoptNotes"] = install_notes + adopt_notes
+    if adopted_install:
+        lines.append("")
+        lines.append("已沿用旧安装的配置与记忆数据：")
+        lines.extend("  " + n for n in install_notes)
     if adopted:
         lines.append("")
         lines.append(f"接管了 {len(adopted)} 个旧启动器：")
@@ -2478,6 +2486,24 @@ def cmd_mcp(args) -> int:
 def main(argv=None) -> int:
     _force_utf8()
     load_env()
+
+    # 升级接管：全新解压（本安装根还没有 config.json）时，若 PATH 上仍指向
+    # 另一个带配置的 hy-mem 安装，就沿用它的配置、记忆数据原位复用 —— 用户
+    # 升级 = 解压新包 + 直接用，不用重走向导、不丢记忆。接管后要重放
+    # apply_env，否则 MEMORY_DATA_DIR 还停在新目录，队列会跟主库分家。
+    # 说明走 stderr：stdout 属于协议/结果，不能混入。
+    try:
+        import config as _cfg_ad
+        import install_ops as _iol_ad
+
+        _ad_info, _ad_notes = _iol_ad.adopt_previous_install()
+        if _ad_info:
+            _cfg_ad.apply_env(_cfg_ad.load())
+            for _n in _ad_notes:
+                print("hy-mem: " + _n, file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        pass  # 探测失败不该挡住正常启动，install/doctor 里还能看到诊断
+
     argv_list = hoist_globals(list(sys.argv[1:] if argv is None else argv))
     parser = build_parser()
     args = parser.parse_args(argv_list)

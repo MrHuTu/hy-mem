@@ -8,7 +8,9 @@ PATH 上真的存在。产物是个目录（dist\\hy-mem\\hy-mem.exe），没谁
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -270,3 +272,145 @@ def adopt_stale() -> tuple[list[Path], list[str]]:
         except OSError as e:
             notes.append(f"改写 {f} 失败：{type(e).__name__}: {e}")
     return fixed, notes
+
+
+# ---------------------------------------------------------------------------
+# 升级接管：新安装沿用旧安装的配置与记忆数据
+#
+# 场景（2026-10-27 用户需求）：zip 分发包不含 config.json / data（有意设计，
+# 防止覆盖用户数据），代价是「解压到新目录升级」后首次运行一切从零 —— 向导
+# 重走、记忆全空。实际上旧安装还好好地躺在 PATH 指向的老地方。这里在首次
+# 运行时探测：PATH 上若指向另一个带 config.json 的 hy-mem 安装根，就把配置
+# 复制过来、storage.dataDir 改指旧数据目录（**原位复用，不拷贝几百 MB 数据**）。
+# ---------------------------------------------------------------------------
+
+_LAUNCHER_NAMES_ALL = ("hy-mem.cmd", "hy-mem", "hy-mem.exe")
+
+
+def _parse_launcher_target(text: str) -> Path | None:
+    """从启动器文本解析出它指向的安装根；解析不出返回 None。"""
+    tokens = re.findall(r'"([^"]+)"', text)
+    for t in tokens:
+        if t.replace("\\", "/").endswith("cli/hy_mem_cli.py"):
+            try:
+                return Path(t).resolve().parent.parent
+            except OSError:
+                return None
+    for t in tokens:
+        if t.replace("/", "\\").lower().endswith("hy-mem.exe"):
+            try:
+                return Path(t).resolve().parent
+            except OSError:
+                return None
+    return None
+
+
+def _current_root(current_root: Path | None = None) -> Path:
+    """当前安装根。与 config._root() 同口径：HY_MEM_HOME > app_root()。
+
+    app_root() 只认 sys.frozen / 源码位置，测试与「指到别处跑」的场景靠
+    HY_MEM_HOME 改根 —— 两处口径不一致时，接管会把当前安装误判成旧安装。
+    """
+    if current_root is not None:
+        return current_root.resolve()
+    env = os.getenv("HY_MEM_HOME", "").strip()
+    if env:
+        return Path(env).resolve()
+    return app_root().resolve()
+
+
+def find_previous_install(current_root: Path | None = None) -> tuple[Path | None, str]:
+    """扫 PATH，找到「另一个」带 config.json 的 hy-mem 安装根。
+
+    返回 (旧安装根, 发现途径说明)；找不到返回 (None, "")。
+    hy-mem.exe 直接躺在 PATH 目录里也算（说明旧安装目录本身在 PATH 上）。
+    """
+    cur = _current_root(current_root)
+    seen: set[str] = set()
+    for raw in os.getenv("PATH", "").split(os.pathsep):
+        raw = raw.strip().strip('"')
+        if not raw:
+            continue
+        try:
+            d = Path(raw).resolve()
+        except Exception:  # noqa: BLE001
+            continue
+        key = str(d).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        for name in _LAUNCHER_NAMES_ALL:
+            f = d / name
+            if not f.is_file():
+                continue
+            if name == "hy-mem.exe":
+                roots = [d]
+            else:
+                try:
+                    text = _read_raw(f)
+                except OSError:
+                    continue
+                if not _is_hymem_launcher_text(text):
+                    continue  # 同名异姓，不碰
+                t = _parse_launcher_target(text)
+                roots = [t] if t else []
+            for r in roots:
+                try:
+                    if r.resolve() == cur:
+                        continue  # 自己不算「旧安装」
+                except OSError:
+                    continue
+                if (r / "config.json").is_file():
+                    return r, f"PATH 上的 {f.name}"
+    return None, ""
+
+
+def adopt_previous_install(current_root: Path | None = None) -> tuple[dict | None, list[str]]:
+    """新装（无 config.json）时接管旧安装的配置与记忆数据。
+
+    只复制配置这一个 JSON；记忆数据不搬，把 storage.dataDir 写成旧数据目录
+    的绝对路径原位复用。返回 (接管信息 dict 或 None, 逐条说明)。
+
+    跳过条件（按序）：
+      - 当前已有 config.json（原地升级 / 已配置）
+      - HY_MEM_CONFIG 显式指定（用户自管配置，不该被我们动）
+      - HY_MEM_NO_ADOPT=1（显式退出）
+      - PATH 上找不到另一个带 config.json 的安装
+    """
+    cur = _current_root(current_root)
+    if (cur / "config.json").is_file():
+        return None, []
+    if os.getenv("HY_MEM_CONFIG"):
+        return None, ["HY_MEM_CONFIG 已显式指定，跳过旧安装接管"]
+    if os.getenv("HY_MEM_NO_ADOPT", "").strip() == "1":
+        return None, ["HY_MEM_NO_ADOPT=1，跳过旧安装接管"]
+    old_root, src = find_previous_install(cur)
+    if not old_root:
+        return None, []
+    try:
+        cfg = json.loads((old_root / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return None, [f"旧安装 {old_root} 的 config.json 读不了（{type(e).__name__}），不接管"]
+    storage = cfg.get("storage") or {}
+    raw_dir = str(storage.get("dataDir") or "").strip()
+    old_data = Path(raw_dir) if raw_dir else old_root / "data"
+    if not old_data.is_dir():
+        return None, [f"旧安装 {old_root} 的数据目录 {old_data} 不存在，不接管"]
+    storage["dataDir"] = str(old_data)
+    cfg["storage"] = storage
+    target = cur / "config.json"
+    try:
+        target.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
+    except OSError as e:
+        return None, [f"写入 {target} 失败：{type(e).__name__}: {e}"]
+    info = {"oldRoot": str(old_root), "via": src, "dataDir": str(old_data), "config": str(target)}
+    notes = [
+        f"检测到旧安装 {old_root}（经 {src}）",
+        f"已沿用其配置 → {target}",
+        f"记忆数据原位复用（不拷贝）：{old_data}",
+    ]
+    return info, notes
