@@ -123,7 +123,10 @@ def _tool_search_memory(args: dict) -> str:
 
     client = _client()
     try:
-        r = client.search(query, limit=limit, min_score=min_score, **{k: [v] for k, v in _identity().items()})
+        # search 的身份参数是复数形参（user_ids），与 CLI identity_lists 同口径；
+        # 单数 user_id 会被 SDK 拒收（TypeError: unexpected keyword argument）
+        u = _identity()["user_id"]
+        r = client.search(query, limit=limit, min_score=min_score, user_ids=[u])
         items = _flatten_search(r)[:limit]
         out = [
             {
