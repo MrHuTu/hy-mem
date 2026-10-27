@@ -15,8 +15,11 @@ initialize / notifications/initialized / ping / tools/list / tools/call。
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 import time
+from datetime import datetime
 
 import errors  # CLI/MCP 共用的错误分类与格式化
 from helptext import VERSION
@@ -38,6 +41,69 @@ class ParamError(ValueError):
     参数错只需直说哪里错了，不该套上「先跑 doctor」这类运行时建议误导宿主。
     继承 ValueError 保持向后兼容。
     """
+
+
+# --------------------------------------------------------------------------
+# 时间参数 —— since/until 支持相对值与 ISO 日期两种形态
+# --------------------------------------------------------------------------
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+
+
+def _parse_time(v) -> float | None:
+    """since/until 参数 → unix 秒。
+
+    两种形态都收：相对值（30m/12h/7d/30d/1y——LLM 问「近一周」最顺手）和
+    ISO 日期（2026-01-01 / 2026-01-01T09:30:00）。空/缺省 = None = 不过滤。
+    """
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    m = re.fullmatch(r"(\d+)\s*([smhdwy])", s, re.IGNORECASE)
+    if m:
+        return time.time() - int(m.group(1)) * _UNIT_SECONDS[m.group(2).lower()]
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).timestamp()
+        except ValueError:
+            continue
+    raise ParamError(f"时间格式不认识：{s!r}（支持 30m/12h/7d/1y 相对值，或 2026-01-01 这类日期）")
+
+
+def _item_ts(m: dict) -> float | None:
+    """条目 → unix 秒。SDK 各路径时间字段名不一，实测 list/get 行是
+    gmt_created（字符串 unix 秒）；其余候选是防御性兼容。"""
+    for k in ("gmt_created", "created_at", "memory_at", "createdTime", "when", "updated_at"):
+        v = m.get(k)
+        if v is None:
+            continue
+        if isinstance(v, (int, float)):
+            ts = float(v)
+            return ts / 1000.0 if ts > 1e12 else ts  # 毫秒时间戳兜底
+        s = str(v).strip()
+        try:
+            ts = float(s)
+            return ts / 1000.0 if ts > 1e12 else ts
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(s[:19], fmt).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def _in_range(ts: float | None, since: float | None, until: float | None) -> bool:
+    """无时间戳的条目放行（宁可多给不错杀），有时间戳才按窗过滤。"""
+    if ts is None:
+        return True
+    if since is not None and ts < since:
+        return False
+    if until is not None and ts > until:
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -70,57 +136,55 @@ def _tool_add_memory(args: dict) -> str:
     tags = [t for t in (args.get("tags") or []) if str(t).strip()]
     use_async = args.get("async", True) is not False
     client = _client()
-    try:
-        if not use_async:
-            from hy_mem_cli import _ids_of, _new_ids_only, _bind_tags
-            from hy_mem_cli import store
-
-            before = set()
-            if tags:
-                try:
-                    before = {
-                        m.get("memory_id")
-                        for m in client.list_memories(limit=200, **_identity()) or []
-                        if isinstance(m, dict) and m.get("memory_id")
-                    }
-                except Exception:  # noqa: BLE001
-                    before = set()
-            with store.WriteLock():
-                last = client.add(text, source="mcp", **_identity())
-            ids = _ids_of(last)
-            if tags:
-                _bind_tags(_new_ids_only(ids, before), tags, "user")
-            return json.dumps(
-                {"mode": "sync", "memory_ids": ids, "tags": tags}, ensure_ascii=False
-            )
-        # 异步：入队 + 无人消费时自动拉起临时 worker（与 CLI add --async 同一套）
+    if not use_async:
+        from hy_mem_cli import _ids_of, _new_ids_only, _bind_tags
         from hy_mem_cli import store
 
-        conn = store.connect()
-        try:
-            job_ids = [
-                store.enqueue(conn, {"text": text, "source": "mcp", "identity": _identity(), "tags": tags})
-            ]
-            stats = store.queue_stats(conn)
-            hb = store.worker_age(conn)
-            live = hb is not None and hb < 15.0
-            spawned = False
-            if stats["pending"] > 0 and not live:
-                spawned = _spawn_detached_worker()
-        finally:
-            conn.close()
+        before = set()
+        if tags:
+            try:
+                before = {
+                    m.get("memory_id")
+                    for m in client.list_memories(limit=200, **_identity()) or []
+                    if isinstance(m, dict) and m.get("memory_id")
+                }
+            except Exception:  # noqa: BLE001
+                before = set()
+        with store.WriteLock():
+            last = client.add(text, source="mcp", **_identity())
+        ids = _ids_of(last)
+        if tags:
+            _bind_tags(_new_ids_only(ids, before), tags, "user")
         return json.dumps(
-            {
-                "mode": "async",
-                "job_ids": job_ids,
-                "pending": stats["pending"],
-                "worker_spawned": spawned,
-                "note": "已入队，后台 worker 约 6~9 秒落库，无需等待",
-            },
-            ensure_ascii=False,
+            {"mode": "sync", "memory_ids": ids, "tags": tags}, ensure_ascii=False
         )
+    # 异步：入队 + 无人消费时自动拉起临时 worker（与 CLI add --async 同一套）
+    from hy_mem_cli import store
+
+    def _enq(conn):
+        return [store.enqueue(conn, {"text": text, "source": "mcp", "identity": _identity(), "tags": tags})]
+
+    job_ids = store.transient_write(_enq)
+    conn = store.connect()
+    try:
+        stats = store.queue_stats(conn)
+        hb = store.worker_age(conn)
     finally:
-        client.close()
+        conn.close()
+    live = hb is not None and hb < 15.0
+    spawned = False
+    if stats["pending"] > 0 and not live:
+        spawned = _spawn_detached_worker()
+    return json.dumps(
+        {
+            "mode": "async",
+            "job_ids": job_ids,
+            "pending": stats["pending"],
+            "worker_spawned": spawned,
+            "note": "已入队，后台 worker 约 6~9 秒落库，无需等待",
+        },
+        ensure_ascii=False,
+    )
 
 
 def _tool_search_memory(args: dict) -> str:
@@ -129,59 +193,91 @@ def _tool_search_memory(args: dict) -> str:
         raise ParamError("query 不能为空：检索必须提供查询词")
     limit = max(1, min(int(args.get("limit") or 5), 20))
     min_score = args.get("min_score")
+    offset = max(0, int(args.get("offset") or 0))
+    since = _parse_time(args.get("since"))
+    until = _parse_time(args.get("until"))
     from hy_mem_cli import _flatten_search
 
     client = _client()
-    try:
-        # search 的身份参数是复数形参（user_ids），与 CLI identity_lists 同口径；
-        # 单数 user_id 会被 SDK 拒收（TypeError: unexpected keyword argument）
-        u = _identity()["user_id"]
-        r = client.search(query, limit=limit, min_score=min_score, user_ids=[u])
-        items = _flatten_search(r)[:limit]
-        if not items:
-            # SDK 吞掉嵌入端异常静默返回空列表（见 cmd_search 同款防护）——
-            # 空手时补一次真实探测，端点挂了把真实原因当错误报出去，
-            # 别让宿主把「密钥失效」误读成「没有相关记忆」。
-            from hy_mem_cli import _embedding_unhealthy
+    # search 的身份参数是复数形参（user_ids），与 CLI identity_lists 同口径；
+    # 单数 user_id 会被 SDK 拒收（TypeError: unexpected keyword argument）
+    u = _identity()["user_id"]
+    # 翻页 = 多取前 offset 条再切片（SDK search 按 score 排序，无原生 offset）；
+    # 拉取上限 200 防深翻页拖慢——语义检索翻到 200 名开外本来就没有意义
+    fetch = min(offset + limit, 200)
+    kw = {"created_after": since} if since is not None else {}  # SDK 原生时间下限
+    r = client.search(query, limit=fetch, min_score=min_score, user_ids=[u], **kw)
+    items = _flatten_search(r)
+    if not items:
+        # SDK 吞掉嵌入端异常静默返回空列表（见 cmd_search 同款防护）——
+        # 空手时补一次真实探测，端点挂了把真实原因当错误报出去，
+        # 别让宿主把「密钥失效」误读成「没有相关记忆」。探测通过（why 空）
+        # 则是窗口内真没命中，照常返回空 hits。
+        from hy_mem_cli import _embedding_unhealthy
 
-            why = _embedding_unhealthy()
-            if why:
-                raise RuntimeError(f"检索失败：嵌入端点不可用（{why}）—— 这不代表没有相关记忆")
-        out = [
-            {
-                "memory_id": it.get("memory_id"),
-                "content": it.get("content") or it.get("text"),
-                "score": it.get("score"),
-                "when": it.get("when") or it.get("created_at"),
-            }
-            for it in items
-        ]
-        return json.dumps({"query": query, "hits": out}, ensure_ascii=False)
-    finally:
-        client.close()
+        why = _embedding_unhealthy()
+        if why:
+            raise RuntimeError(f"检索失败：嵌入端点不可用（{why}）—— 这不代表没有相关记忆")
+    if since is not None or until is not None:
+        items = [x for x in items if _in_range(_item_ts(x), since, until)]
+    page = items[offset : offset + limit]
+    has_more = len(items) > offset + limit
+    out = [
+        {
+            "memory_id": it.get("memory_id"),
+            "content": it.get("content") or it.get("text"),
+            "score": it.get("score"),
+            "when": it.get("when") or it.get("created_at"),
+        }
+        for it in page
+    ]
+    resp = {"query": query, "count": len(out), "hits": out, "offset": offset}
+    if has_more:
+        resp["has_more"] = True
+        resp["next_offset"] = offset + limit
+    return json.dumps(resp, ensure_ascii=False)
 
 
 def _tool_list_memories(args: dict) -> str:
     limit = max(1, min(int(args.get("limit") or 10), 50))
+    offset = max(0, int(args.get("offset") or 0))
+    order = str(args.get("order") or "desc").lower()
+    if order not in ("desc", "asc"):
+        raise ParamError("order 只能是 desc（最新在前，默认）或 asc（最旧在前）")
+    since = _parse_time(args.get("since"))
+    until = _parse_time(args.get("until"))
     client = _client()
-    try:
-        # SDK 返回 dict（{"vdb": {"memories": [...]}}），与 CLI cmd_list 同解析；
-        # 直接当列表迭代会拿到 key 字符串、被 isinstance 过滤成恒 0 条
-        u = _identity()["user_id"]
-        r = client.list_memories(limit=limit, user_id=u) or {}
-        rows = (r.get("vdb") or {}).get("memories") or []
-        out = [
-            {
-                "memory_id": m.get("memory_id"),
-                "content": (m.get("content") or "")[:200],
-                "when": m.get("when") or m.get("created_at"),
-            }
-            for m in rows
-            if isinstance(m, dict)
-        ]
-        return json.dumps({"count": len(out), "memories": out}, ensure_ascii=False)
-    finally:
-        client.close()
+    # SDK 返回 dict（{"vdb": {"memories": [...]}}），与 CLI cmd_list 同解析；
+    # 直接当列表迭代会拿到 key 字符串、被 isinstance 过滤成恒 0 条
+    u = _identity()["user_id"]
+    if since is None and until is None:
+        # 无时间过滤：SDK 原生 offset 分页，多取 1 条判 has_more，精确且省
+        r = client.list_memories(limit=limit + 1, offset=offset, order=order, user_id=u) or {}
+        rows = [m for m in ((r.get("vdb") or {}).get("memories") or []) if isinstance(m, dict)]
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+    else:
+        # SDK 无时间过滤参数：取窗口内全部（个人库量级，上限 500，可调
+        # HY_MEM_LIST_CAP），按时间过滤后本地切片——翻页按「过滤后的列表」算
+        cap = int(os.getenv("HY_MEM_LIST_CAP") or 500)
+        r = client.list_memories(limit=cap, offset=0, order=order, user_id=u) or {}
+        rows = [m for m in ((r.get("vdb") or {}).get("memories") or []) if isinstance(m, dict)]
+        rows = [m for m in rows if _in_range(_item_ts(m), since, until)]
+        has_more = len(rows) > offset + limit
+        rows = rows[offset : offset + limit]
+    out = [
+        {
+            "memory_id": m.get("memory_id"),
+            "content": (m.get("content") or "")[:200],
+            "when": m.get("when") or m.get("created_at"),
+        }
+        for m in rows
+    ]
+    resp = {"count": len(out), "memories": out, "offset": offset, "order": order}
+    if has_more:
+        resp["has_more"] = True
+        resp["next_offset"] = offset + limit
+    return json.dumps(resp, ensure_ascii=False)
 
 
 def _tool_get_memory(args: dict) -> str:
@@ -189,13 +285,10 @@ def _tool_get_memory(args: dict) -> str:
     if not mid:
         raise ParamError("memory_id 不能为空：请传入 list 或 search 返回的 memory_id")
     client = _client()
-    try:
-        r = client.get(mid)
-        if r is None:
-            return json.dumps({"found": False, "memory_id": mid}, ensure_ascii=False)
-        return json.dumps({"found": True, "memory": r}, ensure_ascii=False, default=str)
-    finally:
-        client.close()
+    r = client.get(mid)
+    if r is None:
+        return json.dumps({"found": False, "memory_id": mid}, ensure_ascii=False)
+    return json.dumps({"found": True, "memory": r}, ensure_ascii=False, default=str)
 
 
 def _tool_delete_memory(args: dict) -> str:
@@ -207,12 +300,9 @@ def _tool_delete_memory(args: dict) -> str:
     from hy_mem_cli import store
 
     client = _client()
-    try:
-        with store.WriteLock():
-            r = client.delete(mid)
-        return json.dumps({"deleted": mid, "result": r}, ensure_ascii=False, default=str)
-    finally:
-        client.close()
+    with store.WriteLock():
+        r = client.delete(mid)
+    return json.dumps({"deleted": mid, "result": r}, ensure_ascii=False, default=str)
 
 
 def _tool_get_version(_args: dict) -> str:
@@ -270,6 +360,7 @@ TOOLS = [
         "name": "search_memory",
         "description": (
             "语义检索长期记忆。回答涉及用户偏好/历史决策/项目上下文且当前上下文没有时，先查再答。"
+            "支持时间范围（since/until）与翻页（offset/has_more）。"
         ),
         "inputSchema": {
             "type": "object",
@@ -277,16 +368,34 @@ TOOLS = [
                 "query": {"type": "string", "description": "检索词（语义匹配，不是关键词精确匹配）"},
                 "limit": {"type": "integer", "description": "返回条数，默认 5，上限 20"},
                 "min_score": {"type": "number", "description": "相似度阈值，默认用配置值（0.35）"},
+                "since": {
+                    "type": "string",
+                    "description": "只要这段时间之后：相对值（30m/12h/7d/30d/1y）或 ISO 日期（2026-01-01）",
+                },
+                "until": {"type": "string", "description": "只要这段时间之前，格式同 since"},
+                "offset": {"type": "integer", "description": "翻页偏移；上页返回 has_more 时用 next_offset 继续"},
             },
             "required": ["query"],
         },
     },
     {
         "name": "list_memories",
-        "description": "按时间倒序列出最近的记忆。",
+        "description": (
+            "按时间顺序列出记忆（默认最新在前）。支持时间范围（since/until）、"
+            "排序（order）与翻页（offset/has_more）。"
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"limit": {"type": "integer", "description": "默认 10，上限 50"}},
+            "properties": {
+                "limit": {"type": "integer", "description": "默认 10，上限 50"},
+                "offset": {"type": "integer", "description": "翻页偏移；上页返回 has_more 时用 next_offset 继续"},
+                "order": {"type": "string", "description": "desc（最新在前，默认）/ asc（最旧在前）"},
+                "since": {
+                    "type": "string",
+                    "description": "只要这段时间之后：相对值（30m/12h/7d/30d/1y）或 ISO 日期（2026-01-01）",
+                },
+                "until": {"type": "string", "description": "只要这段时间之前，格式同 since"},
+            },
         },
     },
     {

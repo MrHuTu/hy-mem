@@ -896,9 +896,9 @@ def cmd_add(args) -> int:
 
     if use_async:
         parts = _split_lines(text) if args.split else [text]
-        conn = store.connect()
-        try:
-            ids = [
+
+        def _enqueue_all(conn):
+            return [
                 store.enqueue(
                     conn,
                     {
@@ -912,16 +912,20 @@ def cmd_add(args) -> int:
                 )
                 for p in parts
             ]
+
+        ids = store.transient_write(_enqueue_all)
+        conn = store.connect()
+        try:
             stats = store.queue_stats(conn)
             # 无人消费就自动拉起临时 worker：心跳超过阈值或从无心跳且有待处理任务。
             # 阈值取 poll(1s) 的 15 倍，容掉 worker 卡顿，避免重复拉起。
             hb_age = store.worker_age(conn)
-            worker_live = hb_age is not None and hb_age < 15.0
-            spawned = False
-            if stats["pending"] > 0 and not worker_live:
-                spawned = _spawn_detached_worker()
         finally:
             conn.close()
+        worker_live = hb_age is not None and hb_age < 15.0
+        spawned = False
+        if stats["pending"] > 0 and not worker_live:
+            spawned = _spawn_detached_worker()
         payload = {
             "ok": True, "queued": len(ids), "job_ids": ids, "tags": tags, "queue": stats,
             "workerLive": worker_live, "workerSpawned": spawned,

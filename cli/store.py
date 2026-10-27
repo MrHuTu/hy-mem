@@ -73,13 +73,52 @@ CREATE TABLE IF NOT EXISTS worker_hb (
 
 
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path()), timeout=30.0, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.executescript(SCHEMA)
-    return conn
+    # 并发启动（多子代理）下的已知瞬态：另一进程 checkpoint/重建 WAL 的窗口里，
+    # 新连接可能拿到只读句柄，PRAGMA 阶段就报 "attempt to write a readonly
+    # database"（并发压测实测约 5%）。锁类错误 busy_timeout 会自己等，这种
+    # 不等——短退避重开连接即可，重试后必拿正常句柄。
+    last: Exception | None = None
+    for attempt in range(4):
+        conn = sqlite3.connect(str(db_path()), timeout=30.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.executescript(SCHEMA)
+            return conn
+        except sqlite3.OperationalError as e:
+            conn.close()
+            if "readonly" not in str(e).lower() and "locked" not in str(e).lower():
+                raise
+            last = e
+            time.sleep(0.15 * (attempt + 1))
+    raise last  # type: ignore[misc]
+
+
+def transient_write(fn, attempts: int = 4):
+    """执行一轮写操作，readonly/locked 瞬态自动换新连接重试。
+
+    WAL 在「最后一个连接关闭 → 删 -wal/-shm → 下个连接重建」的窗口里，
+    别人已打开的连接写入会报 attempt to write a readonly database（Windows
+    并发实测约 5%）——连接被污染只能换新的，锁类错误也顺路在这里重试。
+    fn(conn) -> 结果；fn 只做写，读放外面。
+    """
+    last: Exception | None = None
+    for i in range(attempts):
+        conn = connect()
+        try:
+            r = fn(conn)
+            conn.close()
+            return r
+        except sqlite3.OperationalError as e:
+            conn.close()
+            s = str(e).lower()
+            if not ("readonly" in s or "locked" in s or "busy" in s):
+                raise
+            last = e
+            time.sleep(0.15 * (i + 1))
+    raise last  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------

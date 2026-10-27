@@ -122,7 +122,11 @@ def _writable(d: Path) -> tuple[bool, str]:
             break
         target = target.parent
     try:
-        probe = target / ".hm_write_probe"
+        # 探针名带 pid：并发启动（多子代理各拉起各的进程）时同名探针会互相
+        # 踩——A 进程 unlink 的瞬间 B 进程正在写同一文件，Windows 下直接
+        # PermissionError，被误判成「目录不可写」拒绝启动（并发压测实测 6 进
+        # 程，1/6 因此 rc=2）。唯一文件名消除竞态，探测语义不变。
+        probe = target / f".hm_write_probe.{os.getpid()}"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
         return True, str(d)
