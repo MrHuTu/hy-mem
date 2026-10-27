@@ -71,6 +71,7 @@ ARGS = [
     "--hidden-import", "storage_ops",
     "--hidden-import", "install_ops",
     "--hidden-import", "skill_ops",
+    "--hidden-import", "mcp_server",
     "--hidden-import", "helptext",
     "--hidden-import", "local_embedder",
     "--hidden-import", "runtime_check",

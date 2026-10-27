@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 
 PURPOSE = (
     "跨会话长期记忆库。把用户偏好、项目事实、决策与踩坑写进去，下次会话靠语义检索取回。"
@@ -367,6 +367,17 @@ CMD_META: dict[str, dict] = {
         "examples": ["hy-mem --json drain --timeout 600"],
         "output": {"resp": "{ok, queue{}}"},
         "notes": ["不要与常驻 worker 同时依赖：drain 只等待，不消费。"],
+    },
+    "mcp": {
+        "group": "接入",
+        "when": "宿主（WorkBuddy/CodeBuddy 等）配 MCP 时用：mcp.json 里 command=hy-mem, args=[mcp]。由宿主按会话拉起，勿手动运行。",
+        "mutates": True,
+        "examples": ['mcp.json → {"mcpServers":{"hy-mem":{"command":"hy-mem","args":["mcp"]}}}'],
+        "output": {"resp": "JSON-RPC 2.0（stdio 换行分隔）；tools: add_memory/search_memory/list_memories/get_memory/delete_memory"},
+        "notes": [
+            "stdout 只准有协议响应，诊断走 stderr。",
+            "身份固定为默认（config 的 identity.userId），与 CLI 不传 -u 同口径。",
+        ],
     },
     "retry": {
         "group": "队列",
