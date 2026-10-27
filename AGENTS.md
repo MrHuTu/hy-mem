@@ -35,7 +35,7 @@
 | 向量维度 | **1024**（`qwen3.7-text-embedding-flash`） | `hy-mem doctor` 的 `embedding_live` |
 | LLM | `deepseek-v4-flash` @ `https://newapi.jxdata.com:18000/v1`（推理模型） | `hy-mem config show` |
 | 检索阈值 | `minScore = 0.35`（SDK 默认 0.4 会漏召回，已下调） | `config.json → search.minScore` |
-| 版本控制 | git 仓库，远端 `gitee.com/mrhututu/hy-mem`（master）；**纯源码仓**，产物/环境/缓存不入库 | `git remote -v && git count-objects -vH` |
+| 版本控制 | git 仓库，远端 `gitee.com/one-person_7/hy-mem`（master）；**纯源码仓**，产物/环境/缓存不入库 | `git remote -v && git count-objects -vH` |
 
 ---
 
