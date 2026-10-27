@@ -31,6 +31,17 @@ hy-mem doctor             # 端到端自检：SDK / 数据目录 / 嵌入端点 
 
 `install` 不会改你的 PATH，只把该加的那条命令打出来；想一步到位就 `--dir` 指到已经在 PATH 上的用户目录（如 `~/.local/bin`）。不想动 PATH 就直接用绝对路径：产物模式是 `<安装目录>\hy-mem.exe`，源码模式是 `<安装目录>\hy-mem.cmd`。
 
+### 升级：解压即用，配置与记忆自动继承
+
+分发包（zip）**不含** `config.json` 与 `data/`——这是有意设计，解压覆盖旧目录永远不会碰用户配置和数据。升级两种姿势：
+
+| 场景 | 行为 |
+|---|---|
+| **原地升级**（新 zip 解压覆盖旧目录） | `config.json`、`data/` 根本不在包里，原样保留，什么都不用做 |
+| **换目录升级**（解压到新目录） | 首次运行任意命令时自动探测：PATH 上若还指向旧安装（有 `config.json`），就沿用其配置，`storage.dataDir` 改指旧数据目录——**记忆原位复用，不拷贝** |
+
+换目录升级时 stderr 会打三行说明（检测到旧安装 / 配置写到哪 / 数据目录在哪）。接管只在「当前无 config.json」时发生一次，之后不再探测。两个退出开关：`HY_MEM_NO_ADOPT=1`（禁用自动接管，走全新向导）、`HY_MEM_CONFIG=<文件>`（本就自管配置，接管自动让位）。接管完成后旧安装目录可整个删掉——数据已通过 `dataDir` 引用，但删除前先把旧 `data/` 挪到新位置并改一次 `hy-mem config set storage.dataDir=<新路径>`。
+
 命令跑不起来时按这个顺序查：`hy-mem --version`（找不到 → 走 install）→ `hy-mem skill`（宿主没看到帮助 → 走 skill --install）→ `hy-mem doctor`（配置问题）→ `hy-mem tui-test`（只影响人在终端里的按键）。
 
 ## 何时用

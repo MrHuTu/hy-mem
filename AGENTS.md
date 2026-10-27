@@ -62,7 +62,7 @@ D:\tools_open\agent-bridge\
 │   ├── runtime_check.py (323) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
 │   ├── store.py         (333) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
 │   ├── storage_ops.py   (197) ← 数据目录运维：用量 / 剩余空间 / 迁移 / 备份 / 重建
-│   ├── install_ops.py   (163) ← 生成 PATH 启动器（`hy-mem install`，写 .cmd + sh 双入口；0.9.6 起自动接管 PATH 上的旧启动器）
+│   ├── install_ops.py   (416) ← 生成 PATH 启动器（`hy-mem install`，双入口 + 旧壳接管 + 升级时沿用旧安装配置/数据）
 │   ├── skill_ops.py     (106) ← SKILL.md 定位 / 一致性 / 分发到 5 个宿主
 │   ├── mcp_server.py    (~330) ← MCP stdio 服务（`hy-mem mcp`）：JSON-RPC 2.0，4 个记忆工具，进程内直调 SDK，日志走 stderr
 │   ├── presets.py       (239) ← 向量/LLM/模式预设（数字全部实测，别凭想象改 dims）
