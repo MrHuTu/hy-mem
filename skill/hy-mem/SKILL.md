@@ -133,6 +133,22 @@ hy-mem -u writer search "..."      # 临时只影响这一条命令
 - 这一条是为 agent 写的：看到 `E_CONFIG` 就**停止重试**，把修复命令转告用户，不要反复调用把配额打光。
 - 拦住而不是「先跑跑看」：配置错时报的是 SDK 内部的 401 堆栈，或者更糟 —— 检索静默返回空列表，被误读成「没有相关记忆」。
 
+### 密钥只能是 ASCII，且「没发出」与「HTTP 错误」严格分开
+
+API Key 最终进 HTTP 头 `Authorization: Bearer <key>`，而 `http.client` 用 **latin-1** 编码头。2026-10-27 的真实故障：用户把中文粘进密钥框（回显 `已读取 5 个字符`），发请求那一刻抛 `UnicodeEncodeError: 'latin-1' codec can't encode characters in position 7-8`（`Bearer ` 正好占 7 位），界面显示成 `HTTP 0` —— 一个「输入内容不对」的问题，长得像网络故障，用户只能反复查网络、换模型。
+
+**0.9.5 起只有两种结果，没有第三种**（全部走 `cli/netprobe.py`）：
+
+| 结果 | 含义 | 文案形态 | agent 该做什么 |
+|---|---|---|---|
+| `Sent(status)` | 请求**发出去了**，服务器给了码（必然 ≥100） | `HTTP 401: Invalid API-key …｜密钥被拒绝：无效 / 过期 / 填错了别家的 key` | 按码处理：401 换 key、404 改路径、429 退避后重试 |
+| `NotSent(cause)` | **请求没离开本机** | `请求没有发出：向量模型密钥 第 1 位是「没」（非 ASCII 字符）…` | 改配置或查网络，**不要盲目重试** |
+
+- `status = 0` 这个约定被**彻底删除**：`Sent.__post_init__` 拒绝 `< 100` 的值，想构造一个「状态码 0 的成功结果」会直接抛 `ValueError`。
+- 发送前 `precheck()` 先查 key 与 URL 的字符集（复用 `config.secret_charset_problem`，只一处判定），**不等异常发生**。`NotSent.cause` 取值：`precheck / encoding / dns / proxy / refused / tls / timeout / network / other`。
+- 看到 `请求没有发出` **先去查 `cause`**：`precheck` / `encoding` 是输入内容问题（key、baseUrl 里的中文/全角/零宽），`dns` / `proxy` / `refused` / `tls` / `timeout` 才是网络。
+- `scripts/test_setup.py` 有源码守卫：除 `netprobe.py` 外，`cli/` 下不许出现 `urlopen(` / `import urllib.request` / `requests` / `httpx`，也不许再写 `status == 0`。新加调用点只能复用 `netprobe.post_json()`。
+
 ## 写入
 
 ```bash
@@ -449,6 +465,7 @@ D://tools_open//agent-bridge//
 ├── cli\hy_mem_cli.py     # 24 个子命令（含 help / skill / install / menu / setup / config / user）
 ├── cli\helptext.py       # 命令规格（argparse 反射 + 手写语义），help --json 的数据源
 ├── cli\config.py         # config.json 单一真源 + env 映射 + 校验 + 身份默认值
+├── cli\netprobe.py       # 出站 HTTP 唯一出口：发送前预检字符集 + Sent/NotSent（无 status=0）
 ├── cli\setup_wizard.py   # 四步向导 + 单步入口（实测维度 / 真调 LLM / 重建数据目录）
 ├── cli\tui.py            # 终端 UI（方向键 + 鼠标 + 行编辑，零依赖）
 ├── cli\menu.py           # 交互主界面 + 设置中心

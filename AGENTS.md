@@ -3,7 +3,7 @@
 > **读者**：没有历史上下文的 AI（或接手的人）。
 > **目标**：只读这一份，就能改代码、跑测试、打 exe、排障、判断该不该动。
 > **边界**：本文件是**开发者视角**。面向调用方（智能体实际怎么用命令）的说明在 `skill/hy-mem/SKILL.md`，那份会被打包进产物发出去，两者不重复。
-> **最后校准**：2026-10-27，对应 hy-mem **0.9.3**。文中所有数字都是实测值，附了复核命令。
+> **最后校准**：2026-10-27，对应 hy-mem **0.9.5**。文中所有数字都是实测值，附了复核命令。
 
 ---
 
@@ -19,17 +19,17 @@
 
 | 项 | 值 | 复核方式 |
 |---|---|---|
-| 版本 | `0.9.3`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
+| 版本 | `0.9.5`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
 | 语言/运行时 | Python **3.12.10**，venv 在 `.venv/` | `.venv/Scripts/python.exe -V` |
 | 核心 SDK | `hy-memory 2.0.5` | `.venv/Scripts/python.exe -m pip show hy-memory` |
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **19 个 py，8465 行**（`cli/` 13 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
+| 源码规模 | **21 个 py，9844 行**（`cli/` 15 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **24** 个 | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **217**（UI 83 / setup 66 / CLI 68） | 见 §8 |
-| 产物 | 目录 `dist/hy-mem/` **351 MB**（exe 本体 27.5 MB）；对外分发的是 `dist/hy-mem-0.9.3-win64.zip` **152 MB** | `du -sh dist/hy-mem dist/*.zip` |
-| 启动开销 | `--version` / `help` 冷启 **0.36 s**（判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
+| 测试用例 | **268**（UI 92 / setup 103 / CLI 73） | 见 §8 |
+| 产物 | 目录 `dist/hy-mem/` **351 MB**（exe 本体 27.5 MB）；对外分发的是 `dist/hy-mem-0.9.5-win64.zip` **152 MB** | `du -sh dist/hy-mem dist/*.zip` |
+| 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **110 s**（含压缩包 23 s） | 构建日志末行 |
 | 默认数据目录 | `<安装根>/data`（源码=`仓库/data`，exe=`dist/hy-mem/data`） | `hy-mem config show` |
 | 向量维度 | **1024**（`qwen3.7-text-embedding-flash`） | `hy-mem doctor` 的 `embedding_live` |
@@ -52,25 +52,26 @@ D:\tools_open\agent-bridge\
 │
 ├── cli\                       ← 全部业务代码（全部可改，改完必须跑测试）
 │   ├── _pyi_entry.py          ← 打包入口。只做两件事：冻结进程强制 UTF-8、转发 main
-│   ├── hy_mem_cli.py   (2421) ← 大脑：24 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
+│   ├── hy_mem_cli.py   (2530) ← 大脑：24 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
 │   ├── helptext.py      (579) ← 命令规格单一真源（`help` / `help --json` 的数据源）
-│   ├── config.py        (425) ← config.json 读写 + env 映射 + 校验 + 身份默认值
-│   ├── setup_wizard.py  (687) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
+│   ├── config.py        (461) ← config.json 读写 + env 映射 + 校验 + 身份默认值
+│   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0
+│   ├── setup_wizard.py  (654) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
 │   ├── menu.py          (686) ← 交互主界面 + 设置中心 + 12 个页面
-│   ├── tui.py          (1253) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪
-│   ├── runtime_check.py (218) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
+│   ├── tui.py          (1280) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪
+│   ├── runtime_check.py (323) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
 │   ├── store.py         (333) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
 │   ├── storage_ops.py   (197) ← 数据目录运维：用量 / 剩余空间 / 迁移 / 备份 / 重建
 │   ├── install_ops.py   (163) ← 生成 PATH 启动器（`hy-mem install`，写 .cmd + sh 双入口）
 │   ├── skill_ops.py     (106) ← SKILL.md 定位 / 一致性 / 分发到 5 个宿主
 │   ├── presets.py       (239) ← 向量/LLM/模式预设（数字全部实测，别凭想象改 dims）
-│   └── local_embedder.py (93) ← 本地 ONNX 嵌入（零 key 备选，512 维，fastembed）
+│   └── local_embedder.py (112) ← 本地 ONNX 嵌入（零 key 备选，512 维，fastembed）
 │
 ├── scripts\                   ← 构建与测试（不进产物）
-│   ├── build_exe.py     (560) ← 打包主脚本：消毒 → SKILL.md → 启动器/说明 → 压缩包 → 清历史
-│   ├── test_cli.py      (279) ← 68 项接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
-│   ├── test_ui.py       (339) ← 83 项按键与渲染（假终端，无需真 TTY）
-│   ├── test_setup.py    (232) ← 34 项向导 / 存储运维 / 队列积压（不发网络请求）
+│   ├── build_exe.py     (500) ← 打包主脚本：消毒 → SKILL.md → 启动器/说明 → 压缩包 → 清历史
+│   ├── test_cli.py      (325) ← 73 项接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
+│   ├── test_ui.py       (366) ← 92 项按键与渲染（假终端，无需真 TTY）
+│   ├── test_setup.py    (457) ← 101 项向导 / 存储运维 / 队列积压（不发网络请求）
 │   ├── doctor.py         (88) ← 早期独立自检脚本（现已被 `hy-mem doctor` 取代，留作参考）
 │   └── bench_embed.py    (50) ← 嵌入模型跑分（dims / 延迟 / 区分度）
 │
@@ -80,7 +81,7 @@ D:\tools_open\agent-bridge\
 ├── .venv\                     ← 虚拟环境（含 pyinstaller）
 └── dist\
     ├── hy-mem\                ← 产物目录：_internal/ + hy-mem.exe + skill/ + 启动器 (+ 自用 config/data)
-    └── hy-mem-0.9.3-win64.zip ← 对外分发物（152MB，解压即完整目录）
+    └── hy-mem-0.9.5-win64.zip ← 对外分发物（152MB，解压即完整目录）
 ```
 
 **别在这几处凭直觉改**：`helptext.py` 是帮助文本唯一真源（改命令必须同步改它）；`presets.py` 的 `dims` 必须与真实模型一致；`SKILL.md` 只改 `skill/hy-mem/SKILL.md`，宿主里的副本用 `hy-mem skill --install` 铺过去。
@@ -115,6 +116,8 @@ D:\tools_open\agent-bridge\
 | 130 | Ctrl+C 中断 | 无副作用，可重跑 |
 
 `--json` 时失败在 **stdout** 也有一份：`{"ok":false,"error":{"code":"E_USAGE|E_RUNTIME|E_INTERNAL|E_CONFIG","message":"...","hint":"...","missing":[...]}}`。
+
+顶层冒出的 `UnicodeEncodeError` 被归为 **`E_CONFIG` / 退出码 1**（不是 2）：它意味着「HTTP 头里有非 ASCII 字符」，改配置就能解决，不是网络故障。这条映射在 `classify_error()` 里，兜住所有绕过闸门的路径（例如 SDK 内部直接用 `httpx` 发请求）。
 
 ---
 
@@ -238,9 +241,9 @@ D:\tools_open\agent-bridge\
 
 | 套件 | 用例 | 覆盖 | 跑法 |
 |---|---|---|---|
-| `scripts/test_ui.py` | **83** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航 | `.venv/Scripts/python.exe scripts/test_ui.py` |
-| `scripts/test_setup.py` | **66** | 向导各步、存储运维、推理模型探活判定、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像** | `.venv/Scripts/python.exe scripts/test_setup.py` |
-| `scripts/test_cli.py` | **68** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG` | 见下 |
+| `scripts/test_ui.py` | **92** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航 | `.venv/Scripts/python.exe scripts/test_ui.py` |
+| `scripts/test_setup.py` | **103** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像** | `.venv/Scripts/python.exe scripts/test_setup.py` |
+| `scripts/test_cli.py` | **73** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
 
 ```bash
 # 源码模式
@@ -317,9 +320,9 @@ ls dist-next/hy-mem-*.zip                 # 对外分发物，应该和 hy-mem/ 
 **Step 5.5 · 解压冒烟（务必做，这是「发给别人能跑」的唯一证据）**
 ```bash
 mkdir -p /d/tmp-hm/unzip && cd /d/tmp-hm/unzip && rm -rf hy-mem-* 
-unzip -q "$OLDPWD/dist-next/hy-mem-0.9.3-win64.zip"   # 或资源管理器右键解压
-cd hy-mem-0.9.3-win64
-cmd //c "启动 hy-mem.cmd" --version                    # 应打印 hy-mem 0.9.3
+unzip -q "$OLDPWD/dist-next/hy-mem-0.9.5-win64.zip"   # 或资源管理器右键解压
+cd hy-mem-0.9.5-win64
+cmd //c "启动 hy-mem.cmd" --version                    # 应打印 hy-mem 0.9.5
 ```
 此时目录里**没有** config.json / data/，能打印版本 = 包是自包含的。这一步在开发机上「看起来多余」，但它正是别人拿到包后的真实起点。
 
@@ -462,6 +465,9 @@ LoadLibrary: ?????????
 | `EMPTY_RESPONSE` + `completion_tokens == max_tokens` | 推理模型思考吃光配额 | `MEMORY_AGENT_MAX_TOKENS` 调到 3000~4000 |
 | ↑↓ 没反应 / 界面假死 | DSR 探测吞键；或 mintty/管道里 `isatty()` 骗人但 `kbhit()` 永远 False | `hy-mem tui-test` 逐键自检；`HY_MEM_TUI=0` 退回编号菜单 |
 | 粘贴 key 时面板出现多条 | 旧版输入行折行、只清最后一行 | 已修：`clip_input()` 水平单行窗口裁剪；长密钥永远只占一行 |
+| 向导/doctor 报 `HTTP 0: UnicodeEncodeError: 'latin-1' codec can't encode ... position 7-8` | **API Key 里粘进了中文/全角/零宽**。key 进的是 `Authorization: Bearer <key>` 头，`http.client` 用 latin-1 编码，"Bearer " 占 7 字符，所以偏移量从 7 起；请求根本没发出 | 0.9.5 起**根治（三层 + 一道类型锁）**：① 输入口 `tui.ask_secret` 逐字符校验，不合格当场重问、不落盘；② 配置闸门 `readiness()` 变成 `E_CONFIG` 缺项（`add`/`search`/`doctor` 全过）；③ **`netprobe.precheck()` 在组包之前判定**（不靠异常推断），返回 `NotSent(reason)`；④ `Sent` 构造时拒绝 `status < 100`，`status=0` 这个约定已从代码里删除。文案形如「请求没有发出：向量模型密钥 第 1 位是「没」（非 ASCII 字符）」 |
+| 报 `请求没有发出：域名解析失败 / 连接被拒绝 / 连接超时 / TLS 证书校验失败` | 请求没离开本机，**不是**服务器返回的错误码（`Sent` 才有 `HTTP xxx`）。`NotSent.cause` 区分 `dns` / `proxy` / `refused` / `tls` / `timeout` / `precheck` / `encoding` | 按 `cause` 判断：`precheck`/`encoding` 改配置（key、baseUrl 的字符集）；`dns`/`proxy`/`refused`/`tls`/`timeout` 查网络/代理/证书。自签证书在向导里勾「跳过证书校验」 |
+| `doctor` 报 `HTTP 401: Invalid API-key provided` 但 key 是刚复制的 | 大概率**少/多复制了字符**（实测：项目 `config.json` 里 116 位 vs 可用 key 117 位，尾号不同） | 重新从控制台复制；核对时看长度而不是首尾。`HTTP 401` 旁边的中文提示就是「密钥被拒绝」 |
 | 首次运行卡 30~40s 并刷 `Could not download model` | 两个叠加原因：① fastembed 默认拉 huggingface.co，国内超时重试 3 次；② `provider` 缺省曾落成 `local`，于是 `doctor` 顺手去下 92MB 模型 | 已修：`load_env()` 默认 `HF_ENDPOINT=hf-mirror.com` + 关进度条 + 摘 loguru handler；`embedding_provider()` 缺省取 config（openai）；`doctor` 遇到未缓存的本地模型只报告不下载。干净包首次 `doctor` 现为 **0.6s / 0 字节 stderr** |
 | 搜索分数普遍偏低 | `min_score` 用的是 SDK 默认 0.4 | 本项目已下调 0.35（flash 的分数带窄：噪声 0.28 / 干扰 0.33 / 改写 0.355~0.372 / 直命中 0.5~0.66） |
 | 一条记忆里混了多个主题 | 一次 add 被压成一条 fact，向量被拉平 | 一条只放一个主题，或 `--split`。实测：混写 0.341（低于阈值查不到）vs 拆开 0.472 / 0.641 |
@@ -483,6 +489,7 @@ LoadLibrary: ?????????
 6. 不要改 `presets.py` 的 `dims` 而不重建数据目录。
 7. 不要直接编辑宿主里的 `SKILL.md` 副本（`~/.workbuddy/skills/hy-mem/SKILL.md` 等），改 `skill/hy-mem/SKILL.md` 后 `hy-mem skill --install`。
 8. 不要凭想象补 SDK 参数 —— 先用 `hy-mem help --json` 看本地实现，涉及 SDK 行为先读 `.venv/Lib/site-packages/hy_memory/` 源码。
+9. **不要自己写 HTTP 调用** —— 所有出站请求只走 `cli/netprobe.py: post_json()`。它返回 `Sent`（带真实状态码）或 `NotSent`（带原因），`status = 0` 这个约定已从代码里删除。`test_setup.py` 有源码守卫：除 `netprobe.py` 外，`cli/` 下出现 `urlopen(` / `import urllib.request` / `requests` / `httpx`，或出现 `status == 0`，测试直接失败。
 
 **必须做**
 
@@ -491,6 +498,7 @@ LoadLibrary: ?????????
 3. 写入路径一律包 `store.WriteLock()`。
 4. 版本号只改 `cli/helptext.py: VERSION` 一处。
 5. 打包前备份、打包后恢复 exe 侧 config/data（§10 Step 2 / 6）。
+6. 新增任何对外请求，必须能回答「没发出时文案是什么」——不允许只处理 200 和 4xx。
 
 **SDK 硬约束（改代码前必读，完整 14 条在 `SKILL.md` §硬约束）**
 
@@ -545,7 +553,7 @@ ls -1 dist/ | grep -E "hy-mem|zip"
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 源码侧嵌入 key | **401 失效** | 源码 `config.json` 里是旧 key（`sk-ws-…YX_c`），exe 侧是新 key（`sk-ws-…g73m`）且正常。所以源码 doctor 报 `embedding_live FAIL`，exe 全 PASS。**要修就把 exe 那份 key 抄到源码 config.json** |
+| 源码侧嵌入 key | **401 失效** | 源码 `config.json` 里是旧 key（`sk-ws-…YX_c`，**116 位**），exe 侧是新 key（`sk-ws-…g73m`，**117 位**）且正常。长度差 1 位，典型是复制时被截断。所以源码 doctor 报 `embedding_live FAIL`，exe 全 PASS。**要修就把 exe 那份 key 抄到源码 config.json** |
 | 数据目录位置 | 有意偏离规范 | 仍在安装根 `data/`，未改 `%LOCALAPPDATA%`（理由是「整包拷走即迁移」）。**未配置时也必须落在安装根**：`load_env()` 会把 `MEMORY_DATA_DIR` 预设成 `default_data_dir()`，否则首次运行写进 `~/.hy_memory`，向导一保存就「记忆消失」 |
 | JSON 字段命名 | 有意偏离 | 部分保留 camelCase（如 `userId` / `dataDir`） |
 | `hy-mem.spec` | 未使用 | `build_exe.py` 走命令行参数，不读 spec。改打包参数只改 `build_exe.py` |
@@ -579,7 +587,7 @@ ls -1 dist/ | grep -E "hy-mem|zip"
 
 用户拍板：路线先记录，占时不做实验。**当前构建链不动**，以下四条仅作为将来需求变化时的备选，触发条件写明，避免下次又从头论证。
 
-先看决定一切的体积事实（`dist/hy-mem-0.9.3-win64.zip` 实测）：
+先看决定一切的体积事实（`dist/hy-mem-0.9.5-win64.zip` 实测）：
 
 ```
 解压总量        350.9 MB
@@ -594,10 +602,10 @@ ls -1 dist/ | grep -E "hy-mem|zip"
 |---|---|---|---|
 | **A. `--onefile` 单 exe** | 用户明确要求"就一个文件、慢点无所谓"（如只能发单个附件的场景） | 每次启动自解压 350 MB → 冷启数秒且**每次运行都解**；磁盘 ×2；杀软启发式最敏感的行为；`data/` 只能落 `%LOCALAPPDATA%`，"删目录即卸载"失效；解压失败/ TEMP 只读 → 仍是"双击闪退" | 半天：加 `HY_MEM_ONEFILE=1` 分支 + 实测启动耗时 + 冒烟。**必须作为附加产物，不替换 zip** |
 | **B. Inno Setup 安装器** | 要"点一下装好 + 开始菜单 + 卸载入口 + 自更新" | 需管理员权限、写注册表、卸载留残留；杀软对安装器更敏感；失去便携性 | 1~2 天：iss 脚本 + 签名（可选）+ 升级逻辑 |
-| **C. Nuitka 全量重编译** | ① 冷启成真实瓶颈；② 依赖里的重二进制（chromadb/onnxruntime）换成纯 Python；③ 要出 Linux 产物 | 本机**无 `cl.exe`**，需先装 VS Build Tools（数 GB）；构建 3 分钟 → 数十分钟；动态导入需逐个 `--include-package`，**失败模式是"构建绿、运行炸"**；体积只降 20~40 MB | 3~5 天（含 217 用例全部重跑 + 端到端 spike） |
+| **C. Nuitka 全量重编译** | ① 冷启成真实瓶颈；② 依赖里的重二进制（chromadb/onnxruntime）换成纯 Python；③ 要出 Linux 产物 | 本机**无 `cl.exe`**，需先装 VS Build Tools（数 GB）；构建 3 分钟 → 数十分钟；动态导入需逐个 `--include-package`，**失败模式是"构建绿、运行炸"**；体积只降 20~40 MB | 3~5 天（含 268 用例全部重跑 + 端到端 spike） |
 | **D. 只做体积裁剪（不改工具链）** | 要"能发微信"（<120 MB） | 有一定风险动到运行期依赖：须逐个验证 | **半天，优先级最高性价比**：裁 `_internal/sklearn/`（11.8 MB，含 openml 测试数据）、`*.lib`/`*.pyx`/`*.pxd`（构建期文件，运行不需要）、`datasets/tests` 数据、`langdetect` 多余语言模型 |
 
-**若将来做 A（onefile）实验，验收口径固定为**：① `--version` 连续 5 次取均值/最大值（含首次冷启）；② `%TEMP%` 落盘体积；③ 217 用例全跑；④ 端到端 `add`→`search`；⑤ 与现产物体积/启动对比表。不做这五项，不算实验完成。
+**若将来做 A（onefile）实验，验收口径固定为**：① `--version` 连续 5 次取均值/最大值（含首次冷启）；② `%TEMP%` 落盘体积；③ 268 用例全跑；④ 端到端 `add`→`search`；⑤ 与现产物体积/启动对比表。不做这五项，不算实验完成。
 
 **做 D 之前必须**：裁剪后用 `server` 起一次、跑 `add`+`search`+`worker --once`，因为 sklearn 是 chromadb 的隐式依赖，剪错会在运行期才炸。
 
