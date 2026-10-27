@@ -1186,7 +1186,14 @@ def cmd_list(args) -> int:
     try:
         want_tags = [t for t in (args.tag or []) if t.strip()]
         fetch_limit = args.limit if not want_tags else min(500, max(args.limit * 10, 50))
-        r = client.list_memories(limit=fetch_limit, offset=args.offset, order=args.order, **identity(args))
+        _ident = identity(args)
+        _no_ident_hint = None
+        if not _ident:
+            # SDK 的 list_by_user 无 user 过滤会直接拒绝（返回 0 条而非报错），
+            # 不提示的话用户会以为库里真没数据
+            _no_ident_hint = "未指定 -u/--user：SDK 拒绝无用户的全库列举，恒返回 0 条；请带 -u <用户> 重试"
+            print(c.dim(f"  {_no_ident_hint}"), file=sys.stderr)
+        r = client.list_memories(limit=fetch_limit, offset=args.offset, order=args.order, **_ident)
         vdb = r.get("vdb") or {}
         items = vdb.get("memories") or []
         source = "vdb"
@@ -1202,7 +1209,10 @@ def cmd_list(args) -> int:
             items = _filter_by_tags(items, want_tags, args.tag_mode)
         items = items[: args.limit]
         if args.json:
-            return ok({"count": len(items), "source": source, "tags_filter": want_tags, "memories": items}, True)
+            payload = {"count": len(items), "source": source, "tags_filter": want_tags, "memories": items}
+            if _no_ident_hint:
+                payload["hint"] = _no_ident_hint
+            return ok(payload, True)
         if not items:
             print("（空）" if not want_tags else f"（无匹配标签 {','.join(want_tags)} 的记忆）")
             _pend = _pending_jobs()
@@ -1650,6 +1660,11 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str]]:
             **ident,
         )
     ids = _ids_of(result)
+    if not ids:
+        # SDK 偶发把上游失败吞成「成功 + 空 ids」：实测 LLM 抽取 EMPTY_RESPONSE
+        # 时会回滚 L1 并返回 ok+[]。这里必须视为失败进重试，否则静默丢数据；
+        # 重试预算用尽进死信，可 queue --status dead 排查。
+        raise RuntimeError(f"SDK add 返回空 memory_ids（疑似抽取失败被吞）：{str(result)[:200]}")
     if tags:
         fresh = _new_ids_only(ids, before)
         store.bind_tags(conn, fresh, [str(t) for t in tags], "user")

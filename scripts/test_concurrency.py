@@ -9,12 +9,15 @@
 
 用法：python scripts/test_concurrency.py [exe路径]（缺省用源码口径）
 判定：全部进程退出码 0、无锁超时、drain 后队列无死信 → PASS
+隔离：临时沙箱数据目录（HY_MEM_CONFIG + MEMORY_DATA_DIR），绝不打真实库。
 """
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,8 +25,25 @@ REPO = Path(__file__).resolve().parent.parent
 PY = str(REPO / ".venv" / "Scripts" / "python.exe")
 
 
+def _make_sandbox() -> tuple[Path, dict]:
+    """临时数据目录 + 隔离 env。返回 (沙箱根, env)。"""
+    sandbox = Path(tempfile.mkdtemp(prefix="hymem-conc-"))
+    cfg = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
+    cfg["storage"]["dataDir"] = str(sandbox / "data")
+    (sandbox / "cfg.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    env = {
+        **os.environ,
+        "HY_MEM_CONFIG": str(sandbox / "cfg.json"),
+        "HY_MEM_HOME": str(REPO),
+        "MEMORY_DATA_DIR": str(sandbox / "data"),
+        "NO_COLOR": "1",
+    }
+    return sandbox, env
+
+
 def main() -> int:
     exe = sys.argv[1] if len(sys.argv) > 1 else None
+    sandbox, ENV = _make_sandbox()
 
     def cli_base():
         return [exe] if exe else [PY, str(REPO / "cli" / "hy_mem_cli.py")]
@@ -39,6 +59,7 @@ def main() -> int:
         procs[f"add-{i}"] = subprocess.Popen(
             [*cli_base(), "add", "--async", f"并发压测-{i}：多子代理同时写入落库验证", "--json"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            env=ENV,
         )
     # --- 2 个 MCP 客户端进程，各做一轮 search+list（模拟并发检索）---
     mcp_msgs = [
@@ -53,7 +74,7 @@ def main() -> int:
     for i in range(2):
         procs[f"mcp-{i}"] = subprocess.Popen(
             mcp_base(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, encoding="utf-8",
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", env=ENV,
         )
         procs[f"mcp-{i}"]._stdin_data = mcp_stdin  # type: ignore[attr-defined]
 
@@ -73,28 +94,49 @@ def main() -> int:
             fails.append((name, p.returncode, (err or "")[-200:], (out or "")[-200:]))
         print(f"  {name:8s} rc={p.returncode} {dt:5.1f}s")
 
-    # --- 消化队列，验证 4 条全部落库、无死信 ---
-    r = subprocess.run([*cli_base(), "worker", "--once"], capture_output=True, text=True,
-                       encoding="utf-8", timeout=600)
+    # --- 等 detached worker 全部落库（add --async 会自动拉起 worker，10~50s/条）---
+    deadline = time.time() + 300
+    stats = {}
+    while time.time() < deadline:
+        q = subprocess.run([*cli_base(), "queue", "--json"], capture_output=True, text=True,
+                           encoding="utf-8", timeout=60, env=ENV)
+        try:
+            stats = json.loads(q.stdout).get("stats", {})
+        except json.JSONDecodeError:
+            stats = {}
+        print(f"  [wait] queue = {stats}")
+        if stats.get("pending") == 0 and stats.get("running") == 0:
+            break
+        time.sleep(3)
     q = subprocess.run([*cli_base(), "queue", "--json"], capture_output=True, text=True,
-                       encoding="utf-8", timeout=60)
+                       encoding="utf-8", timeout=60, env=ENV)
     try:
         qd = json.loads(q.stdout)
         dead = qd.get("dead") or qd.get("deadLetter") or 0
     except json.JSONDecodeError:
         dead = "?"
     sr = subprocess.run([*cli_base(), "search", "并发压测 多子代理同时写入", "--json"],
-                        capture_output=True, text=True, encoding="utf-8", timeout=120)
+                        capture_output=True, text=True, encoding="utf-8", timeout=120, env=ENV)
     hits = len(json.loads(sr.stdout).get("results", [])) if sr.returncode == 0 else -1
 
     print(f"\n队列死信: {dead} | 落库检索命中: {hits} 条（应≥1）")
+    rc = 0
     if fails or dead not in (0, "?") or hits < 1:
         print("FAIL")
-        for name, rc, e, o in fails:
-            print(f"  {name} rc={rc}\n    err: {e}\n    out: {o}")
-        return 1
-    print(f"PASS：{len(procs)} 进程并发，全部正常，总耗时 {time.time()-t0:.1f}s")
-    return 0
+        for name, rc_, e, o in fails:
+            print(f"  {name} rc={rc_}\n    err: {e}\n    out: {o}")
+        rc = 1
+    else:
+        print(f"PASS：{len(procs)} 进程并发，全部正常，总耗时 {time.time()-t0:.1f}s")
+
+    # --- 清理沙箱（Windows 上 WAL 句柄可能延迟释放，失败不阻塞判定）---
+    try:
+        import shutil
+
+        shutil.rmtree(sandbox, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return rc
 
 
 if __name__ == "__main__":
