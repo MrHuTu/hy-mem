@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at  REAL    NOT NULL,
     started_at  REAL,
     finished_at REAL,
+    not_before  REAL,
     worker      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, id);
@@ -78,6 +79,22 @@ CREATE TABLE IF NOT EXISTS worker_reg (
 """
 
 
+def _migrate(conn) -> None:
+    """旧库幂等迁移。CREATE TABLE IF NOT EXISTS 不会给已有表补列，这里补。
+
+    0.9.8：jobs.not_before（延迟重试的最早可领时间）。并发迁移的竞态用
+    "duplicate column" 当成功处理——两个进程同时 ALTER，后到者报这个错，
+    说明列已经在了，目的已达成。
+    """
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "not_before" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN not_before REAL")
+    except sqlite3.OperationalError as e:
+        if "duplicate column" not in str(e).lower():
+            raise
+
+
 def connect() -> sqlite3.Connection:
     # 并发启动（多子代理）下的已知瞬态：另一进程 checkpoint/重建 WAL 的窗口里，
     # 新连接可能拿到只读句柄，PRAGMA 阶段就报 "attempt to write a readonly
@@ -92,6 +109,7 @@ def connect() -> sqlite3.Connection:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
             conn.executescript(SCHEMA)
+            _migrate(conn)
             return conn
         except sqlite3.OperationalError as e:
             conn.close()
@@ -229,12 +247,17 @@ def claim_next(conn, worker_id: str, kinds: tuple[str, ...] = ("add", "finalize"
 
     UPDATE ... WHERE status='pending' 的 rowcount 就是抢占是否成功，
     因此多个 worker 同时启动也不会重复消费同一条。
+
+    not_before：延迟重试的最早可领时间（失败退避写在这里，Celery 的
+    ETA/countdown 同款模式）。未到期的任务对 worker 不存在，claim 直接
+    跳过——失败任务的退避等待不阻塞队列里的其它任务。
     """
     while True:
         row = conn.execute(
             f"SELECT * FROM jobs WHERE status='pending' AND kind IN ({','.join('?' * len(kinds))}) "
+            "AND (not_before IS NULL OR not_before <= ?) "
             "ORDER BY id LIMIT 1",
-            kinds,
+            (*kinds, time.time()),
         ).fetchone()
         if row is None:
             return None
@@ -255,10 +278,21 @@ def mark_done(conn, job_id: int, memory_ids: list[str], extra: dict | None = Non
 
 
 def mark_failed(conn, job_id: int, error: str, retry: bool) -> str:
+    """失败落账。retry=True 且还有重试预算时回到 pending，并写退避 not_before。
+
+    退避曲线 min(2**attempts, 30)（attempts 已在 claim 时 +1）：
+    第 1/2/3 次失败分别延迟 2/4/8s，上限 30s。延迟写在任务行上而不是
+    worker 循环里 sleep——单消费者时代一个失败任务的退避会把整个队列
+    卡住最长 30s（head-of-line blocking），现在失败任务只是"暂不可领"。
+    """
     row = conn.execute("SELECT attempts, max_attempts FROM jobs WHERE id=?", (job_id,)).fetchone()
     attempts, max_attempts = (row["attempts"], row["max_attempts"]) if row else (0, 0)
     if retry and attempts < max_attempts:
-        conn.execute("UPDATE jobs SET status='pending', error=? WHERE id=?", (error[:500], job_id))
+        delay = min(2 ** int(attempts or 1), 30)
+        conn.execute(
+            "UPDATE jobs SET status='pending', error=?, not_before=? WHERE id=?",
+            (error[:500], time.time() + delay, job_id),
+        )
         return "pending"
     conn.execute(
         "UPDATE jobs SET status='dead', finished_at=?, error=? WHERE id=?", (time.time(), error[:500], job_id)
@@ -267,12 +301,12 @@ def mark_failed(conn, job_id: int, error: str, retry: bool) -> str:
 
 
 def requeue_stale(conn, older_than: float | None = None) -> int:
-    """把崩溃 worker 留下的 running 任务放回 pending。"""
+    """把崩溃 worker 留下的 running 任务放回 pending（清掉 not_before：重投立即到期）。"""
     if older_than is None:
         older_than = float(os.getenv("HY_MEM_STALE_SEC") or 900)
     cutoff = time.time() - older_than
     cur = conn.execute(
-        "UPDATE jobs SET status='pending', started_at=NULL, worker=NULL "
+        "UPDATE jobs SET status='pending', started_at=NULL, worker=NULL, not_before=NULL "
         "WHERE status='running' AND COALESCE(started_at, 0) < ?",
         (cutoff,),
     )
@@ -283,12 +317,16 @@ def queue_stats(conn) -> dict:
     rows = conn.execute("SELECT status, COUNT(*) n FROM jobs GROUP BY status").fetchall()
     stats = {r["status"]: r["n"] for r in rows}
     oldest = conn.execute("SELECT MIN(created_at) t FROM jobs WHERE status='pending'").fetchone()
+    delayed = conn.execute(
+        "SELECT COUNT(*) n FROM jobs WHERE status='pending' AND not_before > ?", (time.time(),)
+    ).fetchone()
     return {
         "total": sum(stats.values()),
         "pending": stats.get("pending", 0),
         "running": stats.get("running", 0),
         "done": stats.get("done", 0),
         "dead": stats.get("dead", 0),
+        "delayed": int(delayed["n"] or 0),
         "oldest_pending_age_s": round(time.time() - oldest["t"], 1) if oldest and oldest["t"] else None,
     }
 

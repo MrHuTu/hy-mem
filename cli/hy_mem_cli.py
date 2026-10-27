@@ -917,7 +917,16 @@ def _filter_by_tags(items: list[dict], tags: list[str] | None, tag_mode: str = "
 
 
 def _worker_cap() -> int:
-    """同时存活的 detached worker 上限。HY_MEM_MAX_WORKERS 可覆盖。"""
+    """消费并发线程数（lane 数）。HY_MEM_MAX_WORKERS 可覆盖，默认 3。
+
+    0.9.8 起语义变化：以前是「detached worker 进程数上限」，现在是单个
+    supervisor 进程内的消费线程数。SDK 的 reconcile 是读改写序列，跨进程/
+    跨线程必须由 WriteLock 串行（锁覆盖整个 client.add 含 LLM 抽取），
+    所以多个消费进程是伪并发——N 个进程只会在锁上排队，还各付一份 SDK
+    初始化（hy_memory.log / chroma 的多进程初始化竞态正是历史并发风暴的
+    根源）。线程池里锁语义不变，非临界区（snapshot 读、入账、退避调度）
+    可与在途写入重叠。
+    """
     try:
         return max(1, int(os.getenv("HY_MEM_MAX_WORKERS") or 3))
     except ValueError:
@@ -925,25 +934,25 @@ def _worker_cap() -> int:
 
 
 def _spawn_detached_worker(idle_exit: float = 90.0) -> bool:
-    """拉起一个脱管的后台 worker（空闲自退出），成功返回 True。
+    """拉起一个脱管的后台消费 supervisor（空闲自退出），成功返回 True。
 
     为什么不常驻：智能体场景下「临时拉起 + 空闲自杀」最干净 —— add --async
-    入队后立即返回毫秒级，落库由后台进程在 6~9s 内完成，不留僵尸进程。
-    单写者由 WriteLock 与 SQLite 抢占兜底，即使拉重了也无害。
+    入队后立即返回毫秒级，落库由后台进程完成，不留僵尸进程。
 
-    上限闸门：存活 worker（心跳 15s 内）达到 HY_MEM_MAX_WORKERS（默认 3）
-    就不再拉起——风暴竞态下最多超额 1~2 个，30s 内没抢到任务会自退。
+    消费并发模型（0.9.8）：detached supervisor 恒为 1 个进程，进程内跑
+    N 个消费线程（--lanes，默认 HY_MEM_MAX_WORKERS=3）。进程数恒 1 是
+    有意的——见 _worker_cap 的语义说明。WriteLock 与 SQLite 抢占兜底，
+    即使拉重了也无害（闸门 cap=1 + 心跳判活）。
     """
     import install_ops
 
-    # 上限闸门（WriteLock 内占位，串行化风暴竞态）：存活 worker 数达
-    # HY_MEM_MAX_WORKERS（默认 3）就不再拉起。占位行 15s 过期，Popen
-    # 失败也不会永久卡死后续拉起。
+    # 上限闸门（WriteLock 内占位，串行化风暴竞态）：detached supervisor 恒 1 个。
+    # 占位行 15s 过期，Popen 失败也不会永久卡死后续拉起。
     try:
         with store.WriteLock():
             conn = store.connect()
             try:
-                slot = store.claim_worker_slot(conn, _worker_cap())
+                slot = store.claim_worker_slot(conn, 1)
             finally:
                 conn.close()
     except Exception:  # noqa: BLE001  闸门失败宁可多拉不多丢
@@ -955,6 +964,7 @@ def _spawn_detached_worker(idle_exit: float = 90.0) -> bool:
         "worker",
         "--idle-exit", str(idle_exit),
         "--poll", "1.0",
+        "--lanes", str(_worker_cap()),
     ]
     try:
         if os.name == "nt":
@@ -1043,7 +1053,7 @@ def cmd_add(args) -> int:
             "workerLive": worker_live, "workerSpawned": spawned,
         }
         if spawned:
-            tail = "已自动拉起后台 worker（空闲 10 分钟自退出），落库无需等待"
+            tail = "已自动拉起后台消费进程（3 线程消费，空闲 90 秒自退出），落库无需等待"
         elif worker_live:
             tail = "后台 worker 在跑，稍后自动落库"
         else:
@@ -1714,6 +1724,18 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str]]:
             **ident,
         )
     ids = _ids_of(result)
+    # 静默失败防线（0.9.8）：L1 原始层写成功 ≠ 记忆可用。
+    # SDK 在 L2 事实抽取失败时仍可能返回 success=True + 非空 ids（含 L1 id），
+    # 但诊断字段 agent_error_code 会带 EMPTY_RESPONSE / RECONCILE_FAILED 等。
+    # 只判 ids 会把「抽取失败」标成 done，记忆永远停在未抽取的 L1 状态。
+    # 这里把它变成重试（退避写在任务行 not_before），耗尽进死信可见。
+    # 注意区分：extractor 判定「无可提取事实」是正常结论（agent_status=success、
+    # agent_error_code 为空、L1 退居 shadow），不误判、不重试。
+    if result.get("success") is False:
+        raise RuntimeError(f"SDK 写入失败：{result.get('error_message') or 'unknown'}")
+    agent_code = result.get("agent_error_code") or ""
+    if agent_code:
+        raise RuntimeError(f"agent 抽取失败（{agent_code}）：{result.get('agent_error') or ''}")
     if not ids:
         # SDK 偶发把上游失败吞成「成功 + 空 ids」：实测 LLM 抽取 EMPTY_RESPONSE
         # 时会回滚 L1 并返回 ok+[]。这里必须视为失败进重试，否则静默丢数据；
@@ -1726,98 +1748,207 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str]]:
     return result, ids
 
 
+class _LaneState:
+    """多 lane 共享的计数器（一把小锁串行化增减与读取）。"""
+
+    def __init__(self):
+        import threading
+
+        self._lock = threading.Lock()
+        self.ok = 0
+        self.failed = 0
+        self.active = 0  # 正在执行任务的 lane 数
+        self.claimed_any = False
+        self.last_active = time.time()
+
+    def claim_started(self) -> None:
+        with self._lock:
+            self.active += 1
+            self.claimed_any = True
+            self.last_active = time.time()
+
+    def claim_ended(self) -> None:
+        with self._lock:
+            self.active -= 1
+            self.last_active = time.time()
+
+    def done_one(self, ok: bool) -> tuple[int, int]:
+        with self._lock:
+            if ok:
+                self.ok += 1
+            else:
+                self.failed += 1
+            return self.ok + self.failed
+
+    def processed(self) -> int:
+        with self._lock:
+            return self.ok + self.failed
+
+
 def cmd_worker(args) -> int:
+    """队列消费者：单进程 supervisor + N 个消费线程（lane）。
+
+    为什么是线程不是多进程：SDK 的 add 全程需要 WriteLock 串行（reconcile
+    读改写，锁必须覆盖整个 client.add 含 LLM 抽取），多进程只是排队，吞吐
+    恒为 1，还各付一份 SDK 初始化与 chroma 竞态。线程模型：lane 在锁外的
+    部分（snapshot 读、入账、退避调度）可与在途写入重叠；client 按 mode
+    共享一个实例，SDK 内部单事件循环保证读操作安全。
+
+    失败退避不在循环里 sleep（旧实现单消费者时一个失败任务会把整个队列
+    卡住最长 30s）：mark_failed 把 not_before 写进任务行，claim_next 只领
+    到期任务，lane 立刻去领下一个。
+    """
+    import threading
+
     rc = require_ready("消费写入队列")
     if rc is not None:
         return rc
     wid = _worker_id()
-    conn = store.connect()
-    clients: dict[str, object] = {}
-
-    def get_client(mode: str | None):
-        key = mode or "default"
-        if key not in clients:
-            clients[key] = make_client(mode)
-        return clients[key]
+    lanes = max(1, int(getattr(args, "lanes", 0) or 0) or _worker_cap())
+    if lanes > 16:
+        lanes = 16  # 防御：线程再多也只会挤在 WriteLock 上，没有意义
 
     # 启动期回收僵死任务套瞬态重试：新建库/风暴期 WAL -shm 重建窗口会让
-    # 这条 UPDATE 撞 readonly（code 8），worker 没 --once 时异常直接退进程
-    # （stderr 是 DEVNULL，死得无声无息），曾实测导致任务卡 pending
+    # 这条 UPDATE 撞 readonly（code 8），曾实测导致任务卡 pending
     if args.no_recover:
         recovered = 0
     else:
         recovered = store.transient_write(lambda c: store.requeue_stale(c))
     if recovered:
         print(f"hy-mem: 回收 {recovered} 个僵死任务", file=sys.stderr)
-    store.worker_purge_stale(conn)  # 清理硬杀残留的注册行
 
-    processed = ok_n = failed = 0
-    last_active = time.time()
+    hb_conn = store.connect()
+    store.worker_purge_stale(hb_conn)  # 清理硬杀残留的注册行
+
+    clients: dict[str, object] = {}
+    clients_lock = threading.Lock()
+
+    def get_client(mode: str | None):
+        key = mode or "default"
+        with clients_lock:
+            if key not in clients:
+                clients[key] = make_client(mode)  # 创建串行化，避免进程内再撞初始化
+            return clients[key]
+
+    stop = threading.Event()
+    st = _LaneState()
     started = time.time()
-    claimed_any = False
-    exit_code = EXIT_OK
+    conn_share: dict[int, object] = {}  # 每 lane 独享的 sqlite 连接（sqlite 不跨线程）
 
-    try:
-        while True:
-            # 心跳兼注册：供 add --async 判断「有无活着的 worker / 几个」
-            try:
-                store.heartbeat(conn, wid)
-            except Exception:  # noqa: BLE001  心跳失败不影响消费主流程
-                pass
-            if args.max and ok_n + failed >= args.max:
-                break
-            row = store.claim_next(conn, wid)
-            if row is None:
-                if args.once:
+    def lane(lane_id: int) -> None:
+        conn = store.connect()
+        conn_share[lane_id] = conn
+        try:
+            while not stop.is_set():
+                if args.max and st.processed() >= args.max:
+                    stop.set()
                     break
-                if args.idle_exit and time.time() - last_active >= args.idle_exit:
-                    break
-                if args.timeout and time.time() - started >= args.timeout:
-                    break
-                # 空闲快速释放：拉起后 30s 内从没抢到过任务且队列空 → 尽早退出。
-                # 风暴竞态多拉的那几个 worker 不必空耗内存到 idle-exit。
-                if (
-                    not claimed_any
-                    and time.time() - started >= 30
-                    and store.queue_stats(conn)["pending"] == 0
-                ):
-                    break
-                time.sleep(args.poll)
-                continue
+                row = store.claim_next(conn, wid)
+                if row is None:
+                    qs = store.queue_stats(conn)
+                    if args.once and st.active == 0:
+                        # 一次性模式：无可领任务且本进程无在途 → 收工。
+                        # 延迟重试的任务（not_before 未到）留待下次消费。
+                        stop.set()
+                        break
+                    if (
+                        not st.claimed_any
+                        and time.time() - started >= 30
+                        and qs["pending"] == 0
+                    ):
+                        # 空闲快速释放：拉起后 30s 从没抢到过任务且队列空 → 尽早退出
+                        stop.set()
+                        break
+                    if (
+                        args.idle_exit
+                        and time.time() - st.last_active >= args.idle_exit
+                        and qs["pending"] == 0
+                        and st.active == 0
+                    ):
+                        # 空闲释放：只在队列真正清空时退——延迟任务到期前
+                        # pending>0，不会误退，supervisor 会守到它可领。
+                        stop.set()
+                        break
+                    if args.timeout and time.time() - started >= args.timeout:
+                        stop.set()
+                        break
+                    time.sleep(args.poll)
+                    continue
 
-            job_id, kind = row["id"], row["kind"]
-            claimed_any = True
-            last_active = time.time()
-            t0 = time.time()
+                job_id, kind = row["id"], row["kind"]
+                st.claim_started()
+                t0 = time.time()
+                try:
+                    result, ids = _execute_job(conn, row, get_client)
+                    store.mark_done(conn, job_id, ids)
+                    st.done_one(True)
+                    ms = int((time.time() - t0) * 1000)
+                    print(f"[lane{lane_id}][{job_id}] {kind} ok {ms}ms ids={len(ids)}", file=sys.stderr)
+                    if args.json:
+                        emit({"ok": True, "job": job_id, "kind": kind, "ms": ms, "memory_ids": ids}, True)
+                except KeyboardInterrupt:
+                    store.mark_failed(conn, job_id, "interrupted", retry=True)
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    st.done_one(False)
+                    state = store.mark_failed(conn, job_id, f"{type(e).__name__}: {e}", retry=True)
+                    print(
+                        f"[lane{lane_id}][{job_id}] {kind} FAILED -> {state}: {type(e).__name__}: {e}",
+                        file=sys.stderr,
+                    )
+                    if args.json:
+                        emit({"ok": False, "job": job_id, "state": state, "error": str(e)}, True)
+                    # 退避写在任务行（not_before），这里不 sleep，立刻领下一个
+                finally:
+                    st.claim_ended()
+        finally:
             try:
-                result, ids = _execute_job(conn, row, get_client)
-                store.mark_done(conn, job_id, ids)
-                ok_n += 1
-                ms = int((time.time() - t0) * 1000)
-                msg = f"[{job_id}] {kind} ok {ms}ms ids={len(ids)}"
-                print(msg, file=sys.stderr)
-                if args.json:
-                    emit({"ok": True, "job": job_id, "kind": kind, "ms": ms, "memory_ids": ids}, True)
-            except KeyboardInterrupt:
-                store.mark_failed(conn, job_id, "interrupted", retry=True)
-                raise
-            except Exception as e:  # noqa: BLE001
-                failed += 1
-                state = store.mark_failed(conn, job_id, f"{type(e).__name__}: {e}", retry=True)
-                print(f"[{job_id}] {kind} FAILED -> {state}: {type(e).__name__}: {e}", file=sys.stderr)
-                if args.json:
-                    emit({"ok": False, "job": job_id, "state": state, "error": str(e)}, True)
-                # 退避，避免对上游 LLM/嵌入端点的瞬时故障做紧密重试
-                time.sleep(min(2 ** int(row["attempts"] or 1), 30))
-            processed += 1
-    finally:
-        store.worker_leave(conn, wid)  # 注销注册行，立即腾出 worker 名额
-        for c in clients.values():
-            try:
-                c.close()
+                conn.close()
             except Exception:  # noqa: BLE001
                 pass
-        conn.close()
+
+    threads = [
+        threading.Thread(target=lane, args=(i,), daemon=True, name=f"lane-{i}")
+        for i in range(lanes)
+    ]
+    for t in threads:
+        t.start()
+
+    interrupted = False
+    try:
+        # 主线程只做心跳与看门狗：注册 supervisor 身份，供 add --async 判活
+        while any(t.is_alive() for t in threads):
+            try:
+                store.heartbeat(hb_conn, wid)
+            except Exception:  # noqa: BLE001  心跳失败不影响消费主流程
+                pass
+            time.sleep(min(args.poll, 1.0))
+    except KeyboardInterrupt:
+        interrupted = True
+        print("hy-mem: 中断，等待在途任务收尾（再按一次 Ctrl+C 强退）…", file=sys.stderr)
+        stop.set()
+        try:
+            for t in threads:
+                t.join(timeout=10)
+        except KeyboardInterrupt:
+            pass  # 第二次 Ctrl+C：立即强退，在途任务由 requeue_stale 兜底
+    if not interrupted:
+        for t in threads:
+            t.join(timeout=240)  # 挂着的 LLM 调用留足收尾时间
+
+    try:
+        store.worker_leave(hb_conn, wid)  # 注销注册行，立即腾出拉起名额
+    except Exception:  # noqa: BLE001
+        pass
+    for c in clients.values():
+        try:
+            c.close()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        hb_conn.close()
+    except Exception:  # noqa: BLE001
+        pass
 
     stats = None
     conn = store.connect()
@@ -1825,8 +1956,18 @@ def cmd_worker(args) -> int:
         stats = store.queue_stats(conn)
     finally:
         conn.close()
-    payload = {"ok": True, "processed": processed, "succeeded": ok_n, "failed": failed, "queue": stats}
-    return ok(payload, args.json, f"worker 退出：成功 {ok_n} / 失败 {failed} / 剩余待处理 {stats['pending']}")
+    processed = st.processed()
+    payload = {
+        "ok": True, "lanes": lanes, "processed": processed,
+        "succeeded": st.ok, "failed": st.failed, "queue": stats,
+    }
+    if interrupted:
+        payload["interrupted"] = True
+    tail = f"，延迟重试 {stats['delayed']} 条" if stats.get("delayed") else ""
+    return ok(
+        payload, args.json,
+        f"worker 退出：{lanes} 线程，成功 {st.ok} / 失败 {st.failed} / 剩余待处理 {stats['pending']}{tail}",
+    )
 
 
 def cmd_queue(args) -> int:
@@ -1869,8 +2010,8 @@ def cmd_retry(args) -> int:
     try:
         if args.job_id == "dead" or args.all_dead:
             cur = conn.execute(
-                "UPDATE jobs SET status='pending', attempts=0, error=NULL, started_at=NULL, worker=NULL "
-                "WHERE status='dead'"
+                "UPDATE jobs SET status='pending', attempts=0, error=NULL, started_at=NULL, worker=NULL, "
+                "not_before=NULL WHERE status='dead'"
             )
             n = cur.rowcount
         else:
@@ -1879,8 +2020,8 @@ def cmd_retry(args) -> int:
             except (TypeError, ValueError):
                 return fail("job_id 必须是数字，或使用 dead 重投全部死信", EXIT_USAGE)
             cur = conn.execute(
-                "UPDATE jobs SET status='pending', attempts=0, error=NULL, started_at=NULL, worker=NULL "
-                "WHERE id=? AND status IN ('dead','done')",
+                "UPDATE jobs SET status='pending', attempts=0, error=NULL, started_at=NULL, worker=NULL, "
+                "not_before=NULL WHERE id=? AND status IN ('dead','done')",
                 (jid,),
             )
             n = cur.rowcount
@@ -2677,12 +2818,13 @@ def build_parser() -> argparse.ArgumentParser:
     ps.set_defaults(func=cmd_stats)
 
     # ---- 异步队列 ----
-    ps = sub.add_parser("worker", help="消费异步任务（单写者）")
-    ps.add_argument("--once", action="store_true", help="只消费当前队列，清空即退出")
+    ps = sub.add_parser("worker", help="消费异步任务（单进程 supervisor + 多消费线程）")
+    ps.add_argument("--once", action="store_true", help="只消费当前队列，清空即退出（延迟重试任务留待下次）")
     ps.add_argument("--max", type=int, default=0, help="最多处理 N 个任务后退出（0=不限）")
     ps.add_argument("--poll", type=float, default=1.0, help="空闲轮询间隔秒")
     ps.add_argument("--idle-exit", type=float, default=0, help="空闲超过 N 秒后退出（0=常驻）")
     ps.add_argument("--timeout", type=float, default=0, help="总运行时长上限秒（0=不限）")
+    ps.add_argument("--lanes", type=int, default=0, help="消费线程数（0=取 HY_MEM_MAX_WORKERS，默认 3）")
     ps.add_argument("--no-recover", action="store_true", help="不回收僵死的 running 任务")
     ps.set_defaults(func=cmd_worker)
 
