@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS tags (
 );
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_tags_mid ON tags(memory_id);
+
+CREATE TABLE IF NOT EXISTS worker_hb (
+    id     INTEGER PRIMARY KEY CHECK (id = 1),
+    ts     REAL NOT NULL,
+    worker TEXT
+);
 """
 
 
@@ -240,6 +246,26 @@ def queue_stats(conn) -> dict:
         "dead": stats.get("dead", 0),
         "oldest_pending_age_s": round(time.time() - oldest["t"], 1) if oldest and oldest["t"] else None,
     }
+
+
+# --------------------------------------------------------------------------
+# worker 心跳（add --async 判断要不要自动拉起临时 worker 用）
+# --------------------------------------------------------------------------
+def heartbeat(conn, worker_id: str) -> None:
+    """worker 每轮循环调用：单行 UPSERT，开销可忽略。"""
+    conn.execute(
+        "INSERT INTO worker_hb (id, ts, worker) VALUES (1, ?, ?) "
+        "ON CONFLICT(id) DO UPDATE SET ts=excluded.ts, worker=excluded.worker",
+        (time.time(), worker_id),
+    )
+
+
+def worker_age(conn) -> float | None:
+    """距上次 worker 心跳的秒数；从无心跳返回 None。"""
+    row = conn.execute("SELECT ts FROM worker_hb WHERE id = 1").fetchone()
+    if row is None or not row["ts"]:
+        return None
+    return max(0.0, time.time() - row["ts"])
 
 
 def list_jobs(conn, status: str | None = None, limit: int = 20) -> list[dict]:

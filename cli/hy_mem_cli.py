@@ -853,6 +853,37 @@ def _filter_by_tags(items: list[dict], tags: list[str] | None, tag_mode: str = "
     return out
 
 
+def _spawn_detached_worker(idle_exit: float = 600.0) -> bool:
+    """拉起一个脱管的后台 worker（空闲自退出），成功返回 True。
+
+    为什么不常驻：智能体场景下「临时拉起 + 空闲自杀」最干净 —— add --async
+    入队后立即返回毫秒级，落库由后台进程在 6~9s 内完成，不留僵尸进程。
+    单写者由 WriteLock 与 SQLite 抢占兜底，即使拉重了也无害。
+    """
+    import install_ops
+
+    argv = install_ops.target_command() + [
+        "worker",
+        "--idle-exit", str(idle_exit),
+        "--poll", "1.0",
+    ]
+    try:
+        if os.name == "nt":
+            flags = 0x08000000  # CREATE_NO_WINDOW：不闪黑框
+            subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True,
+            )
+        else:
+            subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+        return True
+    except OSError:
+        return False
+
+
 def cmd_add(args) -> int:
     rc = require_ready("写入记忆")
     if rc is not None:
@@ -882,13 +913,26 @@ def cmd_add(args) -> int:
                 for p in parts
             ]
             stats = store.queue_stats(conn)
+            # 无人消费就自动拉起临时 worker：心跳超过阈值或从无心跳且有待处理任务。
+            # 阈值取 poll(1s) 的 15 倍，容掉 worker 卡顿，避免重复拉起。
+            hb_age = store.worker_age(conn)
+            worker_live = hb_age is not None and hb_age < 15.0
+            spawned = False
+            if stats["pending"] > 0 and not worker_live:
+                spawned = _spawn_detached_worker()
         finally:
             conn.close()
-        payload = {"ok": True, "queued": len(ids), "job_ids": ids, "tags": tags, "queue": stats}
-        human = (
-            f"已入队 {len(ids)} 个任务（job {ids[0]}..{ids[-1]}），"
-            f"待处理 {stats['pending']} 个。消费请跑：hy-mem worker"
-        )
+        payload = {
+            "ok": True, "queued": len(ids), "job_ids": ids, "tags": tags, "queue": stats,
+            "workerLive": worker_live, "workerSpawned": spawned,
+        }
+        if spawned:
+            tail = "已自动拉起后台 worker（空闲 10 分钟自退出），落库无需等待"
+        elif worker_live:
+            tail = "后台 worker 在跑，稍后自动落库"
+        else:
+            tail = "消费请跑：hy-mem worker"
+        human = f"已入队 {len(ids)} 个任务（job {ids[0]}..{ids[-1]}），待处理 {stats['pending']} 个。{tail}"
         return ok(payload, args.json, human)
 
     client = make_client(args.mode)
@@ -1504,6 +1548,11 @@ def cmd_worker(args) -> int:
 
     try:
         while True:
+            # 心跳：供 add --async 判断「有无活着的 worker」决定是否自动拉起
+            try:
+                store.heartbeat(conn, wid)
+            except Exception:  # noqa: BLE001  心跳失败不影响消费主流程
+                pass
             if args.max and ok_n + failed >= args.max:
                 break
             row = store.claim_next(conn, wid)
@@ -2299,6 +2348,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--recover", action="store_true", help="先把僵死任务放回待处理")
     ps.set_defaults(func=cmd_queue)
 
+    ps = sub.add_parser("mcp", help="MCP stdio 服务器（宿主拉起，勿手动运行）")
+    ps.set_defaults(func=cmd_mcp)
+
     ps = sub.add_parser("drain", help="阻塞等待队列清空")
     ps.add_argument("--timeout", type=float, default=300)
     ps.add_argument("--poll", type=float, default=1.0)
@@ -2409,6 +2461,18 @@ def classify_error(e: BaseException) -> tuple[int, str, str]:
     if name in _RUNTIME_TYPES:
         return EXIT_RUNTIME, "E_RUNTIME", "先跑 `hy-mem doctor`；嵌入密钥无效用 `hy-mem setup --step embedding`"
     return EXIT_RUNTIME, "E_RUNTIME", "加 --verbose 复跑可看到详细堆栈"
+
+
+def cmd_mcp(args) -> int:
+    """MCP stdio 服务器：宿主按会话拉起，随会话退出。
+
+    铁律：此模式下 stdout 只准有协议响应。load_env 后直接进 serve() 主循环，
+    不经过 ok()/print() 那套人类输出。
+    """
+    load_env()
+    import mcp_server
+
+    return mcp_server.serve()
 
 
 def main(argv=None) -> int:
