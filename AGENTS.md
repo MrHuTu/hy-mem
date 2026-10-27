@@ -35,7 +35,7 @@
 | 向量维度 | **1024**（`qwen3.7-text-embedding-flash`） | `hy-mem doctor` 的 `embedding_live` |
 | LLM | `deepseek-v4-flash` @ `https://newapi.jxdata.com:18000/v1`（推理模型） | `hy-mem config show` |
 | 检索阈值 | `minScore = 0.35`（SDK 默认 0.4 会漏召回，已下调） | `config.json → search.minScore` |
-| 版本控制 | **不是 git 仓库**，没有 `.git` | `git rev-parse --is-inside-work-tree` |
+| 版本控制 | git 仓库，远端 `gitee.com/mrhututu/hy-mem`（master）；**纯源码仓**，产物/环境/缓存不入库 | `git remote -v && git count-objects -vH` |
 
 ---
 
@@ -77,9 +77,11 @@ D:\tools_open\agent-bridge\
 │
 ├── skill\hy-mem\SKILL.md      ← 面向调用方的用法说明（516 行）。打包时复制进产物
 ├── data\                      ← 源码环境的记忆库 + 队列库（整体备份）
-├── .models\                   ← fastembed 的 ONNX 模型缓存（bge-small-zh-v1.5）
-├── .venv\                     ← 虚拟环境（含 pyinstaller）
-└── dist\
+├── requirements.txt           ← 环境重建清单（114 个包，pip install -r 一键装回）
+├── .models\                   ← fastembed 的 ONNX 模型缓存（本地生成，不入库；首跑自动下载）
+├── .venv\                     ← 虚拟环境（本地生成，不入库；pip install -r requirements.txt 重建）
+├── build\                     ← PyInstaller 中间物（本地生成，不入库）
+└── dist\                      ← 产物（本地生成，不入库；`python scripts/build_exe.py` 约 110s）
     ├── hy-mem\                ← 产物目录：_internal/ + hy-mem.exe + skill/ + 启动器 (+ 自用 config/data)
     └── hy-mem-0.9.5-win64.zip ← 对外分发物（152MB，解压即完整目录）
 ```

@@ -1,4 +1,9 @@
-# 大体积构建产物（Gitee 单文件上限 100MB，勿入库；用 scripts/build_exe.py 重新生成）
-dist/*.zip
-# 打包消毒产生的旧目录备份
-dist/_hy-mem-old-*/
+# 构建产物与中间物——一律不入库，用 scripts/build_exe.py 重新生成（约 110s）
+build/
+dist/
+# 本地环境与模型缓存——pip install -r requirements.txt / 首跑 fastembed 自动下载
+.venv/
+.models/
+# Python 字节码
+__pycache__/
+*.pyc
