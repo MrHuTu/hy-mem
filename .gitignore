@@ -1,0 +1,4 @@
+# 大体积构建产物（Gitee 单文件上限 100MB，勿入库；用 scripts/build_exe.py 重新生成）
+dist/*.zip
+# 打包消毒产生的旧目录备份
+dist/_hy-mem-old-*/
