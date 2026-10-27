@@ -146,7 +146,11 @@ def _tool_list_memories(args: dict) -> str:
     limit = max(1, min(int(args.get("limit") or 10), 50))
     client = _client()
     try:
-        rows = client.list_memories(limit=limit, **_identity()) or []
+        # SDK 返回 dict（{"vdb": {"memories": [...]}}），与 CLI cmd_list 同解析；
+        # 直接当列表迭代会拿到 key 字符串、被 isinstance 过滤成恒 0 条
+        u = _identity()["user_id"]
+        r = client.list_memories(limit=limit, user_id=u) or {}
+        rows = (r.get("vdb") or {}).get("memories") or []
         out = [
             {
                 "memory_id": m.get("memory_id"),
