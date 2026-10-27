@@ -171,8 +171,11 @@ hy-mem add --async --tag infra "消息队列用 RocketMQ，4.9.4"
 
 ```
 add --async  →  写 SQLite 队列（立即返回 job_id）
+                ↳ 队列无人消费时**自动拉起后台 worker**（空闲 10 分钟自退出，无黑窗）
 worker       →  单写者消费，串行落库，失败重试，超次数进死信
 ```
+
+**0.9.6 起 `add --async` 不再需要手动跑 worker**：入队时检测心跳，没有活着的 worker 就自动拉起一个临时的。`--json` 输出里 `workerSpawned: true` 表示已拉起、`workerLive: true` 表示已有 worker 在跑。手动跑 worker 仍然可用（调试/补漏）。
 
 ```bash
 # 消费队列：清空即退出
@@ -213,7 +216,27 @@ hy-mem worker --once    # 消费掉（pro + 推理模型每条约 10~50s）
 
 进程被 Ctrl+C 打断时（任务 `error=interrupted`、`attempts` +1），任务会回到 `pending` 等重试，但**必须有 worker 再跑一次**才会继续。菜单里写完异步条目后会直接问「现在就跑一次 worker 落库吗」，默认是。
 
-**给 agent 的建议**：批量沉淀用 `--async` + 随后 `hy-mem worker --once`（或 `drain`）。要求「写完立刻能查到」的场景，就别用 `--async`，直接同步 `add`。
+**给 agent 的建议**：批量沉淀用 `--async` 即可（0.9.6 起自动拉起 worker 落库，无需手动消费）。要求「写完立刻能查到」的场景，就别用 `--async`，直接同步 `add`。
+
+## MCP 接入（原生工具，优先于命令行）
+
+宿主支持 MCP 时（WorkBuddy / CodeBuddy 的 `mcp.json`），优先配 stdio 服务，智能体获得结构化工具而非文本约定：
+
+```json
+{
+  "mcpServers": {
+    "hy-mem": {
+      "command": "hy-mem",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+- 协议：JSON-RPC 2.0 换行分隔（MCP stdio 标准），宿主按会话拉起、随会话退出，不常驻。
+- 工具：`add_memory`（默认异步毫秒返回）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）。
+- 身份：MCP 会话固定用默认身份（config 的 identity.userId），与 CLI 不传 `-u` 时同口径。
+- 命令行与 MCP 可共存：同一套 queue.db + WriteLock + 向量库。
 
 ## 标签与归档
 
