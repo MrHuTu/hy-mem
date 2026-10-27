@@ -198,6 +198,37 @@ CMD_META: dict[str, dict] = {
             "不改 PATH，只告诉你该加哪一条——改环境变量这件事不替用户做决定。",
         ],
     },
+    "version": {
+        "group": "元信息",
+        "when": "自动升级前比对版本号，或需要知道安装根 / 数据目录在哪时。",
+        "mutates": False,
+        "examples": ["hy-mem version", "hy-mem version --json"],
+        "output": {
+            "version": "当前版本（与 --version 同源：helptext.VERSION）",
+            "mode": "exe | source",
+            "installRoot": "安装根绝对路径——升级就是替换这个目录",
+            "configPath": "生效配置的路径（HY_MEM_CONFIG 优先）",
+            "configured": "是否已有配置（false 时走的是默认值）",
+            "dataDir": "当前生效的数据目录",
+        },
+        "notes": ["与 --version 输出同一份版本号，但附带定位信息；自动升级流程：version --json → 下载新版 → 替换 installRoot。"],
+    },
+    "migrate": {
+        "group": "配置",
+        "when": "升级接管后数据还在旧安装目录时：把数据迁入当前安装根，之后才能安全删除旧目录。",
+        "mutates": "复制数据目录到 <安装根>/data 并改写 config.json 的 storage.dataDir（原目录保留）",
+        "examples": ["hy-mem migrate", "hy-mem migrate --json"],
+        "output": {
+            "migrated": "是否执行了迁移（数据已在当前安装内时为 false）",
+            "from": "原数据目录",
+            "to": "新数据目录",
+            "bytes": "迁移的数据量（字节）",
+        },
+        "notes": [
+            "worker 运行中会拒绝迁移（否则新旧目录数据分家）；等它空闲自退后再跑。",
+            "原目录不删，留作备份；目标目录非空时拒绝执行。",
+        ],
+    },
     "tui-test": {
         "group": "交互",
         "when": "人类诊断用：方向键/鼠标没反应时，先跑它确认终端把按键发成了什么。agent 不要调用。",

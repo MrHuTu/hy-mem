@@ -1884,6 +1884,104 @@ def cmd_install(args) -> int:
     return ok(payload, args.json, "\n".join(lines))
 
 
+def cmd_version(args) -> int:
+    """版本与安装信息。自动升级就靠它：比对版本 + 定位要替换的安装根。"""
+    import config as cfgmod
+    import helptext
+    import install_ops
+
+    frozen = bool(getattr(sys, "frozen", False))
+    root = install_ops._current_root()
+    cfg_env = os.getenv("HY_MEM_CONFIG", "").strip()
+    cfg_path = Path(cfg_env) if cfg_env else root / "config.json"
+    configured = cfg_path.is_file()
+    data_dir = ""
+    if configured:
+        try:
+            cfg = cfgmod.load()
+            data_dir = str((cfg.get("storage") or {}).get("dataDir") or root / "data")
+        except Exception:  # noqa: BLE001
+            configured = False
+    payload = {
+        "ok": True,
+        "version": helptext.VERSION,
+        "mode": "exe" if frozen else "source",
+        "installRoot": str(root),
+        "configPath": str(cfg_path),
+        "configured": configured,
+        "dataDir": data_dir or str(root / "data"),
+    }
+    human = f"hy-mem {payload['version']}（{'exe' if frozen else '源码'}模式）\n  安装根 {payload['installRoot']}\n  数据目录 {payload['dataDir']}"
+    return ok(payload, args.json, human)
+
+
+def cmd_migrate(args) -> int:
+    """把旧安装的数据目录迁入当前安装根（升级接管后的收尾）。
+
+    为什么是复制不是搬：原目录保留作备份，用户确认无误后自己删——
+    数据安全的事，宁可多占一份磁盘，不做不可逆动作。
+    """
+    import shutil
+
+    import config as cfgmod
+    import install_ops
+
+    cur = install_ops._current_root()
+    target = cur / "data"
+    src = store.data_dir().resolve()  # 引导已重放 env，这里就是当前生效的数据目录
+
+    def fail(msg: str) -> int:
+        return ok({"ok": False, "error": msg}, args.json, msg)
+
+    if not (cur / "config.json").is_file():
+        return fail("当前安装还没有 config.json（尚未配置/接管），无处可迁")
+    if src == target.resolve():
+        return ok({"ok": True, "migrated": False, "dataDir": str(src)},
+                  args.json, f"数据目录已在当前安装内，无需迁移：{src}")
+    if not src.is_dir():
+        return fail(f"数据目录不存在：{src}")
+    if target.exists() and any(target.iterdir()):
+        return fail(f"目标目录非空，拒绝覆盖：{target}")
+    # worker 活着时不能迁：它还握着旧目录的写权，迁完新旧两处都会写，数据分家
+    conn = store.connect()
+    try:
+        hb = store.worker_age(conn)
+    finally:
+        conn.close()
+    if hb is not None and hb < 15.0:
+        return fail(
+            f"后台 worker 正在运行（心跳 {hb:.0f}s 前），等它空闲自退后再迁移"
+            "（队列清空后最多 600s 自退出，或直接结束该 python 进程）"
+        )
+    with store.WriteLock():  # 复制期间挡住一切写入，保证 SQLite 拷贝一致
+        # write.lock 排除：它正被本进程字节锁锁着，Windows 上连自己都读不了
+        # （WinError 33），而且它只是锁的载体，不是数据，不迁移。
+        shutil.copytree(src, target, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("write.lock"))
+    cfg = cfgmod.load()
+    storage = cfg.get("storage") or {}
+    storage["dataDir"] = str(target)
+    cfg["storage"] = storage
+    cfg_env = os.getenv("HY_MEM_CONFIG", "").strip()
+    cfg_path = Path(cfg_env) if cfg_env else cur / "config.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(cfg_path, 0o600)
+    except OSError:
+        pass
+    cfgmod.apply_env(cfg)  # 本进程后续操作立即走新目录
+    nbytes = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
+    human = (
+        f"已迁移 {nbytes / 1e6:.1f} MB → {target}\n"
+        f"  原目录保留作备份，确认无误后可删除：{src}"
+    )
+    return ok(
+        {"ok": True, "migrated": True, "from": str(src), "to": str(target), "bytes": nbytes},
+        args.json,
+        human,
+    )
+
+
 def cmd_skill(args) -> int:
     """管 SKILL.md：定位 / 一致性 / 分发 / 打印。
 
@@ -2282,6 +2380,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--print", dest="print_only", action="store_true", help="打印 SKILL.md 全文，便于直接读")
     ps.set_defaults(func=cmd_skill)
     sub.add_parser("tui-test", help="按键自检：在真实终端里验证方向键/鼠标解码").set_defaults(func=cmd_tui_test)
+    sub.add_parser("version", help="版本与安装信息（--json 供自动升级比对）").set_defaults(func=cmd_version)
+    sub.add_parser("migrate", help="把旧安装的数据目录迁入当前安装根（升级接管后的收尾）").set_defaults(func=cmd_migrate)
 
     ps = sub.add_parser("add", help="写一条记忆")
     ps.add_argument("text", nargs="?", help="记忆正文；省略则从 stdin 读")

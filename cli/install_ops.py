@@ -412,5 +412,6 @@ def adopt_previous_install(current_root: Path | None = None) -> tuple[dict | Non
         f"检测到旧安装 {old_root}（经 {src}）",
         f"已沿用其配置 → {target}",
         f"记忆数据原位复用（不拷贝）：{old_data}",
+        "提示：数据仍在旧目录；想收进本安装（之后才能删旧目录）就跑 hy-mem migrate",
     ]
     return info, notes

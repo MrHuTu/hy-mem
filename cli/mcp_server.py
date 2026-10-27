@@ -18,8 +18,10 @@ import json
 import sys
 import time
 
+from helptext import VERSION
+
 SERVER_NAME = "hy-mem"
-SERVER_VERSION = "0.9.6"
+SERVER_VERSION = VERSION  # 单一来源：CLI --version / help / MCP initialize 三处共用
 
 # JSON-RPC 错误码（常用三个，够用）
 PARSE_ERROR = -32700
@@ -187,6 +189,40 @@ def _tool_delete_memory(args: dict) -> str:
         client.close()
 
 
+def _tool_get_version(_args: dict) -> str:
+    """版本与安装信息。自动升级链路的第一步：比对版本、定位要替换的安装根。"""
+    import os
+    from pathlib import Path
+
+    import helptext
+    import install_ops
+
+    root = install_ops._current_root()
+    cfg_env = os.getenv("HY_MEM_CONFIG", "").strip()
+    cfg_path = Path(cfg_env) if cfg_env else root / "config.json"
+    configured = cfg_path.is_file()
+    data_dir = ""
+    if configured:
+        try:
+            import config as cfgmod
+
+            cfg = cfgmod.load()
+            data_dir = str((cfg.get("storage") or {}).get("dataDir") or root / "data")
+        except Exception:  # noqa: BLE001
+            configured = False
+    return json.dumps(
+        {
+            "version": helptext.VERSION,
+            "mode": "exe" if getattr(sys, "frozen", False) else "source",
+            "installRoot": str(root),
+            "configPath": str(cfg_path),
+            "configured": configured,
+            "dataDir": data_dir or str(root / "data"),
+        },
+        ensure_ascii=False,
+    )
+
+
 TOOLS = [
     {
         "name": "add_memory",
@@ -237,6 +273,14 @@ TOOLS = [
         },
     },
     {
+        "name": "get_version",
+        "description": (
+            "返回 hy-mem 版本与安装信息（版本号 / exe或源码 / 安装根 / 配置与数据目录）。"
+            "自动升级前先调它：比对版本决定要不要升级，installRoot 就是要替换的目录。"
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "delete_memory",
         "description": "删除一条记忆。破坏性操作，必须 confirm=true。",
         "inputSchema": {
@@ -256,6 +300,7 @@ _HANDLERS = {
     "list_memories": _tool_list_memories,
     "get_memory": _tool_get_memory,
     "delete_memory": _tool_delete_memory,
+    "get_version": _tool_get_version,
 }
 
 
