@@ -191,7 +191,8 @@ hy-mem add --async --tag infra "消息队列用 RocketMQ，4.9.4"
 
 ```
 add --async  →  写 SQLite 队列（立即返回 job_id）
-                ↳ 队列无人消费时**自动拉起后台 worker**（空闲 10 分钟自退出，无黑窗）
+                ↳ 队列无人消费时**自动拉起后台 worker**（并发上限 3，空闲 90s 自退出，
+                  30s 抢不到任务也提前退出；无黑窗。上限可用 HY_MEM_MAX_WORKERS 调）
 worker       →  单写者消费，串行落库，失败重试，超次数进死信
 ```
 
