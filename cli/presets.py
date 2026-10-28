@@ -1,6 +1,7 @@
 """预设库：向量模型 / LLM / 运行模式.
 
-所有数字来自本项目实测（docs/PRD-agent-cli-bridge.md §8.9、scripts/bench_embed.py）。
+所有数字来自本项目实测（docs/PRD-agent-cli-bridge.md §8.9；测量脚本是一次性的，
+放在本地 `.local-test/bench_embed.py`，不入库）。
 **不要凭想象改 dims**：维度与 MEMORY_EMBEDDING_DIMS 不一致时 SDK 直接抛
 EmbeddingDimensionMismatchError，旧数据无法读取。
 

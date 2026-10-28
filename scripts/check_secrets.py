@@ -49,6 +49,9 @@ SKIP_DIRS = {
     ".git", ".venv", "venv", "dist", "build", "__pycache__",
     ".mypy_cache", ".pytest_cache", "node_modules", "data", ".models",
     "tmp-hymem-sweep",
+    # 本地临时脚本区：整目录被 .gitignore 忽略，永不入库，扫它只会刷屏
+    # （里面的探针/实验本来就带本机路径和内部主机名，那是允许的）
+    ".local-test",
 }
 # 不扫的扩展名：二进制/产物不可能是源码泄漏，读进来只有噪声
 SKIP_SUFFIXES = {
