@@ -1438,7 +1438,11 @@ def ask_secret(question: str, default: str = "", hint: str | None = None) -> str
         if not raw:
             if default:
                 note("沿用原值")
-            return default
+                return default
+            # 没有 default 时空回车绝不能放行：返回空串会让配置落成
+            # apiKey=""+keyEnv=约定变量 → resolve 回落读环境变量里**旧端点**的 key，
+            # 拿去打新端点 → 401（2026-10-28 UI 级测试 D 场景抓到的第三条路径）。
+            err("密钥不能为空；逐字粘贴，或按 Ctrl+C 取消本次设置")
         problem = _secret_problem(raw)
         if problem:
             err(problem)

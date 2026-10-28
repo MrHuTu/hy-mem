@@ -196,6 +196,53 @@ def _pick_key(
     return "", ""
 
 
+def _confirm_credentials(new: dict, *, kind: str) -> dict:
+    """把 baseUrl / 模型 / 密钥三件套摆给用户确认；不确认就换 key，信息补齐才发探针。
+
+    用户规范（2026-10-28）：设置模型时应等用户把信息补充完整（baseUrl / 模型 / key），
+    提交完整后再测连通性 —— 继承来的 key 也要明示来源，不允许"静默就用"。
+    """
+    fallback_env = "MEMORY_EMBEDDER_API_KEY" if kind == "embedding" else "MEMORY_LLM_API_KEY"
+    while True:
+        if new.get("apiKey"):
+            key_disp = "手填（" + _mask(str(new["apiKey"])) + "，将存入 config.json）"
+        else:
+            env_name = str(new.get("keyEnv") or fallback_env)
+            key_disp = f"环境变量 ${env_name}（{_mask(os.getenv(env_name, ''))}）"
+        print()
+        tui.kv([
+            ("baseUrl", str(new.get("baseUrl") or "（空）")),
+            (tr_key_model_label(kind), str(new.get("model") or "（空）")),
+            ("密钥", key_disp),
+        ])
+        # 完整性只认 new 自己的 keyEnv 指向的变量：换端点后 keyEnv 已指向新端点
+        # 变量名（值空），若回落看旧约定变量，会把旧端点的值误判为"完整"→旧 key
+        # 打新端点 → 401（Q4 函数级用例红的正是这里）。
+        eff_env = str(new.get("keyEnv") or "")
+        complete = bool(str(new.get("baseUrl") or "").strip()) and bool(str(new.get("model") or "").strip()) and (
+            bool(str(new.get("apiKey") or "").strip())
+            or bool(eff_env and os.getenv(eff_env, ""))
+        )
+        if not complete:
+            tui.warn("信息还不完整（baseUrl / 模型 / 密钥至少缺一项），先补齐再测连通性")
+        if complete and tui.confirm("就用这套信息测试连通性？", default=True):
+            return new
+        # 只换 key：baseUrl / 模型在上面各自问过，要改它们应选「自定义」或换预设。
+        # 填了空 key 且新端点变量也为空 → 视为放弃（防非交互场景死循环；
+        # ask_secret 无 default 时已拒绝空回车，这里是被驱动场景的兜底）。
+        new_key = tui.ask_secret(
+            "API Key", hint="换一把 key；逐字粘贴，前后别带空格"
+        ).strip()
+        if not new_key and not (eff_env and os.getenv(eff_env, "")):
+            raise tui.Aborted()
+        new["apiKey"] = new_key
+        new["keyEnv"] = fallback_env
+
+
+def tr_key_model_label(kind: str) -> str:
+    return "模型名" if kind == "embedding" else "模型名"
+
+
 def _is_auth_error(msg: str) -> bool:
     return " 401" in msg or " 403" in msg or "401:" in msg or "403:" in msg
 
@@ -210,10 +257,14 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
     options.append(("自定义（手填 baseUrl + model）", ""))
     options = [(lab, det, k) for (lab, det), k in zip(options, tui.keyseq(len(options)))]
 
+    # 当前配置是自定义端点（cur=-1）但确实已配过时，默认光标必须落「自定义」项，
+    # 否则用户回车想「保持现状」，实际落进第 1 个预设 → 秒变跨端点 → 被追问
+    # 新 key（2026-10-28 UI 级测试 B 场景红的正是这里；step_llm 一直是这么做的）。
+    _has_custom = bool(str(emb.get("baseUrl") or "").strip())
     idx = tui.select(
         "[1/4] 向量模型",
         options,
-        default=cur if cur >= 0 else 0,
+        default=cur if cur >= 0 else (len(options) - 1 if _has_custom else 0),
         extra_hint="DeepSeek 官方没有向量接口（只有 chat），所以这里不列它",
     )
     chosen = presets.EMBEDDING_PRESETS[idx] if idx < len(presets.EMBEDDING_PRESETS) else None
@@ -243,6 +294,8 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
             # 会把 env 值复制进 emb["apiKey"]，直接 `{**emb}` 就把它一起存下去了。
             new["apiKey"] = ""
             new["keyEnv"] = emb["keyEnv"]
+        if chosen.needs_key:
+            new = _confirm_credentials(new, kind="embedding")
     elif chosen is None:
         # 自定义：默认值预填当前值，连按回车就能"只改模型名"。
         # keyEnv 必须原样保留 —— 老代码在这里把 keyEnv 清成空串，配好环境变量的机器
@@ -257,16 +310,22 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
         )
         new["model"] = tui.ask("模型名", default=str(emb.get("model") or ""))
         new["dims"] = int(emb.get("dims") or 0)
-        api_key, env_name = _pick_key(emb, "", key_env, same_endpoint=True, fallback_env="MEMORY_EMBEDDER_API_KEY")
+        # same_endpoint 必须按「刚填的新 baseUrl」对旧值算，不能写死 True：
+        # 自建网关之间切换（A 网关 → B 网关）也是跨端点，静默继承旧 key 只会 401
+        # （2026-10-28 UI 级测试 D 场景红的正是这里；预设→预设路径当天已修）。
+        custom_same = str(new["baseUrl"]).rstrip("/") == str(emb.get("baseUrl") or "").rstrip("/")
+        api_key, env_name = _pick_key(emb, "", key_env, same_endpoint=custom_same, fallback_env="MEMORY_EMBEDDER_API_KEY")
         if env_name:
             new["apiKey"] = ""
             new["keyEnv"] = env_name
-            tui.info(f"继续用环境变量 ${env_name} 里的密钥（{_mask(os.getenv(env_name, ''))}），不落盘")
         else:
             new["apiKey"] = tui.ask_secret(
                 "API Key", hint="环境变量里没有可用的 key；逐字粘贴，前后别带空格"
             )
-            new["keyEnv"] = ""
+            # keyEnv 保留约定变量名（不清空！）：清空后 resolve_embed_key 会回落
+            # 读旧约定变量，把别的端点的 key 打到新端点上（401 复发路径）。
+            new["keyEnv"] = "MEMORY_EMBEDDER_API_KEY"
+        new = _confirm_credentials(new, kind="embedding")
     else:
         new = chosen.to_cfg()
         if chosen.needs_key:
@@ -298,6 +357,8 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
         else:
             new["apiKey"] = ""
             new["keyEnv"] = ""
+        if chosen.needs_key and cur != idx:
+            new = _confirm_credentials(new, kind="embedding")
 
     print()
     tui.spinner_line("正在真实请求一次嵌入以确定维度…")
@@ -378,16 +439,21 @@ def step_llm(cfg: dict, _depth: int = 0) -> dict:
         new["preset"] = "custom"
         new["baseUrl"] = tui.ask("baseUrl", default=str(llm.get("baseUrl") or ""))
         new["model"] = tui.ask("模型名", default=str(llm.get("model") or ""))
-        api_key, env_name = _pick_key(llm, "", key_env, same_endpoint=True, fallback_env="MEMORY_LLM_API_KEY")
+        # 同向量模型：same_endpoint 按「刚填的新 baseUrl」算，写死 True 会让
+        # 自建网关切换时静默继承旧 key（UI 级测试 E3 场景红的正是这里）。
+        custom_same = str(new["baseUrl"]).rstrip("/") == str(llm.get("baseUrl") or "").rstrip("/")
+        api_key, env_name = _pick_key(llm, "", key_env, same_endpoint=custom_same, fallback_env="MEMORY_LLM_API_KEY")
         if env_name:
             new["apiKey"] = ""
             new["keyEnv"] = env_name
-            tui.info(f"继续用环境变量 ${env_name} 里的密钥（{_mask(os.getenv(env_name, ''))}），不落盘")
         else:
             new["apiKey"] = tui.ask_secret(
                 "API Key", hint="环境变量里没有可用的 key；逐字粘贴，前后别带空格"
             )
-            new["keyEnv"] = ""
+            # 同向量模型：keyEnv 保留约定变量名，清空会让 resolve_llm_key 回落
+            # 读旧约定变量 → 旧端点 key 打新端点（401 复发）。
+            new["keyEnv"] = "MEMORY_LLM_API_KEY"
+        new = _confirm_credentials(new, kind="llm")
     else:
         new = chosen.to_cfg()
         api_key, env_name = _pick_key(llm, chosen.key_env, key_env, same_endpoint, "MEMORY_LLM_API_KEY")
@@ -411,6 +477,8 @@ def step_llm(cfg: dict, _depth: int = 0) -> dict:
             )
             # 同向量模型：保留新端点声明的变量名，别清空（见 step_embedding 的注释）
             new["keyEnv"] = chosen.key_env
+        if chosen is not None:
+            new = _confirm_credentials(new, kind="llm")
 
     print()
     tui.spinner_line("正在真实调用一次 LLM 验证…")
@@ -609,11 +677,36 @@ def _summary_rows(cfg: dict) -> list[tuple[str, str]]:
     return rows
 
 
+def _credential_diff(old_cfg: dict, cfg: dict) -> list[tuple[str, str, str]]:
+    """新旧配置里「模型凭据」的差异行（旧值 → 新值），无差异返回空表。"""
+    rows: list[tuple[str, str, str]] = []
+    for section, label in (("embedding", "向量模型"), ("llm", "LLM 模型")):
+        old_s, new_s = old_cfg.get(section) or {}, cfg.get(section) or {}
+        for field, name in (("baseUrl", "baseUrl"), ("model", "模型"), ("keyEnv", "密钥变量")):
+            ov, nv = str(old_s.get(field) or ""), str(new_s.get(field) or "")
+            if ov != nv:
+                rows.append((f"{label} · {name}", ov or "（空）", nv or "（空）"))
+    return rows
+
+
 def _commit(old_cfg: dict, cfg: dict) -> int:
-    """展示摘要 → 处理维度变更 → 保存 → 自检。"""
+    """展示摘要 → 有旧凭据时提示覆盖 → 处理维度变更 → 保存 → 自检。"""
     print()
     print(tui.title("将要保存的配置"))
     print(tui.kv(_summary_rows(cfg)))
+
+    # 用户规范（2026-10-28）：连通性通过后，如果有旧配置，要明确提示是否覆盖。
+    # 旧的「写入配置？」不区分首次/覆盖；这里在有凭据变化时先摆出旧→新对比，
+    # 让「覆盖」是一次知情的确认，而不是顺手回车。
+    diff = _credential_diff(old_cfg, cfg)
+    if diff:
+        print()
+        tui.warn("已有旧配置，以下几项将被覆盖：")
+        for name, ov, nv in diff:
+            print(f"    {name}: {ov} → {nv}")
+        if not tui.confirm("覆盖旧配置？", default=True):
+            tui.warn("已取消，配置未改动。")
+            return 0
 
     changed, why = cfgmod.probe_dim_change(old_cfg, cfg)
     rebuild = False

@@ -520,7 +520,8 @@ def main() -> int:
     tui.select = lambda q, options, default=0, **k: 0 if "向量模型" in q else default
     tui.ask_secret = lambda q, default="", hint=None: (_asked.append(q), "")[1]
     tui.ask = lambda q, default="", **k: default
-    tui.confirm = lambda q, default=False, **k: False
+    # 三件套确认环节（2026-10-28 新增）默认通过；个别用例按需覆盖
+    tui.confirm = lambda q, default=False, **k: True
     tui.info = lambda msg, *a, **k: _infos.append(str(msg))
     _seen.update({"key": None, "calls": 0})
     _new = setup_wizard.step_embedding({"mode": "pro", "embedding": _probe_cfg()})
@@ -535,15 +536,19 @@ def main() -> int:
     _asked.clear()
     _seen.update({"key": None, "calls": 0})
     tui.select = lambda q, options, default=0, **k: 1 if "向量模型" in q else default
+    # 换端点被追问新 key 时，模拟用户填了新端点的 key（真实行为；旧桩返回空
+    # 会被三件套确认环节按「信息不完整」拒绝 → Aborted，那本身就是防线）
+    tui.ask_secret = lambda q, default="", hint=None: (_asked.append(q), "sk-zhipu-new")[1]
     _new2 = setup_wizard.step_embedding({"mode": "pro", "embedding": _probe_cfg()})
     _other = presets_mod.EMBEDDING_PRESETS[1]
     check("换端点必须重填 key（不继承旧 key）", bool(_asked), str(_asked))
-    check("换端点时探针不再拿旧 key 发请求", _seen["key"] in (None, ""), repr(_seen["key"]))
+    check("换端点时探针拿新 key（旧 env key 没被借用）", _seen["key"] == "sk-zhipu-new",
+          repr(_seen["key"]))
     check("换端点后 keyEnv 指向新端点的变量名", _new2.get("keyEnv") == _other.key_env,
           repr(_new2.get("keyEnv")))
-    # 关键回归：新 keyEnv 的值为空，解析结果必须是空，**不能**回落到旧约定变量名
-    check("换端点后解析不到旧 key（不会 401）",
-          cfgmod.resolve_embed_key({"embedding": _new2}) == "",
+    # 关键回归：新配置 apiKey=手填值，resolve 优先取它（旧 env key 不参与），不会 401
+    check("换端点后 resolve 取手填新 key（不是旧 env key）",
+          cfgmod.resolve_embed_key({"embedding": _new2}) == "sk-zhipu-new",
           repr(cfgmod.resolve_embed_key({"embedding": _new2})))
     check("换端点后模型已切换", _new2.get("model") == _other.model, str(_new2.get("model")))
 
@@ -640,7 +645,8 @@ def main() -> int:
     _asked.clear()
     _seen.update({"key": None, "calls": 0})
     tui.select = lambda q, options, default=0, **k: 0
-    tui.confirm = lambda q, default=False, **k: False
+    # 三件套确认默认通过（信息齐就该测连通性；False 会死循环在「换 key→再确认」）
+    tui.confirm = lambda q, default=False, **k: True
     _llm_new = setup_wizard.step_llm({
         "mode": "pro",
         "embedding": _probe_cfg(),
