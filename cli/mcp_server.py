@@ -214,6 +214,9 @@ def _tool_add_memory(args: dict) -> str:
             "job_ids": job_ids,
             "pending": stats["pending"],
             "worker_spawned": spawned,
+            # 已有 worker 在跑（心跳新鲜）时 spawned 必为 False——这同样是
+            # 「落库有人管」，别让调用方把它读成失败
+            "worker_live": live,
             "note": "已入队，后台 worker 约 6~9 秒落库，无需等待",
         },
         ensure_ascii=False,

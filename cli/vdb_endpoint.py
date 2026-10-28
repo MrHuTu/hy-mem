@@ -104,6 +104,58 @@ class _ServerHandle:
             pass
 
 
+def _patch_api_embeddings(api: Any) -> None:
+    """chroma 1.5.9 server 的 tolist 兼容垫片（实例级，幂等）。
+
+    故障链（2026-10-28 实测）：跨进程数据在向量段里走 brute force/queue
+    路径，GetResult.embeddings 是 list；FastAPI 响应层硬编码
+    `cast(Embedding, embedding).tolist()` 直接 AttributeError——HTTP 的
+    get/query 一带 embeddings 就 500，SDK 的 get_by_ids / get_embeddings
+    全部静默返回空，检索管线的链式去重失效，superseded 条目漏进最终结果。
+
+    修法：在 API 实例出口（_get/_query）把 embeddings 归一化为 numpy，
+    三处响应转换全部恢复。实例级包装不依赖 chroma_api_impl 解析出的具体
+    类（1.5.9 默认是 RustBindingsAPI，不是 SegmentAPI）。垫片绝不放大故障。
+    """
+    if getattr(api, "_hymem_numpy_patched", False):
+        return
+
+    import numpy as np
+
+    def _norm(embs: Any) -> Any:
+        if embs is None:
+            return None
+        try:
+            return [
+                e if hasattr(e, "tolist") else np.asarray(e, dtype=np.float32)
+                for e in embs
+            ]
+        except Exception:  # noqa: BLE001
+            return embs
+
+    orig_get = api._get
+    orig_query = api._query
+
+    def _get(*a: Any, **kw: Any) -> Any:
+        res = orig_get(*a, **kw)
+        if isinstance(res, dict) and res.get("embeddings") is not None:
+            res["embeddings"] = _norm(res["embeddings"])
+        return res
+
+    def _query(*a: Any, **kw: Any) -> Any:
+        res = orig_query(*a, **kw)
+        if isinstance(res, dict) and res.get("embeddings") is not None:
+            res["embeddings"] = [
+                _norm(per_query) if per_query is not None else None
+                for per_query in res["embeddings"]
+            ]
+        return res
+
+    api._get = _get  # type: ignore[method-assign]
+    api._query = _query  # type: ignore[method-assign]
+    api._hymem_numpy_patched = True  # type: ignore[attr-defined]
+
+
 def start_server_thread(persist_dir: Path, host: str = "127.0.0.1") -> tuple[int, Any]:
     """在当前进程内起 chroma server 线程，返回 (port, uvicorn.Server)。
 
@@ -130,7 +182,9 @@ def start_server_thread(persist_dir: Path, host: str = "127.0.0.1") -> tuple[int
         chroma_server_http_port=port,
         anonymized_telemetry=False,
     )
-    app = ChromaFastAPI(settings).app()
+    server = ChromaFastAPI(settings)
+    _patch_api_embeddings(server._api)
+    app = server.app()
 
     import uvicorn
     cfg = uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False)

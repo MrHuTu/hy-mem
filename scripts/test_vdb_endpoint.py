@@ -184,6 +184,23 @@ def main() -> int:
         got2 = c2.get_collection("probe_vdb").get(ids=["a"])
         check("重启后数据仍在（is_persistent 生效）",
               (got2.get("documents") or [""])[0] == "v3")
+        # 跨进程读 embeddings 契约（2026-10-28 故障形态）：chroma 1.5.9
+        # server 对队列期记录（brute force/queue 路径）返回 list，
+        # FastAPI 响应层 .tolist() 直接 AttributeError——链式去重
+        # （get_by_ids/get_embeddings）全挂，superseded 条目漏进检索结果。
+        # 修复：vdb_endpoint 归一化 SegmentAPI._get/_query 的 embeddings。
+        try:
+            got3 = c2.get_collection("probe_vdb").get(
+                ids=["a"], include=["embeddings"])
+            embs = got3.get("embeddings")
+            # chroma 客户端可能把 embeddings 反序列化为 numpy，禁用 or 兜底
+            emb = embs[0] if embs is not None and len(embs) > 0 else None
+            check("重启后 HTTP 读 embeddings（tolist 兼容）",
+                  emb is not None and len(emb) == 8,
+                  f"type={type(emb).__name__} len={len(emb) if emb is not None else 'NA'}")
+        except Exception as e:  # noqa: BLE001
+            check("重启后 HTTP 读 embeddings（tolist 兼容）", False,
+                  f"{type(e).__name__}: {str(e)[:120]}")
         vdb_endpoint.stop_server_thread(srv2, sport2)
         print(f"  （集成段耗时 {time.time() - t0:.1f}s）")
     except Exception as e:  # noqa: BLE001

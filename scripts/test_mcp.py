@@ -136,7 +136,9 @@ def main() -> int:
                               "tags": ["mcp-e2e"], "metadata": {"case": "full-suite"}})
     check("add_memory 返回 job_ids 入队", bool(res.get("job_ids")) or res.get("queued") == 1,
           f"res={json.dumps(res, ensure_ascii=False)[:120]}")
-    check("add_memory 自动拉起后台消费进程", res.get("worker_spawned") is True or res.get("workerLive") is True)
+    check("add_memory 自动拉起后台消费进程",
+          res.get("worker_spawned") is True or res.get("worker_live") is True,
+          f"worker_spawned={res.get('worker_spawned')} worker_live={res.get('worker_live')}")
     check("add 响应带 pending 计数", isinstance(res.get("pending"), int), f"pending={res.get('pending')}")
 
     # ---- 4. 等后台 supervisor 落库（pro 模式每条 10~50s）----
