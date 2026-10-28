@@ -23,6 +23,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PY = str(REPO / ".venv" / "Scripts" / "python.exe")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _secrets  # noqa: E402  密钥只从环境变量取，见 scripts/_secrets.py
 
 
 def _make_sandbox() -> tuple[Path, dict]:
@@ -30,6 +32,7 @@ def _make_sandbox() -> tuple[Path, dict]:
     sandbox = Path(tempfile.mkdtemp(prefix="hymem-conc-"))
     cfg = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
     cfg["storage"]["dataDir"] = str(sandbox / "data")
+    cfg = _secrets.sandbox_config(cfg)   # 沙箱配置不留密钥，靠环境变量
     (sandbox / "cfg.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     env = {
         **os.environ,
@@ -43,6 +46,10 @@ def _make_sandbox() -> tuple[Path, dict]:
 
 def main() -> int:
     exe = sys.argv[1] if len(sys.argv) > 1 else None
+    if not _secrets.have_all():
+        print(f"跳过 test_concurrency：缺少真实密钥（{_secrets.describe()}）")
+        print("  并发写入会真实调用模型，没有密钥跑出来的结论不可信。")
+        return 0
     sandbox, ENV = _make_sandbox()
 
     def cli_base():

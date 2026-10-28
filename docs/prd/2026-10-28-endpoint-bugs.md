@@ -23,7 +23,7 @@
 | 交互态复现 | `scripts/probe_endpoint_lifecycle.py`（同进程内 `search → worker --once → search`，等价 TUI dispatch） |
 | MCP 链路 | `scripts/probe_mcp_stdio.py` |
 | 覆盖面 | 29 个子命令中的读路径全部覆盖；写路径覆盖 add/sync、add/async、worker、tag、untag、update、delete、drain、retry；MCP 全部工具；端点冷启/热路径/宿主被杀三种状态 |
-| 报告 | `C:\Users\Administrator\hymem_sweep.json`（原始 stdout/stderr/rc/耗时） |
+| 报告 | `%USERPROFILE%\hymem_sweep.json`（原始 stdout/stderr/rc/耗时） |
 
 **巡检结果：22 项中 3 项 FAIL，另有 5 项在定向复现中暴露（下表合计 12 个缺陷，含 3 个 P0）。**
 

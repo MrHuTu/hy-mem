@@ -1,12 +1,16 @@
 """严格对照：同一沙箱同一数据，只切 reader（legacy vs hybrid+图重排）。
 消除写入随机性混杂。"""
 import json
+from pathlib import Path
 import os
 import sys
+import tempfile
 import time
 import glob
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cli"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _secrets  # noqa: E402
 import hy_mem_cli as cli  # noqa: E402
 
 QUERIES = [
@@ -26,7 +30,9 @@ QUERIES = [
 
 
 def replay(reader):
-    sb = sorted(glob.glob(r"C:/Users/Administrator/AppData/Local/Temp/hymem-final-graph-*"))[-1]
+    # 沙箱根用系统临时目录，不写死某台机器的用户目录
+    pattern = str(Path(tempfile.gettempdir()) / "hymem-final-graph-*")
+    sb = sorted(glob.glob(pattern))[-1]
     os.environ.update({
         "HY_MEM_CONFIG": os.path.join(sb, "config.json"),
         "MEMORY_DATA_DIR": sb, "HY_MEM_HOME": sb,
@@ -38,10 +44,10 @@ def replay(reader):
         os.environ.update({"HY_MEMORY_READER": "legacy"})
         os.environ.pop("MEMORY_GRAPH_RERANK_ENABLED", None)
     cli.load_env()
-    dep = json.load(open("D:/tools_open/hy-mem-0.9.8-win64/config.json", encoding="utf-8"))
+    dep = json.load(open(str(Path(__file__).resolve().parent.parent / "config.json"), encoding="utf-8"))
     os.environ["MEMORY_LLM_BASE_URL"] = dep["embedding"]["baseUrl"]
     os.environ["MEMORY_LLM_MODEL"] = "qwen3.8-flash"
-    os.environ["MEMORY_LLM_API_KEY"] = dep["embedding"]["apiKey"]
+    os.environ["MEMORY_LLM_API_KEY"] = _secrets.require(_secrets.EMBED_KEY_ENV)
 
     client = cli.make_client(None)
     results = []

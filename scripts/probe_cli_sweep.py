@@ -20,7 +20,12 @@ import sys
 import time
 from pathlib import Path
 
-EXE = Path(os.getenv("HYMEM_EXE", r"D:\tools_open\hy-mem-0.9.9-win64\hy-mem.exe"))
+# exe 位置：优先 HYMEM_EXE，其次仓库内产物 dist/hy-mem/hy-mem.exe。
+# 不写死本机安装路径——仓库要公开，写死等于把机器布局一起发出去。
+EXE = Path(os.getenv("HYMEM_EXE") or (Path(__file__).resolve().parent.parent / "dist" / "hy-mem" / "hy-mem.exe"))
+if not EXE.exists():
+    sys.exit(f"找不到 hy-mem 可执行文件：{EXE}\n"
+             f"先跑 python scripts/build_exe.py，或用 HYMEM_EXE=<路径> 指定。")
 CFG = os.environ.get("HY_MEM_CONFIG", "")
 OUT = Path(os.getenv("HYMEM_SWEEP_OUT", Path.home() / "hymem_sweep.json"))
 TAG = "冒烟巡检"

@@ -11,12 +11,15 @@ LLM 固定 qwen3.8-flash（阿里官方端点，稳定）。
 """
 
 import json
+from pathlib import Path
 import os
 import sys
 import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cli"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _secrets  # noqa: E402
 import hy_mem_cli as cli  # noqa: E402
 
 FACTS = [
@@ -86,10 +89,10 @@ def run(tag, graph):
         for k in ("MEMORY_ENABLE_GRAPH", "HY_MEMORY_READER", "MEMORY_GRAPH_RERANK_ENABLED"):
             os.environ.pop(k, None)
     cli.load_env()
-    dep = json.load(open("D:/tools_open/hy-mem-0.9.8-win64/config.json", encoding="utf-8"))
+    dep = json.load(open(str(Path(__file__).resolve().parent.parent / "config.json"), encoding="utf-8"))
     os.environ["MEMORY_LLM_BASE_URL"] = dep["embedding"]["baseUrl"]
     os.environ["MEMORY_LLM_MODEL"] = "qwen3.8-flash"
-    os.environ["MEMORY_LLM_API_KEY"] = dep["embedding"]["apiKey"]
+    os.environ["MEMORY_LLM_API_KEY"] = _secrets.require(_secrets.EMBED_KEY_ENV)
     os.environ["MEMORY_LLM_MAX_TOKENS"] = "4096"
     os.environ["MEMORY_AGENT_MAX_TOKENS"] = "4000"
 

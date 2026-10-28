@@ -1,11 +1,15 @@
 """从既有沙箱重放 A/B 检索对照（写入已完成，只跑检索+判分）。"""
 import json
+from pathlib import Path
 import os
 import sys
+import tempfile
 import time
 import glob
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cli"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _secrets  # noqa: E402
 import hy_mem_cli as cli  # noqa: E402
 
 QUERIES = [
@@ -25,7 +29,9 @@ QUERIES = [
 
 
 def replay(tag):
-    sb = sorted(glob.glob(rf"C:/Users/Administrator/AppData/Local/Temp/hymem-final-{tag}-*"))[-1]
+    # 沙箱根用系统临时目录，不写死某台机器的用户目录
+    pattern = str(Path(tempfile.gettempdir()) / f"hymem-final-{tag}-*")
+    sb = sorted(glob.glob(pattern))[-1]
     os.environ.update({
         "HY_MEM_CONFIG": os.path.join(sb, "config.json"),
         "MEMORY_DATA_DIR": sb, "HY_MEM_HOME": sb,
@@ -37,10 +43,10 @@ def replay(tag):
         for k in ("MEMORY_ENABLE_GRAPH", "HY_MEMORY_READER", "MEMORY_GRAPH_RERANK_ENABLED"):
             os.environ.pop(k, None)
     cli.load_env()
-    dep = json.load(open("D:/tools_open/hy-mem-0.9.8-win64/config.json", encoding="utf-8"))
+    dep = json.load(open(str(Path(__file__).resolve().parent.parent / "config.json"), encoding="utf-8"))
     os.environ["MEMORY_LLM_BASE_URL"] = dep["embedding"]["baseUrl"]
     os.environ["MEMORY_LLM_MODEL"] = "qwen3.8-flash"
-    os.environ["MEMORY_LLM_API_KEY"] = dep["embedding"]["apiKey"]
+    os.environ["MEMORY_LLM_API_KEY"] = _secrets.require(_secrets.EMBED_KEY_ENV)
 
     client = cli.make_client(None)
     results = []

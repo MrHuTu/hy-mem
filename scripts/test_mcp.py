@@ -24,6 +24,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PY = str(REPO / ".venv" / "Scripts" / "python.exe")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _secrets  # noqa: E402  密钥只从环境变量取，见 scripts/_secrets.py
 EXPECTED_TOOLS = {
     "add_memory", "queue_status", "search_memory", "list_memories", "get_memory",
     "delete_memory", "update_memory", "get_version",
@@ -83,9 +85,17 @@ class McpClient:
 
 def main() -> int:
     exe = sys.argv[1] if len(sys.argv) > 1 else None
+    if not _secrets.have_all():
+        # 这条链路会真的调模型（add 要抽取事实）。缺密钥时「全绿」是假象，
+        # 所以宁可显式跳过，也不能跑出一份不可信的通过记录。
+        print(f"跳过 test_mcp：缺少真实密钥（{_secrets.describe()}）")
+        print("  该测试会真实调用向量模型与抽取模型，请先配置环境变量。")
+        return 0
     sandbox = Path(tempfile.mkdtemp(prefix="hymem-mcp-"))
     cfg = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
     cfg["storage"]["dataDir"] = str(sandbox / "data")
+    # 沙箱配置里不留密钥：真 key 由环境变量提供，临时目录被贴出来也不泄漏
+    cfg = _secrets.sandbox_config(cfg)
     (sandbox / "cfg.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     env = {
         **os.environ,

@@ -12,6 +12,7 @@
 """
 
 import json
+from pathlib import Path
 import os
 import shutil
 import sys
@@ -19,6 +20,8 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "cli"))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _secrets  # noqa: E402
 import hy_mem_cli as cli  # noqa: E402
 
 # ---- 数据集：关系密集（因果链/版本序列/取舍对比/人员分工/干扰项）----
@@ -107,10 +110,10 @@ def run(tag: str, graph: bool):
 
     # LLM 固定用阿里 qwen3.8-flash（稳定不抖动；key 取自部署 config.json 的阿里端点）
     import json as _json
-    dep = _json.load(open("D:/tools_open/hy-mem-0.9.8-win64/config.json", encoding="utf-8"))
+    dep = _json.load(open(str(Path(__file__).resolve().parent.parent / "config.json"), encoding="utf-8"))
     os.environ["MEMORY_LLM_BASE_URL"] = dep["embedding"]["baseUrl"]
     os.environ["MEMORY_LLM_MODEL"] = "qwen3.8-flash"
-    os.environ["MEMORY_LLM_API_KEY"] = dep["embedding"]["apiKey"]
+    os.environ["MEMORY_LLM_API_KEY"] = _secrets.require(_secrets.EMBED_KEY_ENV)
     os.environ["MEMORY_LLM_MAX_TOKENS"] = "4096"
     os.environ["MEMORY_AGENT_MAX_TOKENS"] = "4000"
 
