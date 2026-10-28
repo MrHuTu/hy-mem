@@ -1239,11 +1239,18 @@ def cmd_search(args) -> int:
         for i, it in enumerate(items, 1):
             score = it.get("score")
             s = f"{score:.3f}" if isinstance(score, (int, float)) else "  -  "
-            body = (it.get("content") or it.get("text") or "").replace("\n", " ")
             layer = it.get("layer") or ""
             tg = it.get("_tags") or it.get("tags") or []
             tagstr = f"  #{','.join(str(t) for t in tg)}" if tg else ""
-            lines.append(f"{i:>2}. [{s}] {body[:150]}" + (f"  <{layer}>" if layer else "") + tagstr)
+            head = f"{i:>2}. [{s}] "
+            body = it.get("content") or it.get("text") or ""
+            body_lines = str(body).split("\n")
+            lines.append(head + body_lines[0] + (f"  <{layer}>" if layer else "") + tagstr)
+            # 多行内容（演化链的 Current/History）按原文缩进对齐展开，不再压平成
+            # 一行再截断 —— 截断会把 History 的后半段悄悄吃掉。
+            pad = " " * len(head)
+            for extra in body_lines[1:]:
+                lines.append(pad + extra)
         return ok(items, False, "\n".join(lines))
     finally:
         client.close()
@@ -1297,10 +1304,15 @@ def cmd_list(args) -> int:
                 continue
             mid = (it.get("memory_id") or it.get("id") or "?")
             mid = mid if isinstance(mid, str) else str(mid)
-            body = (it.get("content") or it.get("new_memory") or it.get("text") or "").replace("\n", " ")
+            body = it.get("content") or it.get("new_memory") or it.get("text") or ""
             tg = it.get("_tags") or it.get("tags") or []
             tagstr = f"  #{','.join(str(t) for t in tg)}" if tg else ""
-            lines.append(f"{mid[:18]:<18} {body[:110]}{tagstr}")
+            head = f"{mid[:18]:<18} "
+            body_lines = str(body).split("\n")
+            lines.append(head + body_lines[0] + tagstr)
+            pad = " " * len(head)
+            for extra in body_lines[1:]:
+                lines.append(pad + extra)
         human = "\n".join(lines)
         _pend = _pending_jobs()
         if _pend:
@@ -1381,10 +1393,15 @@ def cmd_history(args) -> int:
             return EXIT_OK
         lines = []
         for i, it in enumerate(items, 1):
-            body = str(it.get("memory") or it.get("content") or it.get("text") or "").replace("\n", " ")
+            body = it.get("memory") or it.get("content") or it.get("text") or ""
             when = it.get("gmt_created") or it.get("created_at") or it.get("when") or ""
             event = it.get("event") or it.get("action") or ""
-            lines.append(f"{i:>2}. [{when}]{' ' + str(event) if event else ''} {body[:140]}")
+            head = f"{i:>2}. [{when}]{' ' + str(event) if event else ''} "
+            body_lines = str(body).split("\n")
+            lines.append(head + body_lines[0])
+            pad = " " * len(head)
+            for extra in body_lines[1:]:
+                lines.append(pad + extra)
         return ok(items, False, "\n".join(lines))
     finally:
         client.close()

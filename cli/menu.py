@@ -202,6 +202,31 @@ def page_add(dispatch, cfg: dict) -> None:
         _show_failure(raw, code)
 
 
+def search_rows(results: list[dict]) -> list[list[str]]:
+    """检索结果 → 表格行。内容列按终端宽度折行，绝不截断。
+
+    演化链的 content 本身就是多行的（Current / When / History / 各旧版本），
+    以前压平成一行再 trunc(90)，用户只看到 `用户认…`，会以为记忆内容就
+    这么短（2026-10-28 反馈）。固定列 #/分数/标签 让出宽度后交给 tui.wrap。
+    """
+    tw = tui.term_width()
+    nw = max(2, len(str(max(1, len(results)))))
+    tagw = min(22, max([tui.vwidth(",".join(str(t) for t in (it.get("tags") or [])))
+                        for it in results] + [4]))
+    content_w = max(24, tw - nw - 5 - tagw - 3 * 2)
+    rows = []
+    for i, it in enumerate(results, 1):
+        score = it.get("score")
+        s = f"{score:.3f}" if isinstance(score, (int, float)) else "-"
+        body = it.get("content") or it.get("text") or ""
+        rows.append([
+            str(i), s,
+            "\n".join(tui.wrap(body, content_w)),
+            ",".join(str(t) for t in (it.get("tags") or []))[:tagw],
+        ])
+    return rows
+
+
 def page_search(dispatch, cfg: dict) -> None:
     print(tui.title("检索"))
     q = tui.ask("查询内容")
@@ -229,14 +254,9 @@ def page_search(dispatch, cfg: dict) -> None:
         tui.warn("无命中")
         tui.note("可试着放宽：降低阈值（设置 → 检索阈值）或换更接近原话的问法")
         return
-    rows = []
-    for i, it in enumerate(results, 1):
-        score = it.get("score")
-        s = f"{score:.3f}" if isinstance(score, (int, float)) else "-"
-        body = (it.get("content") or it.get("text") or "").replace("\n", " ")
-        rows.append([str(i), s, tui.trunc(body, 90), ",".join(it.get("tags") or [])[:20]])
-    print(tui.table(["#", "分数", "内容", "标签"], rows))
-    tui.note(f"阈值 {(data or {}).get('min_score')}，命中 {len(results)} 条")
+    print(tui.table(["#", "分数", "内容", "标签"], search_rows(results)))
+    tui.note(f"阈值 {(data or {}).get('min_score')}，命中 {len(results)} 条；"
+             f"看全文：hy-mem get {results[0].get('memory_id') or '<id>'}")
 
 
 def page_list(dispatch, cfg: dict) -> None:
@@ -250,10 +270,12 @@ def page_list(dispatch, cfg: dict) -> None:
         tui.warn("（空）")
         return
     rows = []
+    idw = 12
+    content_w = max(24, tui.term_width() - idw - 2)
     for it in items:
         mid = str(it.get("memory_id") or it.get("id") or "?")
-        body = (it.get("content") or it.get("new_memory") or it.get("text") or "").replace("\n", " ")
-        rows.append([mid[:12], tui.trunc(body, 80)])
+        body = it.get("content") or it.get("new_memory") or it.get("text") or ""
+        rows.append([mid[:idw], "\n".join(tui.wrap(body, content_w))])
     print(tui.table(["id", "内容"], rows, footer=f"共 {len(items)} 条；删除用 hy-mem delete <id>"))
 
 
@@ -345,9 +367,16 @@ def page_health(dispatch, cfg: dict) -> None:
                   f"{data.get('estimated_write_latency_s')}s"))
     print()
     rows = []
+    # 说明列吃掉剩余宽度后折行：健康检查的 detail 常有「怎么修」这类长句，
+    # 截到 60 列等于把处置建议砍掉一半。
     for ck in data.get("checks") or []:
         i2, col2 = _LEVEL_STYLE.get(ck.get("level", "OK"), ("dot", "gray"))
-        rows.append([tui.icon(i2), ck.get("name", ""), getattr(c, col2)(str(ck.get("value", ""))), tui.trunc(ck.get("detail", ""), 60)])
+        rows.append([tui.icon(i2), ck.get("name", ""), getattr(c, col2)(str(ck.get("value", ""))), ""])
+    name_w = max([tui.vwidth(r[1]) for r in rows] + [4])
+    val_w = max([tui.vwidth(r[2]) for r in rows] + [4])
+    detail_w = max(24, tui.term_width() - 2 - name_w - val_w - 3 * 2)
+    for r, ck in zip(rows, data.get("checks") or []):
+        r[3] = "\n".join(tui.wrap(ck.get("detail", ""), detail_w))
     print(tui.table(["", "项", "值", "说明"], rows))
     advice = data.get("advice") or []
     if advice:

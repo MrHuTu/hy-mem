@@ -209,6 +209,79 @@ def term_width(default: int = 78) -> int:
         return default
 
 
+def _wrap_tokens(line: str) -> list[str]:
+    """切成折行单位：中日韩逐字、拉丁词整体、空格单独。"""
+    out: list[str] = []
+    buf = ""
+    for ch in line:
+        if ch == " ":
+            if buf:
+                out.append(buf)
+                buf = ""
+            out.append(" ")
+        elif unicodedata.east_asian_width(ch) in ("W", "F"):
+            if buf:
+                out.append(buf)
+                buf = ""
+            out.append(ch)
+        else:
+            buf += ch
+    if buf:
+        out.append(buf)
+    return out
+
+
+_HANG_PUNCT = set("。，、；：？！）】」』…%,.;:!?)")
+
+
+def wrap(text: str, width: int) -> list[str]:
+    """按显示宽度折行：保留原有换行，续行沿用本行缩进。
+
+    给表格单元格用——「一行放不下就换行」比截断更诚实：演化链的
+    Current/History 被切成 `用户认…` 之后，用户会以为记忆内容本身就
+    这么短（2026-10-28 反馈）。按东亚字宽算，拉丁词整体不拆（时间戳
+    `02:25:10`、URL 不会被劈成两半），续行缩进超过半行就丢弃。
+    """
+    width = max(8, int(width))
+    out: list[str] = []
+    for raw in str(text).split("\n"):
+        line = raw.rstrip()
+        if vwidth(line) <= width:
+            out.append(line)
+            continue
+        indent = " " * (len(line) - len(line.lstrip(" ")))
+        if vwidth(indent) >= width // 2:
+            indent = ""
+        cur, cur_w = "", 0
+        for tok in _wrap_tokens(line):
+            tw = vwidth(tok)
+            if cur_w + tw > width and cur.strip():
+                # 标点悬挂：句号/逗号别单独掉到下一行（中文排版常规做法）
+                if tok in _HANG_PUNCT and cur_w + tw <= width + 1:
+                    cur += tok
+                    cur_w += tw
+                    continue
+                out.append(cur.rstrip())
+                if tok == " ":
+                    cur, cur_w = indent, vwidth(indent)
+                    continue
+                cur, cur_w = indent + tok, vwidth(indent) + tw
+            elif cur_w + tw > width:  # 单 token 就超宽（长 URL/长英文串）→ 按字符硬切
+                for ch in tok:
+                    cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+                    if cur_w + cw > width and cur.strip():
+                        out.append(cur.rstrip())
+                        cur, cur_w = indent, vwidth(indent)
+                    cur += ch
+                    cur_w += cw
+            else:
+                cur += tok
+                cur_w += tw
+        if cur.strip():
+            out.append(cur.rstrip())
+    return out or [""]
+
+
 # --------------------------------------------------------------------------
 # 版面元素
 # --------------------------------------------------------------------------
@@ -241,16 +314,30 @@ def kv(pairs: list[tuple[str, str]], indent: int = 2) -> str:
 
 
 def table(headers: list[str], rows: list[list[str]], footer: str | None = None) -> str:
+    """单元格支持多行（`\\n` 分隔）：同格多行按行渲染、其余列顶部对齐。
+
+    多行是为了让长内容「换行」而不是「截断」——列宽由调用方按
+    term_width() 算好再 tui.wrap() 折行传进来。
+    """
+    cells = [[str(cell).split("\n") for cell in r] for r in rows]
     widths = [vwidth(h) for h in headers]
-    for r in rows:
-        for i, cell in enumerate(r):
+    for r in cells:
+        for i, lines in enumerate(r):
             if i < len(widths):
-                widths[i] = max(widths[i], vwidth(cell))
+                for ln in lines:
+                    widths[i] = max(widths[i], vwidth(ln))
     sep = "  "
     out = [sep.join(c.bold(lpad(h, widths[i])) for i, h in enumerate(headers))]
     out.append(c.gray(sep.join("─" * w for w in widths)))
-    for r in rows:
-        out.append(sep.join(lpad(cell, widths[i]) for i, cell in enumerate(r) if i < len(widths)))
+    for r in cells:
+        height = max((len(lines) for lines in r), default=1)
+        for k in range(height):
+            parts = []
+            for i, lines in enumerate(r):
+                if i >= len(widths):
+                    continue
+                parts.append(lpad(lines[k] if k < len(lines) else "", widths[i]))
+            out.append(sep.join(parts).rstrip())
     if footer:
         out.append("")
         out.append(c.dim("  " + footer))

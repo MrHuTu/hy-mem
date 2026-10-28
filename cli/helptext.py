@@ -421,7 +421,7 @@ CMD_META: dict[str, dict] = {
         "when": "宿主（WorkBuddy/CodeBuddy 等）配 MCP 时用：mcp.json 里 command=hy-mem, args=[mcp]。由宿主按会话拉起，勿手动运行。",
         "mutates": True,
         "examples": ['mcp.json → {"mcpServers":{"hy-mem":{"command":"hy-mem","args":["mcp"]}}}'],
-        "output": {"resp": "JSON-RPC 2.0（stdio 换行分隔）；tools: add_memory/search_memory/list_memories/get_memory/delete_memory"},
+        "output": {"resp": "JSON-RPC 2.0（stdio 换行分隔）；tools: add_memory/queue_status/search_memory/list_memories/get_memory/update_memory/delete_memory/get_version"},
         "notes": [
             "stdout 只准有协议响应，诊断走 stderr。",
             "身份固定为默认（config 的 identity.userId），与 CLI 不传 -u 同口径。",

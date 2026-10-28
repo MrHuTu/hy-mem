@@ -58,14 +58,14 @@ D:\tools_open\agent-bridge\
 │   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0；get_json(direct=True) 供回环探活
 │   ├── vdb_endpoint.py  (218) ← chroma server 端点层（0.9.9）：worker 起内嵌 server 线程 + server.port 端口文件；客户端 ensure_endpoint 注入 MEMORY_VECTOR_HOST/PORT。数据唯一所有者 = worker，其余进程一律 HttpClient（chroma embedded 多进程共享会读到过期/空索引，2026-10-28 事故）
 │   ├── setup_wizard.py  (654) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
-│   ├── menu.py          (686) ← 交互主界面 + 设置中心 + 12 个页面
-│   ├── tui.py          (1280) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪
+│   ├── menu.py          (715) ← 交互主界面 + 设置中心 + 12 个页面
+│   ├── tui.py          (1367) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪 / 折行（wrap）
 │   ├── runtime_check.py (323) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
-│   ├── store.py         (333) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
+│   ├── store.py         (511) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
 │   ├── storage_ops.py   (197) ← 数据目录运维：用量 / 剩余空间 / 迁移 / 备份 / 重建
 │   ├── install_ops.py   (417) ← 生成 PATH 启动器（`hy-mem install`，双入口 + 旧壳接管 + 升级时沿用旧安装配置/数据）
 │   ├── skill_ops.py     (106) ← SKILL.md 定位 / 一致性 / 分发到 5 个宿主
-│   ├── mcp_server.py    (387) ← MCP stdio 服务（`hy-mem mcp`）：JSON-RPC 2.0，5 个工具（4 记忆 + get_version），进程内直调 SDK，日志走 stderr
+│   ├── mcp_server.py    (739) ← MCP stdio 服务（`hy-mem mcp`）：JSON-RPC 2.0，8 个工具（6 记忆 + queue_status + get_version），进程内直调 SDK，日志走 stderr
 │   ├── presets.py       (239) ← 向量/LLM/模式预设（数字全部实测，别凭想象改 dims）
 │   └── local_embedder.py (112) ← 本地 ONNX 嵌入（零 key 备选，512 维，fastembed）
 │
@@ -137,6 +137,19 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 - 排查口诀：**检索多出历史版本 → 先验 HTTP 读 embeddings**（`scripts/probe_vdb_http.py`），失败就是上面那个坑，别一头钻进检索管线。
 - 分发前的两条实测：`scripts/probe_vdb_http.py`（已装 server 的 embeddings 契约）、`scripts/probe_mcp_stdio.py`（真实 stdio：initialize → tools/list → search/add）。两者默认指向 `D:\tools_open\hy-mem-0.9.9-win64`，可用 `HYMEM_EXE` 覆盖。
 - 新增依赖 `fastapi` + `opentelemetry-instrumentation-fastapi`（chromadb 未把前者列为运行时依赖），打包需 `--collect-submodules fastapi uvicorn opentelemetry.instrumentation.fastapi`（uvicorn/otel 有 importlib 动态加载）。
+
+### 3.3 终端显示口径：折行，不截断（0.9.9 收尾，改任何结果输出前必读）
+
+**记忆正文一行放不下就换行，禁止把正文截断成 `xxx…`。** 起因：检索结果里演化链的 `content` 本身就是多行（`- Current: …` / `When:` / `History:` / 各旧版本），旧实现先 `.replace("\n"," ")` 压平再 `[:150]`/`trunc(90)`，用户只看到 `用户认…`，误以为记忆内容就这么短（2026-10-28 反馈）。
+
+| 层 | 做法 |
+|---|---|
+| `tui.wrap(text, width)` | 按东亚字宽折行；保留原有换行；拉丁词整体不拆（时间戳/URL 不劈开）；标点悬挂；续行沿用缩进 |
+| `tui.table()` | 单元格支持 `\n` 多行，同行各列顶部对齐（调用方自己算列宽再 wrap 传进来） |
+| 交互页（`menu.py`） | 内容/说明列宽 = `term_width()` − 固定列 − 分隔符，`max(24, …)` 兜底；检索页底部给 `看全文：hy-mem get <id>` |
+| 非交互（`cmd_search` / `cmd_list` / `cmd_history`） | 多行正文按原始缩进对齐展开（`pad = len(head)`），不再压平、不再按字符截断 |
+
+判定标准：管道或窄终端下逐行宽度 ≤ `term_width()`，且**任何一条记忆的 History 都能完整看到**（`scripts/test_ui.py` 的宽度裁剪用例守着这条）。
 
 ## 4. ⚠️ 两套完全独立的环境（最高频误解）
 
@@ -263,7 +276,7 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 | `scripts/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
 | `scripts/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe scripts/test_queue.py` |
 | `scripts/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe scripts/test_concurrency.py [exe]` |
-| `scripts/test_mcp.py` | **18** | MCP stdio 七工具端到端：握手/tools/list/add→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe scripts/test_mcp.py [exe]` |
+| `scripts/test_mcp.py` | **22** | MCP stdio 八工具端到端：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe scripts/test_mcp.py [exe]` |
 
 ```bash
 # 源码模式

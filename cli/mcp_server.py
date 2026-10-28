@@ -217,10 +217,105 @@ def _tool_add_memory(args: dict) -> str:
             # 已有 worker 在跑（心跳新鲜）时 spawned 必为 False——这同样是
             # 「落库有人管」，别让调用方把它读成失败
             "worker_live": live,
-            "note": "已入队，后台 worker 约 6~9 秒落库，无需等待",
+            # 进度怎么查：调度方拿到 job_ids 就能用 queue_status 跟踪，
+            # 不必用「search 空结果」反推落库与否
+            "progress_tool": "queue_status",
+            "note": "已入队，后台 worker 约 6~9 秒落库；查进度用 queue_status(job_ids=[...])",
         },
         ensure_ascii=False,
     )
+
+
+_TERMINAL_JOB = ("done", "dead")
+
+
+def _tool_queue_status(args: dict) -> str:
+    """异步写入进度：自己刚提交的 job 到底落库了没有。
+
+    为什么需要：add_memory 默认异步（毫秒返回），智能体只能「过一会儿再
+    search」。search 空手时它很容易得出「没有相关记忆」——真相常常是
+    「还在队列里」。这里给可轮询的事实：每条 job 的状态/耗时/错误、worker
+    是否活着、队列是否已清空。wait_seconds 支持短阻塞，省得宿主自己 sleep。
+    """
+    from hy_mem_cli import store
+
+    raw_ids = args.get("job_ids") or []
+    if not isinstance(raw_ids, list):
+        raw_ids = [raw_ids]
+    job_ids: list[int] = []
+    for x in raw_ids:
+        try:
+            job_ids.append(int(x))
+        except (TypeError, ValueError):
+            raise ParamError(f"job_ids 只能是整数（add_memory 返回的 job_ids），收到 {x!r}")
+    try:
+        wait = float(args.get("wait_seconds") or 0)
+    except (TypeError, ValueError):
+        raise ParamError("wait_seconds 必须是秒数（数字，上限 60）")
+    wait = max(0.0, min(wait, 60.0))
+    try:
+        recent = max(1, min(int(args.get("limit") or 10), 50))
+    except (TypeError, ValueError):
+        raise ParamError("limit 必须是整数（1~50）")
+
+    deadline = time.time() + wait
+    while True:
+        conn = store.connect()
+        try:
+            stats = store.queue_stats(conn)
+            age = store.worker_age(conn)
+            workers = store.count_live_workers(conn)
+            jobs = store.get_jobs(conn, job_ids) if job_ids else store.list_jobs(conn, None, recent)
+        finally:
+            conn.close()
+        if job_ids:
+            busy = any(j.get("status") not in _TERMINAL_JOB for j in jobs)
+        else:
+            busy = stats["pending"] > 0 or stats["running"] > 0
+        if not busy or time.time() >= deadline:
+            break
+        time.sleep(min(1.0, max(0.05, deadline - time.time())))
+
+    now = time.time()
+    live = age is not None and age < 15.0
+    out_jobs = []
+    for j in jobs:
+        started, finished = j.get("started_at"), j.get("finished_at")
+        out_jobs.append({
+            "job_id": j.get("id"),
+            "status": j.get("status"),
+            "attempts": f"{j.get('attempts')}/{j.get('max_attempts')}",
+            "text": str((j.get("payload") or {}).get("text") or "")[:60],
+            "memory_ids": j.get("memory_ids") or [],
+            "queued_s": round(now - float(j["created_at"]), 1) if j.get("created_at") else None,
+            "took_s": round(float(finished) - float(started), 1) if started and finished else None,
+            "error": (str(j.get("error") or "")[:300] or None),
+        })
+
+    drained = stats["pending"] == 0 and stats["running"] == 0
+    dead = [j["job_id"] for j in out_jobs if j["status"] == "dead"]
+    if dead:
+        hint = f"有死信任务 {dead}：看 error 字段；重投用 hy-mem retry <job_id>（或 retry dead 全部）"
+    elif not drained and not live:
+        hint = "队列有积压但没有 worker 在跑：先跑 hy-mem worker --once（pro 模式每条约 10~50s）"
+    elif not drained:
+        hint = "仍在落库：pro 模式每条约 10~50s；可再调 queue_status(wait_seconds=30) 等它"
+    elif out_jobs and all(j["status"] == "done" for j in out_jobs):
+        hint = "已全部落库，可以 search_memory 验证内容"
+    else:
+        hint = "队列已清空"
+
+    return json.dumps({
+        "drained": drained,
+        "stats": stats,
+        "worker": {
+            "live": live,
+            "last_beat_s": round(age, 1) if age is not None else None,
+            "workers": workers,
+        },
+        "jobs": out_jobs,
+        "hint": hint,
+    }, ensure_ascii=False)
 
 
 def _tool_search_memory(args: dict) -> str:
@@ -423,6 +518,29 @@ TOOLS = [
         },
     },
     {
+        "name": "queue_status",
+        "description": (
+            "查异步写入进度：add_memory 返回的 job_ids 现在到哪一步了（待处理/运行中/完成/死信）、"
+            "worker 是否还活着、队列是否清空。add_memory 之后想确认「落库了没」就调它，"
+            "别用 search 空结果反推。wait_seconds>0 时短阻塞等待（上限 60 秒）。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_ids": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "要跟踪的 job_id（add_memory 返回的）；省略则看最近 10 条队列",
+                },
+                "wait_seconds": {
+                    "type": "number",
+                    "description": "最长等待秒数（0~60，默认 0 立即返回）：等这些 job 变成完成/死信",
+                },
+                "limit": {"type": "integer", "description": "未指定 job_ids 时返回最近几条，默认 10，上限 50"},
+            },
+        },
+    },
+    {
         "name": "search_memory",
         "description": (
             "语义检索长期记忆。回答涉及用户偏好/历史决策/项目上下文且当前上下文没有时，先查再答。"
@@ -513,6 +631,7 @@ TOOLS = [
 
 _HANDLERS = {
     "add_memory": _tool_add_memory,
+    "queue_status": _tool_queue_status,
     "search_memory": _tool_search_memory,
     "list_memories": _tool_list_memories,
     "get_memory": _tool_get_memory,

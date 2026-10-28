@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""MCP stdio 全量测试：7 工具端到端走一遍（沙箱隔离，不打真实库）。
+"""MCP stdio 全量测试：8 工具端到端走一遍（沙箱隔离，不打真实库）。
 
-覆盖：initialize 握手 → tools/list（7 工具齐全）→ add_memory(异步)
+覆盖：initialize 握手 → tools/list（8 工具齐全）→ add_memory(异步) → queue_status(进度)
 → 等待后台 supervisor 落库 → search / list / get / update / delete /
 get_version → 全链路 JSON-RPC 无 error、结果互相印证。
 
@@ -25,7 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PY = str(REPO / ".venv" / "Scripts" / "python.exe")
 EXPECTED_TOOLS = {
-    "add_memory", "search_memory", "list_memories", "get_memory",
+    "add_memory", "queue_status", "search_memory", "list_memories", "get_memory",
     "delete_memory", "update_memory", "get_version",
 }
 
@@ -113,7 +113,7 @@ def main() -> int:
     # ---- 2. tools/list：7 工具齐全 ----
     r = cli.call("tools/list")
     tools = {t["name"] for t in r.get("result", {}).get("tools", [])}
-    check("tools/list 7 工具齐全", tools == EXPECTED_TOOLS, f"got={sorted(tools)}")
+    check("tools/list 8 工具齐全", tools == EXPECTED_TOOLS, f"got={sorted(tools)}")
 
     def tool(name: str, args: dict, timeout: float = 180) -> dict:
         r = cli.call("tools/call", {"name": name, "arguments": args}, timeout=timeout)
@@ -141,6 +141,21 @@ def main() -> int:
           f"worker_spawned={res.get('worker_spawned')} worker_live={res.get('worker_live')}")
     check("add 响应带 pending 计数", isinstance(res.get("pending"), int), f"pending={res.get('pending')}")
 
+    # ---- 3b. queue_status：异步落库进度可查（0.9.9 新增的进度面）----
+    prog = tool("queue_status", {"job_ids": res.get("job_ids") or []})
+    pj = (prog.get("jobs") or [{}])[0]
+    check("queue_status 跟踪到本条 job",
+          pj.get("job_id") in (res.get("job_ids") or [])
+          and pj.get("status") in ("pending", "running", "done"),
+          json.dumps(pj, ensure_ascii=False)[:120])
+    check("queue_status 带 worker 与 drained 信号",
+          isinstance(prog.get("drained"), bool)
+          and isinstance((prog.get("worker") or {}).get("live"), bool),
+          json.dumps({"drained": prog.get("drained"), "worker": prog.get("worker")},
+                     ensure_ascii=False)[:140])
+    check("queue_status 拒非法 job_ids", "_raw" in tool("queue_status", {"job_ids": ["abc"]}),
+          "非整数 job_ids 应报参数错误")
+
     # ---- 4. 等后台 supervisor 落库（pro 模式每条 10~50s）----
     deadline = time.time() + 300
     stats = {}
@@ -157,6 +172,11 @@ def main() -> int:
     check("后台落库完成（pending=0 running=0）",
           stats.get("pending") == 0 and stats.get("running") == 0, f"{time.time()-t0:.0f}s stats={stats}")
     check("无死信", stats.get("dead") == 0, f"dead={stats.get('dead')}")
+
+    prog2 = tool("queue_status", {"job_ids": res.get("job_ids") or [], "wait_seconds": 5})
+    check("queue_status 落库后转 done 且 drained",
+          ((prog2.get("jobs") or [{}])[0].get("status") == "done") and prog2.get("drained") is True,
+          json.dumps((prog2.get("jobs") or [{}])[0], ensure_ascii=False)[:140])
 
     # ---- 5. search_memory：命中刚写入的记忆 ----
     res = tool("search_memory", {"query": "hy-mem 异步队列 SQLite 持久化 消费线程", "limit": 5})

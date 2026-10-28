@@ -85,6 +85,13 @@ def main() -> int:
     print(f"[add] job_ids={ad.get('job_ids')} pending={ad.get('pending')} "
           f"spawned={ad.get('worker_spawned')} live={ad.get('worker_live')}")
 
+    q = rpc("tools/call", {"name": "queue_status",
+                           "arguments": {"job_ids": ad.get("job_ids") or [], "wait_seconds": 5}})
+    qd = json.loads(q["result"]["content"][0]["text"])
+    j0 = (qd.get("jobs") or [{}])[0]
+    print(f"[queue] drained={qd.get('drained')} worker={qd.get('worker')} "
+          f"job#{j0.get('job_id')}={j0.get('status')} took={j0.get('took_s')}s")
+
     p.stdin.close()
     try:
         p.wait(timeout=15)

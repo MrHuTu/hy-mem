@@ -407,24 +407,37 @@ def claim_worker_slot(conn, cap: int, fresh: float = 15.0) -> bool:
         return True
 
 
+def _job_row(r) -> dict:
+    d = dict(r)
+    try:
+        d["payload"] = json.loads(d["payload"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        d["memory_ids"] = json.loads(d["memory_ids"]) if d.get("memory_ids") else []
+    except Exception:  # noqa: BLE001
+        pass
+    return d
+
+
 def list_jobs(conn, status: str | None = None, limit: int = 20) -> list[dict]:
     if status:
         rows = conn.execute("SELECT * FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?", (status, limit)).fetchall()
     else:
         rows = conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        try:
-            d["payload"] = json.loads(d["payload"])
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            d["memory_ids"] = json.loads(d["memory_ids"]) if d.get("memory_ids") else []
-        except Exception:  # noqa: BLE001
-            pass
-        out.append(d)
-    return out
+    return [_job_row(r) for r in rows]
+
+
+def get_jobs(conn, ids: list[int]) -> list[dict]:
+    """按 job_id 精确取（MCP queue_status 用：智能体只关心自己刚提交的那几条）。"""
+    ids = [int(i) for i in ids if i is not None]
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"SELECT * FROM jobs WHERE id IN ({marks}) ORDER BY id", ids
+    ).fetchall()
+    return [_job_row(r) for r in rows]
 
 
 # --------------------------------------------------------------------------

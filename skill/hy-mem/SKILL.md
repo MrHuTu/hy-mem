@@ -270,7 +270,8 @@ chroma 嵌入式库不支持多进程共享——0.9.8 及以前，长驻进程�
 ```
 
 - 协议：JSON-RPC 2.0 换行分隔（MCP stdio 标准），宿主按会话拉起、随会话退出，不常驻。
-- 工具：`add_memory`（默认异步毫秒返回）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `update_memory`（改内容，走演化链，须 `confirm: true`）/ `get_version`。
+- 工具：`add_memory`（默认异步毫秒返回）/ `queue_status`（查异步落库进度）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `update_memory`（改内容，走演化链，须 `confirm: true`）/ `get_version`。
+- 异步写进度：`add_memory` 返回的 `job_ids` 交给 `queue_status`（可选 `wait_seconds` 0~60 短阻塞），拿到每条 job 的 `status`（pending/running/done/dead）、耗时、`error`，以及 `drained`（队列是否清空）与 `worker.live`。**别用「search 空结果」反推落库与否**——那大概是还在队列里；`search_memory` 返回的 `pending_jobs` 字段也是同一信号。
 - 写入附加参数（`add_memory`）：`metadata`（对象，附加元数据）、`memory_at`（补录记忆发生时间，`2026-03-01` 这类写法；时间过滤按它算）、`request_id`（幂等写 id，同一 id 重复提交只落一条）。
 - 时间过滤与翻页：`search_memory` 和 `list_memories` 都支持 `since` / `until`（两种写法：相对值 `30m`/`12h`/`7d`/`30d`/`1y`，或 ISO 日期 `2026-01-01`）与 `offset` 翻页；响应带 `has_more` / `next_offset`，还有更多就带 offset 接着翻。`list_memories` 另支持 `order`（`desc` 最新在前 / `asc` 最旧在前）。时间过滤优先按 `memory_at`（补录的发生时间），没有补录才按写入时间。
 - 工具失败时返回明确错误：`错误 [错误码] 原因` + `建议：修复方式`，宿主可直接转述给用户；参数错（空 query、缺 confirm）只说哪里错、不套运行时建议。
