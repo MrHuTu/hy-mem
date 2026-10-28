@@ -61,4 +61,13 @@
 - **发版（0.9.13）**：`dist/hy-mem-0.9.13-win64.zip`（178 MB / 1709 文件）+ `dist/hy-mem/`（476 MB）；
   产物根目录无 `config.json` / `.env` / `data/`；解压目录内直接跑 exe 得 `hy-mem 0.9.13`；
   exe 上 `test_cli` 84/84。
-- **遗留**：安装到正式目录 + 宿主 `mcp.json` 指向 0.9.13（等用户确认后再做）。
+- **安装（2026-10-28）**：`D:\tools_open\hy-mem-0.9.13-win64`（476 MB）—— 从干净产物复制程序本体，
+  接管 0.9.12 的 `config.json` + `data/`（3.3 MB）；`storage.dataDir` 为空串，配置天然落到新目录，
+  无需改路径（迁移时清掉了旧的 `write.lock` / `server.port`）。
+  `hy-mem install` 重写 PATH 启动器（`%LOCALAPPDATA%\hy-mem\bin`，指向新 exe，用户级 PATH 已含该目录）；
+  `skill --install` 五宿主均为最新；`doctor` **19/19 PASS**（embedding_live 1024 维 260 ms、
+  llm_live 3581 ms、queue 0/0）；MCP stdio 探针：init 0.9.13 / 8 工具 / search 命中 2 条 /
+  add 入队 job#85 且 worker live；`search hy-mem` 读回历史记忆 0.618 / 0.600 / 0.464。
+  宿主 `~/.workbuddy/mcp.json` 已切指 0.9.13（备份 `mcp.json.bak-20261028-184004`），
+  **重启 WorkBuddy 后生效**。
+- **回滚点**：`D:\tools_open\hy-mem-0.9.12-win64` 原样保留（480 MB，无进程占用）。
