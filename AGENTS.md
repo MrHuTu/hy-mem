@@ -133,6 +133,9 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 - 一切客户端（CLI / 交互 UI / MCP stdio）的唯一 SDK 入口 `make_client()` 开头调 `ensure_endpoint()`：读端口文件 → `netprobe.get_json(direct=True)` 心跳校验 → 设 `MEMORY_VECTOR_HOST/PORT`（SDK 原生支持，自动切 HttpClient）；端点不可用 → 复用 `_spawn_detached_worker` 拉起（cap=1 防重）→ 轮询就绪。
 - 注入时同步补 `NO_PROXY=127.0.0.1,localhost`——chroma 的 httpx 吃代理环境变量与 Windows 系统代理，回环被代理劫持即 502（实测）。
 - 两个实测坑：chroma `Settings` 必须传 `is_persistent=True`（否则 server 静默变内存库，检索永远空）；`chroma_api_impl` 不可传 server 类（System 递归构造自爆）。
+- 第三个坑（同日二次事故，`tolist`）：跨进程写入落在向量段 brute force/queue 路径时 `GetResult.embeddings` 是 list，而 FastAPI 响应层硬编码 `cast(Embedding, e).tolist()` → **HTTP 的 `get`/`query` 一带 embeddings 就 500**；SDK 的 `get_by_ids`/`get_embeddings` 静默返回空 → `expand_evolution_chains` 整批走 fallback（`READ_EVOLUTION evolved_count=0`）→ superseded 条目漏进结果（「最美/最丑/最帅」三条同时返回，正是 0.9.9 首包的症状）。修法：`_patch_api_embeddings()` 在 API 实例的 `_get`/`_query` 出口把 list 归一化成 numpy，实例级包装，不依赖 `chroma_api_impl` 解析出的具体类（1.5.9 默认是 `RustBindingsAPI`，不是 `SegmentAPI`）。
+- 排查口诀：**检索多出历史版本 → 先验 HTTP 读 embeddings**（`scripts/probe_vdb_http.py`），失败就是上面那个坑，别一头钻进检索管线。
+- 分发前的两条实测：`scripts/probe_vdb_http.py`（已装 server 的 embeddings 契约）、`scripts/probe_mcp_stdio.py`（真实 stdio：initialize → tools/list → search/add）。两者默认指向 `D:\tools_open\hy-mem-0.9.9-win64`，可用 `HYMEM_EXE` 覆盖。
 - 新增依赖 `fastapi` + `opentelemetry-instrumentation-fastapi`（chromadb 未把前者列为运行时依赖），打包需 `--collect-submodules fastapi uvicorn opentelemetry.instrumentation.fastapi`（uvicorn/otel 有 importlib 动态加载）。
 
 ## 4. ⚠️ 两套完全独立的环境（最高频误解）
