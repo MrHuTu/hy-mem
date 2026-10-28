@@ -19,15 +19,15 @@
 
 | 项 | 值 | 复核方式 |
 |---|---|---|
-| 版本 | `0.9.8`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
+| 版本 | `0.9.9`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
 | 语言/运行时 | Python **3.12.10**，venv 在 `.venv/` | `.venv/Scripts/python.exe -V` |
 | 核心 SDK | `hy-memory 2.0.5` | `.venv/Scripts/python.exe -m pip show hy-memory` |
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **21 个 py，11337 行**（`cli/` 15 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
-| 子命令 | **29** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes`，改为单 supervisor 进程 + 消费线程池，重试改延迟队列 `jobs.not_before`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **279**（UI 92 / setup 103 / CLI 84） | 见 §8 |
+| 源码规模 | **24 个 py，14003 行**（`cli/` 18 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
+| 子命令 | **29** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes`，改为单 supervisor 进程 + 消费线程池，重试改延迟队列 `jobs.not_before`；0.9.9 `worker` 加 `--no-fast-exit` 并内嵌 chroma server） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
+| 测试用例 | **301**（UI 92 / setup 103 / CLI 84 / vdb 22） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **351 MB**（exe 本体 27.5 MB）；对外分发的是 `dist/hy-mem-0.9.5-win64.zip` **152 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **110 s**（含压缩包 23 s） | 构建日志末行 |
@@ -55,7 +55,8 @@ D:\tools_open\agent-bridge\
 │   ├── hy_mem_cli.py   (2842) ← 大脑：29 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
 │   ├── helptext.py      (579) ← 命令规格单一真源（`help` / `help --json` 的数据源）
 │   ├── config.py        (461) ← config.json 读写 + env 映射 + 校验 + 身份默认值
-│   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0
+│   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0；get_json(direct=True) 供回环探活
+│   ├── vdb_endpoint.py  (218) ← chroma server 端点层（0.9.9）：worker 起内嵌 server 线程 + server.port 端口文件；客户端 ensure_endpoint 注入 MEMORY_VECTOR_HOST/PORT。数据唯一所有者 = worker，其余进程一律 HttpClient（chroma embedded 多进程共享会读到过期/空索引，2026-10-28 事故）
 │   ├── setup_wizard.py  (654) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
 │   ├── menu.py          (686) ← 交互主界面 + 设置中心 + 12 个页面
 │   ├── tui.py          (1280) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪
@@ -123,6 +124,16 @@ D:\tools_open\agent-bridge\
 顶层冒出的 `UnicodeEncodeError` 被归为 **`E_CONFIG` / 退出码 1**（不是 2）：它意味着「HTTP 头里有非 ASCII 字符」，改配置就能解决，不是网络故障。这条映射在 `classify_error()` 里，兜住所有绕过闸门的路径（例如 SDK 内部直接用 `httpx` 发请求）。
 
 ---
+
+### 3.2 向量库端点架构（0.9.9，改 `make_client` / `cmd_worker` 前必读）
+
+chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker 写入并翻转 supersede 后，其他进程的内存索引不更新，召回池直接为空（2026-10-28 实测事故，且不自愈）。因此 0.9.9 起数据唯一所有者是 worker 进程内嵌的 chroma server 线程：
+
+- worker 启动即起 server（`vdb_endpoint.start_for_worker`），端口写 `data/server.port`，退出时清理；自身 SDK 调用也走 HttpClient（env 注入），防同进程双实例。
+- 一切客户端（CLI / 交互 UI / MCP stdio）的唯一 SDK 入口 `make_client()` 开头调 `ensure_endpoint()`：读端口文件 → `netprobe.get_json(direct=True)` 心跳校验 → 设 `MEMORY_VECTOR_HOST/PORT`（SDK 原生支持，自动切 HttpClient）；端点不可用 → 复用 `_spawn_detached_worker` 拉起（cap=1 防重）→ 轮询就绪。
+- 注入时同步补 `NO_PROXY=127.0.0.1,localhost`——chroma 的 httpx 吃代理环境变量与 Windows 系统代理，回环被代理劫持即 502（实测）。
+- 两个实测坑：chroma `Settings` 必须传 `is_persistent=True`（否则 server 静默变内存库，检索永远空）；`chroma_api_impl` 不可传 server 类（System 递归构造自爆）。
+- 新增依赖 `fastapi` + `opentelemetry-instrumentation-fastapi`（chromadb 未把前者列为运行时依赖），打包需 `--collect-submodules fastapi uvicorn opentelemetry.instrumentation.fastapi`（uvicorn/otel 有 importlib 动态加载）。
 
 ## 4. ⚠️ 两套完全独立的环境（最高频误解）
 
@@ -495,7 +506,7 @@ LoadLibrary: ?????????
 6. 不要改 `presets.py` 的 `dims` 而不重建数据目录。
 7. 不要直接编辑宿主里的 `SKILL.md` 副本（`~/.workbuddy/skills/hy-mem/SKILL.md` 等），改 `skill/hy-mem/SKILL.md` 后 `hy-mem skill --install`。
 8. 不要凭想象补 SDK 参数 —— 先用 `hy-mem help --json` 看本地实现，涉及 SDK 行为先读 `.venv/Lib/site-packages/hy_memory/` 源码。
-9. **不要自己写 HTTP 调用** —— 所有出站请求只走 `cli/netprobe.py: post_json()`。它返回 `Sent`（带真实状态码）或 `NotSent`（带原因），`status = 0` 这个约定已从代码里删除。`test_setup.py` 有源码守卫：除 `netprobe.py` 外，`cli/` 下出现 `urlopen(` / `import urllib.request` / `requests` / `httpx`，或出现 `status == 0`，测试直接失败。
+9. **不要自己写 HTTP 调用** —— 所有出站请求只走 `cli/netprobe.py: post_json() / get_json()`。它们返回 `Sent`（带真实状态码）或 `NotSent`（带原因），`status = 0` 这个约定已从代码里删除。`test_setup.py` 有源码守卫：除 `netprobe.py` 外，`cli/` 下出现 `urlopen(` / `import urllib.request` / `requests` / `httpx`，或出现 `status == 0`，测试直接失败。回环探活（如 vdb_endpoint 的心跳）必须 `get_json(..., direct=True)` 绕代理。
 
 **必须做**
 

@@ -76,10 +76,16 @@ ARGS = [
     "--hidden-import", "local_embedder",
     "--hidden-import", "runtime_check",
     "--hidden-import", "netprobe",
+    "--hidden-import", "vdb_endpoint",
     # SDK 及其动态子模块
     "--collect-submodules", "hy_memory",
     "--collect-submodules", "chromadb",
     "--collect-data", "chromadb",
+    # vdb_endpoint 的 server 线程依赖（chromadb 未把 fastapi 列为运行时依赖；
+    # uvicorn/otel 有 importlib 动态加载，必须整包收集）
+    "--collect-submodules", "fastapi",
+    "--collect-submodules", "uvicorn",
+    "--collect-submodules", "opentelemetry.instrumentation.fastapi",
     "--copy-metadata", "hy-memory",
     "--copy-metadata", "chromadb",
     # 纯 GUI/科学计算，本项目用不到

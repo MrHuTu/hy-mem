@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import argparse
 
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 
 PURPOSE = (
     "跨会话长期记忆库。把用户偏好、项目事实、决策与踩坑写进去，下次会话靠语义检索取回。"
-    "底层是腾讯 Hy-Memory SDK 2.0.5（嵌入式 chromadb + kuzu），单机运行，无服务进程。"
+    "底层是腾讯 Hy-Memory SDK 2.0.5（chromadb），单机运行：向量库由后台 worker 进程"
+    "内嵌的 chroma server 承载（数据唯一所有者），CLI/UI/MCP 客户端经 HttpClient 访问。"
 )
 
 INVOCATION = {
