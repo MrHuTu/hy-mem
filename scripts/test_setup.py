@@ -544,6 +544,52 @@ def main() -> int:
     _local = next((p for p in presets_mod.EMBEDDING_PRESETS if not p.needs_key), None)
     check("零 key 的本地预设不写 keyEnv", _local is not None and _local.to_cfg().get("keyEnv") == "")
 
+    # Q6 首次安装（**配置文件还不存在**）——最容易漏的一条路径
+    #
+    # config.load() 在没有 config.json 时会调 _fill_from_env()，把 $MEMORY_EMBEDDER_API_KEY /
+    # $MEMORY_LLM_API_KEY 的值复制进内存里的 apiKey。于是「apiKey 非空」并不代表用户手填过，
+    # 只看它会误判成"已有 key，不用写回 keyEnv"，结果预设声明的变量名（$YSJX_API_KEY，本机为空）
+    # 被当成密钥来源 → 探针拿到空串 → `✗ 密钥为空`。
+    # 实测现场（0.9.12 打包前）：空沙箱 `setup --step llm` 提示「将继承当前密钥（sk-fw…）」
+    # 紧接着却报「✗ 密钥为空（配置里的 apiKey 与 keyEnv 指向的变量都取不到）」。
+    print("\n首次安装：配置不存在、密钥由环境变量回填")
+    LLM_ENV = "MEMORY_LLM_API_KEY"
+    LLM_KEY = "sk-test-llm-env-only-0123456789"
+    _saved_llm_env = os.environ.get(LLM_ENV)
+    os.environ[LLM_ENV] = LLM_KEY
+    setup_wizard.probe_llm = _REAL_PROBE_LLM  # 真探针，只桩网络
+    setup_wizard.probe_embedding = _REAL_PROBE_EMB
+
+    _asked.clear()
+    _seen.update({"key": None, "calls": 0})
+    tui.select = lambda q, options, default=0, **k: 0
+    _llm_preset = presets_mod.LLM_PRESETS[0]
+    _llm_cfg = dict(_llm_preset.to_cfg())
+    # 复刻 _fill_from_env 的结果：apiKey 被 env 值填上，keyEnv 仍是预设/默认声明的名字
+    _llm_cfg["keyEnv"] = "YSJX_API_KEY"
+    _llm_cfg["apiKey"] = LLM_KEY
+    _new_llm = setup_wizard.step_llm({"mode": "pro", "llm": _llm_cfg})
+    check("首次安装不追问 LLM key", not _asked, str(_asked))
+    check("首次安装的探针拿到环境变量 key", _seen["key"] == LLM_KEY, repr(_seen["key"]))
+    check("首次安装写回真实变量名", _new_llm.get("keyEnv") == LLM_ENV, repr(_new_llm.get("keyEnv")))
+    check("首次安装不把 key 烤进配置", _new_llm.get("apiKey") == "", repr(_new_llm.get("apiKey")))
+
+    # Q7 首次安装的向量模型同理：env 回填让 key_in_file 为真，但不应追问
+    _asked.clear()
+    _seen.update({"key": None, "calls": 0})
+    _new_emb_fresh = setup_wizard.step_embedding(
+        {"mode": "pro", "embedding": _probe_cfg(apiKey=ENV_KEY)}
+    )
+    check("首次安装不追问嵌入 key", not _asked, str(_asked))
+    check("首次安装的嵌入探针拿到 env key", _seen["key"] == ENV_KEY, repr(_seen["key"]))
+    check("首次安装的嵌入 apiKey 不落盘", _new_emb_fresh.get("apiKey") == "", repr(_new_emb_fresh.get("apiKey")))
+    check("首次安装的嵌入 keyEnv 保留", _new_emb_fresh.get("keyEnv") == ENV_NAME, repr(_new_emb_fresh.get("keyEnv")))
+
+    if _saved_llm_env is None:
+        os.environ.pop(LLM_ENV, None)
+    else:
+        os.environ[LLM_ENV] = _saved_llm_env
+
     # Q6 走完整单步设置（scope=embedding）落盘后，配置里仍是「apiKey 空 + keyEnv 在」
     _seen.update({"key": None, "calls": 0})
     tui.select = lambda q, options, default=0, **k: 0 if "向量模型" in q else 0

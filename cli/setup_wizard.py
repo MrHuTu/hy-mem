@@ -195,6 +195,11 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
         }
         if not chosen.needs_key:
             new["apiKey"] = ""
+        elif str(emb.get("keyEnv") or "") and os.getenv(str(emb["keyEnv"]), ""):
+            # 密钥已经在环境变量里，就别再把明文烤进配置。首次安装时 `_fill_from_env()`
+            # 会把 env 值复制进 emb["apiKey"]，直接 `{**emb}` 就把它一起存下去了。
+            new["apiKey"] = ""
+            new["keyEnv"] = emb["keyEnv"]
     elif chosen is None:
         new = dict(emb)
         new["preset"] = "custom"
@@ -217,13 +222,19 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
             same_host = str(emb.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
             # 只有同一个端点才继承：换厂商还沿用上家的 key，只会换来一个 401
             inherited = os.getenv(key_env, "") if same_host else ""
-            if inherited and not key_in_file:
+            # 环境变量优先：首次安装时 `_fill_from_env()` 会把 env 里的 key 复制进内存配置，
+            # 此时 key_in_file 为真但不是"用户手填"，不该因此追问一遍（也不该把它烤进配置文件）。
+            if inherited:
                 # 与 step_llm 同一套策略：环境变量里有 key 就继承，不落盘、不追问
                 tui.info(f"将从环境变量 ${key_env} 继承密钥（{_mask(inherited)}），不落盘")
+                new["apiKey"] = ""
+                new["keyEnv"] = key_env
                 if tui.confirm("改为在 config.json 里单独保存一个 key？", default=False):
                     new["apiKey"] = tui.ask_secret("API Key", hint="逐字粘贴；留空 = 仍然用环境变量")
             elif key_in_file and same_host:
                 new["apiKey"] = tui.ask_secret("API Key", default=str(emb["apiKey"]), hint="直接回车 = 沿用当前 key")
+                if emb.get("keyEnv"):
+                    new["keyEnv"] = emb["keyEnv"]
             else:
                 new["apiKey"] = tui.ask_secret(
                     "API Key",
@@ -307,23 +318,37 @@ def step_llm(cfg: dict, _depth: int = 0) -> dict:
     else:
         new = chosen.to_cfg()
         if chosen.key_env:
+            same_host = str(llm.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
             # 「能不能继承」不能只看预设声明的变量名：本机实际把 key 放在别的变量里
             # （例如预设写 $YSJX_API_KEY，而配置的 keyEnv 是 $MEMORY_LLM_API_KEY），
-            # 只看预设名就会在第二次设置时逼用户重填一遍。同端点下优先沿用当前 key。
-            same_host = str(llm.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
-            cur_key = cfgmod.resolve_llm_key({"llm": llm}) if same_host else ""
-            inherited = os.getenv(chosen.key_env, "") or cur_key
-            if inherited:
-                src = "config.json" if (same_host and llm.get("apiKey")) else "$" + (
-                    (llm.get("keyEnv") if same_host and llm.get("keyEnv") else chosen.key_env))
-                tui.info(f"将继承当前密钥（{_mask(inherited)}，来自 {src}），不落盘")
+            # 只看预设名就会在第二次设置时逼用户重填一遍。
+            # 首次安装还有一个坑：配置不存在时 `_fill_from_env()` 会把 $MEMORY_LLM_API_KEY
+            # 的值复制进内存里的 llm.apiKey，于是 apiKey 非空 —— 但它并不是"用户手填"，
+            # 只是环境变量的临时副本。所以判断依据只能是"环境变量里有没有"，不能看 apiKey。
+            env_name = ""
+            for cand in (chosen.key_env, str(llm.get("keyEnv") or ""), "MEMORY_LLM_API_KEY"):
+                if cand and os.getenv(cand, ""):
+                    env_name = cand
+                    break
+            env_key = os.getenv(env_name, "") if env_name else ""
+            file_key = str(llm.get("apiKey") or "") if same_host else ""
+            if env_key:
+                tui.info(f"将继承当前密钥（{_mask(env_key)}，来自 ${env_name}），不落盘")
+                # 关键一步：把 keyEnv 指向「刚才真正取到 key 的那个变量名」。
+                # 预设声明的名字可能与本机实际存放的不一致（预设 $YSJX_API_KEY，
+                # 本机 $MEMORY_LLM_API_KEY），不写回就会「继承成功、保存后取不到」。
+                new["apiKey"] = ""
+                new["keyEnv"] = env_name
                 if tui.confirm("改为在 config.json 里单独保存一个 key？", default=False):
                     new["apiKey"] = tui.ask_secret("API Key")
-                elif same_host and llm.get("keyEnv") and not llm.get("apiKey"):
-                    # 关键一步：把 keyEnv 指向「刚才真正取到 key 的那个变量名」。
-                    # 预设声明的名字可能与本机实际存放的不一致（预设 $YSJX_API_KEY，
-                    # 本机 $MEMORY_LLM_API_KEY），不写回就会「继承成功、保存后取不到」。
-                    new["keyEnv"] = llm["keyEnv"]
+                    if not new["apiKey"]:
+                        new["keyEnv"] = env_name
+            elif file_key:
+                # 真·明文 key（用户手填过，或只在 .env 里）：沿用，但不追问
+                tui.info(f"将沿用配置里的密钥（{_mask(file_key)}）")
+                new["apiKey"] = file_key
+                if llm.get("keyEnv"):
+                    new["keyEnv"] = str(llm["keyEnv"])
             else:
                 tui.warn(f"端点 {chosen.base_url} 没有可用密钥（${chosen.key_env} 为空），需要手工提供")
                 new["apiKey"] = tui.ask_secret("API Key")
