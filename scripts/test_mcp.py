@@ -139,7 +139,7 @@ def main() -> int:
     # ---- 3. add_memory（异步）：入队 + 自动拉起 supervisor ----
     # 注意：文本必须是「事实型」表述。合成测试句会被 extractor 合理判为
     # 「无可提取事实」→ 只有 L1 shadow 层、list/search 查不到（SDK 正常设计，
-    # 见 probe_extract.py 的字段对照）。这里用用户偏好/项目事实口径。
+    # 见 .local-test/probe_extract.py 的字段对照）。这里用用户偏好/项目事实口径。
     marker = f"mcp全量测试-{int(time.time())}"
     res = tool("add_memory", {"text": f"用户偏好：hy-mem 项目的异步写入队列用 SQLite 持久化，"
                                       f"worker 默认 3 个消费线程（验收标记 {marker}）",
