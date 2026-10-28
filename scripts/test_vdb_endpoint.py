@@ -164,6 +164,14 @@ def main() -> int:
         got = col.get(ids=["a"])
         check("HttpClient 写读一致", (got.get("documents") or [""])[0] == "v2")
 
+        # bug 场景回归（2026-10-28 事故形态）：col 是 upsert 之前建立的
+        # 「老客户端」，必须立刻看到自己/别人后续的写入——embedded 多进程
+        # 下这一步会读到过期索引。
+        col.upsert(ids=["a"], embeddings=[[0.5] * 8], documents=["v3"])
+        got_old = col.get(ids=["a"])
+        check("老客户端立见新写入（bug 场景回归）",
+              (got_old.get("documents") or [""])[0] == "v3")
+
         vdb_endpoint.stop_server_thread(srv, sport)
         time.sleep(0.2)
         check("停后端口文件已清", vdb_endpoint.read_port() is None)
