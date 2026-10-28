@@ -25,9 +25,9 @@
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **33 个 py，15436 行**（`cli/` 20 个 12033 行 + `scripts/` 13 个 3403 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
+| 源码规模 | **34 个 py，15703 行**（`cli/` 20 个 12080 行 + `scripts/` 14 个 3623 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **421**（CLI 84 / UI 94 / setup 103 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 29 / encoding 10） | 见 §8 |
+| 测试用例 | **443**（CLI 84 / UI 94 / setup 125 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 29 / encoding 10） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 34 MB）；对外分发 `dist/hy-mem-0.9.11-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **196 s**（含压缩包 24 s） | 构建日志末行 |
@@ -75,6 +75,7 @@ D:\tools_open\agent-bridge\
 │   ├── build_exe.py     (507) ← 打包主脚本：消毒 → SKILL.md → 启动器/说明 → 压缩包 → 清历史
 │   ├── check_secrets.py (260) ← 提交前密钥/隐私闸门（ERROR 挡提交，WARN 要人看一眼）
 │   ├── _secrets.py      (121) ← 密钥唯一入口：只读 `MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`
+│   ├── drive_setup.py    (90) ← **黑盒驱动**：真 CLI 子进程 + 管道喂键，复现/回归交互配置 bug（见 §8.1）
 │   ├── test_cli.py      (367) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
 │   ├── test_ui.py       (417) ← 按键与渲染 + 连续写入的循环语义（假终端，无需真 TTY）
 │   ├── test_setup.py    (471) ← 向导 / 存储运维 / 队列积压（不发网络请求）
@@ -348,7 +349,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | 套件 | 用例 | 覆盖 | 跑法 |
 |---|---|---|---|
 | `scripts/test_ui.py` | **94** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航、**写记忆连续写入的循环语义** | `.venv/Scripts/python.exe scripts/test_ui.py` |
-| `scripts/test_setup.py` | **103** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像** | `.venv/Scripts/python.exe scripts/test_setup.py` |
+| `scripts/test_setup.py` | **125** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）** | `.venv/Scripts/python.exe scripts/test_setup.py` |
 | `scripts/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
 | `scripts/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe scripts/test_queue.py` |
 | `scripts/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe scripts/test_concurrency.py [exe]` |
@@ -368,7 +369,37 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe scripts/test_cli
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：九套全绿（cli 84 / ui 94 / setup 103 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 29 / encoding 10 = **421**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：九套全绿（cli 84 / ui 94 / setup 125 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 29 / encoding 10 = **443**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+
+### 8.1 怎么测 CLI —— 四条铁律（2026-10-28 补，源自 401 事故）
+
+**事故**：设置 → 向量模型 → 选「当前项」→ 向导追问 API Key → 用户回车 → `401 No API-key provided`，而环境变量里那把有效 key 根本没被读到。三个根因全是「密钥判据」：`step_embedding` 用 `emb["apiKey"]` 判断有没有 key、`probe_embedding` 直接把它当请求头、`LlmPreset.to_cfg()` 把 `keyEnv` 冲成预设声明的变量名。**同期 421 项测试全绿**——因为 `test_setup.stub()` 把 `probe_embedding` / `probe_llm` 整个换成了桩：密钥到底从哪来，从来没被验证过。
+
+| # | 铁律 | 反例（真发生过） |
+|---|---|---|
+| 1 | **每个可配置项至少测两遍：首次 + 第二次** | 首次设置时 `apiKey` 有值，判据 bug 只在「再配一次」时暴露；421 项里没有一条跑过第二次 |
+| 2 | **不许把被测对象一起桩掉** | 桩掉 `probe_embedding` → 密钥来源、请求头构造、dims 修正全部失真。只桩**网络**（`netprobe.post_json`）和**终端**（`tui.*`），业务判据必须真跑 |
+| 3 | **配置类断言看结构，别只看单字段** | 「`apiKey` 空 + `keyEnv` 有效」是 0.9.11 起的常态组合；只断言 `apiKey == ""` 会漏掉 keyEnv 被冲回预设默认值 |
+| 4 | **交互路径要用真 CLI 子进程 + 管道喂键** | 直接调 `step_embedding()` 绕过了菜单、`tui`、stdin 解码。非 TTY 时 `tui.select` 降级成编号菜单，喂序号就等价于用户手点 |
+
+**分层怎么选**（从便宜到贵，别越级）：
+
+| 层 | 做法 | 用在哪 |
+|---|---|---|
+| 契约 | `test_cli.py`：子进程跑命令，断言 exit / stdout / JSON | 命令参数、退出码、输出分流 |
+| 交互 | `test_ui.py`：假 `KeyReader` 喂按键 | 方向键、鼠标、宽度裁剪、折行 |
+| 向导 | `test_setup.py`：脚本化 `tui.*` + **只桩网络** | 每一步的选择分支、摘要、落盘结果 |
+| 黑盒 | 真 CLI 子进程 + 管道喂键（模板 `scripts/drive_setup.py`） | **复现用户现场**，修 bug 前后各跑一次留证据 |
+
+**改配置结构时的最小验收**（照着做，别跳）：
+
+1. `test_setup` 全绿——含 Q 节「第二次配置」，这是判据类 bug 的守门人；
+2. `.venv/Scripts/python.exe scripts/drive_setup.py <沙箱> embedding "1\n"` —— 选当前项，**不应出现 API Key 提问**，应直接 `✓ 可用，1024 维`；
+3. `.venv/Scripts/python.exe scripts/drive_setup.py <沙箱> all "1\n2\n1\n\n1\n\n"` —— 完整二次向导跑通，末尾「配置自检」全绿、`apiKey` 仍为空；
+4. `hy-mem config show` —— 密钥行显示「已设置（来自 $XXX）」，不是「未设置」。
+
+> 「第一次能配好」≠「第二次能配好」。配置项一旦引入新结构（如密钥只留变量名），
+> 必须当场补一条「用新结构再配一次」的用例；否则下一个 bug 一定出在这里。
 
 ---
 
