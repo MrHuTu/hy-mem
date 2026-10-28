@@ -368,15 +368,21 @@ def resolve_llm_key(cfg: dict) -> str:
 def resolve_embed_key(cfg: dict) -> str:
     """向量模型密钥：配置里的明文 > keyEnv 指定的环境变量 > 约定变量名。
 
-    第三个来源是历史行为（配置里 key 留空、靠 MEMORY_EMBEDDER_API_KEY 跑），
-    保留它是为了让升级前就配好环境变量的机器继续能用；换 key 时只动环境变量，
-    配置文件里只留 `keyEnv` 这个变量名，永远不会再出现明文。
+    第三个来源是历史行为（配置里 key 留空、keyEnv 也没写，靠
+    MEMORY_EMBEDDER_API_KEY 跑），保留它是为了让升级前就配好环境变量的机器继续能用。
+
+    但 **keyEnv 一旦显式写了名字，就只认那个变量，不再回落到约定变量名**。
+    原因是 2026-10-28 的 401 事故：换到新端点后 keyEnv 指向新端点的变量名（值为空），
+    再回落去读旧的 $MEMORY_EMBEDDER_API_KEY，等于拿别家的 key 打新端点 ——
+    报 401 而不是「没配 key」，用户会一直以为是自己粘贴错了。
     """
     emb = cfg.get("embedding") or {}
     if emb.get("apiKey"):
         return str(emb["apiKey"])
-    env_name = emb.get("keyEnv") or "MEMORY_EMBEDDER_API_KEY"
-    return os.getenv(env_name, "") or os.getenv("MEMORY_EMBEDDER_API_KEY", "")
+    env_name = str(emb.get("keyEnv") or "")
+    if env_name:
+        return os.getenv(env_name, "")
+    return os.getenv("MEMORY_EMBEDDER_API_KEY", "")
 
 
 # 从聊天窗口/文档粘密钥时最容易带进来的不可见字符

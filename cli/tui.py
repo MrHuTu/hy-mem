@@ -628,6 +628,20 @@ class KeyReader:
             return "home"
         if ch == "\x05":
             return "end"
+        # bash 的其余控制键。不映射就会被 isprintable 之外的分支吞掉，
+        # 表现在界面上就是「按了没反应」。
+        if ch == "\x04":
+            return "ctrl-d"  # EOF / 删光标处字符
+        if ch == "\x0b":
+            return "ctrl-k"  # 删到行尾
+        if ch == "\x0c":
+            return "ctrl-l"  # 清屏并重画
+        if ch == "\x12":
+            return "ctrl-r"  # 历史反查
+        if ch == "\x10":
+            return "ctrl-p"  # 上一条历史
+        if ch == "\x0e":
+            return "ctrl-n"  # 下一条历史
         if ch == " ":
             return "space"
         if ch == "\x1b":
@@ -832,10 +846,21 @@ def _select_numbered(
         err(f"无效输入：{raw!r}，请输入 1~{len(options)} 或英文键")
 
 
-def _ask_line(prompt: str) -> str:
+def _ask_line(prompt: str, eof_is_exit: bool = False) -> str:
+    """退化版行输入（非 TTY / 按键后端不可用）。
+
+    eof_is_exit 决定「输入结束」怎么理解：控制台里它等于 Ctrl+D（退出），
+    向导里它等于取消（Aborted）—— 两处都不该把 EOF 当成普通空行，否则
+    管道喂完最后一行后就会在原地打转、把提示语刷满屏幕。
+    """
     try:
         return input(prompt)
-    except (EOFError, KeyboardInterrupt) as exc:
+    except EOFError as exc:
+        print()
+        if eof_is_exit:
+            raise EOFError() from exc
+        raise Aborted() from exc
+    except KeyboardInterrupt as exc:
         print()
         raise Aborted() from exc
 
@@ -902,8 +927,39 @@ def clip_input(prompt_w: int, text: str, pos: int, width: int) -> tuple[str, str
     return lead, text[start:end], cursor
 
 
-def _line_edit(prompt: str, secret: bool = False) -> str:
-    """自带行编辑的输入，和选择器走同一套按键后端。
+def _common_prefix(items: list[str]) -> str:
+    if not items:
+        return ""
+    p = items[0]
+    for s in items[1:]:
+        i = 0
+        while i < len(p) and i < len(s) and p[i] == s[i]:
+            i += 1
+        p = p[:i]
+    return p
+
+
+def _candidate_rows(items: list[str], width: int) -> list[str]:
+    """候选排成多列（bash 连按两次 Tab 的效果），一行放不下就换行。"""
+    if not items:
+        return []
+    cell = max(vwidth(x) for x in items) + 2
+    ncol = max(1, (width - 2) // max(cell, 1))
+    rows: list[str] = []
+    for i in range(0, len(items), ncol):
+        chunk = items[i : i + ncol]
+        rows.append(("  " + "".join(lpad(x, cell) for x in chunk)).rstrip())
+    return rows
+
+
+def _line_edit(
+    prompt: str,
+    secret: bool = False,
+    history: list[str] | None = None,
+    completer=None,
+    eof_is_exit: bool = False,
+) -> str:
+    """自带行编辑的输入：按 bash / readline 的按键习惯来。
 
     为什么不用 input() / getpass：
       * 两者都走控制台的行规范缓冲，与选择器的 getwch 读的是同一份输入，
@@ -914,35 +970,56 @@ def _line_edit(prompt: str, secret: bool = False) -> str:
     渲染只有一条铁律：**永远只占一行**（见 clip_input）。长密钥、长路径、
     中文都不会把输入行撑成两行，因此「擦一行再写」永远是完整的。
 
-    编辑：←→ 移动、Home/End、退格/Delete、Ctrl+U 清行、Ctrl+W 删词、
-    Enter 提交、Esc / Ctrl+C 取消。粘贴 = 一串连续字符键，不需要特殊处理。
+    按键（与 bash / readline 对齐）：
+      ←→ 移动 · Home/End（Ctrl+A/E） · Backspace/Delete · Ctrl+U 删到行首 ·
+      Ctrl+W 删一词 · Ctrl+K 删到行尾 · Ctrl+L 清屏重画 · ↑↓ 或 Ctrl+P/N 翻历史 ·
+      Ctrl+R 反查（回车采用、Esc/Ctrl+C 放弃） · Tab 补全 · Enter 提交 ·
+      Ctrl+D 空行时 EOF（退出控制台），非空时删光标处字符 · Esc/Ctrl+C 放弃本行。
+
+    `history` 按**时间先后**给（尾部最新，与 bash 一致）；`completer(text)`
+    接收当前整行、返回若干条完整候选行。
     """
     rd = reader()
     if rd.backend == "none" or not key_mode():
-        return _ask_line(prompt)
+        return _ask_line(prompt, eof_is_exit)
 
     drain(rd, 60)
     buf: list[str] = []
     pos = 0
-    prompt_w = vwidth(prompt)
+    hist = [h for h in (history or []) if h and "\n" not in h and h.strip()]
+    hi = len(hist)
+    draft = ""
+    left: str | None = None          # 非 None 时覆盖提示符（Ctrl+R 反查用）
+    pat = ""
+    hit = -1
+    saved_buf: list[str] = []
+    saved_pos = 0
 
     def shown() -> str:
         return "*" * len(buf) if secret else "".join(buf)
 
     def repaint() -> None:
         width = term_width()
-        # 极窄终端（<50 列）里提示语本身就可能占满一行：先把它裁短，
-        # 否则「提示语 + 输入内容」还是会折行，前面所有的单行努力就白做了。
-        dpr, dpw = prompt, prompt_w
+        base = prompt if left is None else left
+        dpr, dpw = base, vwidth(base)
         if dpw > width - 8:
-            dpr = trunc(_strip_ansi(prompt), max(4, width - 8))
+            dpr = trunc(_strip_ansi(base), max(4, width - 8))
             dpw = vwidth(dpr)
         lead, body, cursor = clip_input(dpw, shown(), pos, width)
-        line = dpr + lead + body
-        _w("\r\x1b[2K" + line)
+        _w("\r\x1b[2K" + dpr + lead + body)
         back = vwidth(lead + body) - cursor
         if back > 0:
             _w(f"\x1b[{back}D")
+
+    def search_label() -> str:
+        hit_text = hist[hit] if 0 <= hit < len(hist) else ""
+        return c.dim("(reverse-i-search)") + f"\u2018{pat}\u2019: " + hit_text
+
+    def find_back(start: int) -> int:
+        for i in range(min(start, len(hist) - 1), -1, -1):
+            if pat.lower() in hist[i].lower():
+                return i
+        return -1
 
     with rd:
         repaint()
@@ -950,12 +1027,64 @@ def _line_edit(prompt: str, secret: bool = False) -> str:
             tok = rd.read()
             if tok == "":
                 continue
+
+            # ---- Ctrl+R 反查（此时整行由 left 接管，buf 为空）----
+            if left is not None:
+                if tok in ("ctrlc", "esc"):
+                    left = None
+                    buf, pos = list(saved_buf), saved_pos
+                    repaint()
+                    continue
+                if tok == "enter":
+                    left = None
+                    buf, pos = (list(hist[hit]), len(hist[hit])) if hit >= 0 else (list(saved_buf), saved_pos)
+                    repaint()
+                    continue
+                if tok == "ctrl-r":
+                    hit = find_back(hit - 1) if hit >= 0 else find_back(len(hist) - 1)
+                    left = search_label()
+                    repaint()
+                    continue
+                if tok == "bs":
+                    pat = pat[:-1]
+                    hit = find_back(len(hist) - 1) if pat else -1
+                    left = search_label()
+                    repaint()
+                    continue
+                if tok.startswith("char:"):
+                    pat += tok[5:]
+                    hit = find_back(len(hist) - 1)
+                    left = search_label()
+                    repaint()
+                continue
+
+            # ---- 提交 / 结束 ----
             if tok == "enter":
                 _w("\n")
                 return "".join(buf)
+            if tok == "ctrl-d":
+                if not buf:
+                    _w("\n")
+                    raise EOFError
+                if pos < len(buf):
+                    buf.pop(pos)
+                    repaint()
+                continue
             if tok in ("ctrlc", "esc"):
+                # Ctrl+C / Esc 一律只是「放弃这一行」：要退出控制台按 Ctrl+D 或 exit。
+                # 与 bash 一致 —— 误按一次不会把刚写了一半的正文连同会话一起丢掉。
                 _w("\n")
                 raise Aborted()
+
+            # ---- 编辑 ----
+            if tok == "ctrl-l":
+                _w("\x1b[2J\x1b[H")
+                repaint()
+                continue
+            if tok == "ctrl-k":
+                del buf[pos:]
+                repaint()
+                continue
             if tok == "bs":
                 if pos > 0:
                     buf.pop(pos - 1)
@@ -986,16 +1115,17 @@ def _line_edit(prompt: str, secret: bool = False) -> str:
                 repaint()
                 continue
             if tok == "ctrl-u":
-                buf.clear()
+                del buf[:pos]
                 pos = 0
                 repaint()
                 continue
             if tok == "ctrl-w":
-                while buf and buf[-1].isspace():
-                    buf.pop()
-                while buf and not buf[-1].isspace():
-                    buf.pop()
-                pos = len(buf)
+                while pos > 0 and buf[pos - 1].isspace():
+                    buf.pop(pos - 1)
+                    pos -= 1
+                while pos > 0 and not buf[pos - 1].isspace():
+                    buf.pop(pos - 1)
+                    pos -= 1
                 repaint()
                 continue
             if tok == "space":
@@ -1003,6 +1133,58 @@ def _line_edit(prompt: str, secret: bool = False) -> str:
                 pos += 1
                 repaint()
                 continue
+
+            # ---- 历史 ----
+            if tok in ("up", "ctrl-p") and not secret and hist:
+                if hi == len(hist):
+                    draft = "".join(buf)
+                if hi > 0:
+                    hi -= 1
+                    buf, pos = list(hist[hi]), len(hist[hi])
+                    repaint()
+                continue
+            if tok in ("down", "ctrl-n") and not secret and hist:
+                if hi < len(hist) - 1:
+                    hi += 1
+                    buf, pos = list(hist[hi]), len(hist[hi])
+                elif hi == len(hist) - 1:
+                    hi = len(hist)
+                    buf, pos = list(draft), len(draft)
+                repaint()
+                continue
+            if tok == "ctrl-r" and not secret and hist:
+                saved_buf, saved_pos = list(buf), pos
+                pat, hit = "", find_back(len(hist) - 1)
+                left = search_label()
+                repaint()
+                continue
+
+            # ---- 补全 ----
+            if tok == "tab":
+                if completer is None or secret:
+                    continue
+                text = "".join(buf)
+                try:
+                    cands = [x for x in (completer(text) or []) if x]
+                except Exception:  # noqa: BLE001  补全出错绝不能打断输入
+                    cands = []
+                if not cands:
+                    continue
+                if len(cands) == 1:
+                    buf, pos = list(cands[0]), len(cands[0])
+                    repaint()
+                    continue
+                common = _common_prefix(cands)
+                if common and vwidth(common) > vwidth(text):
+                    buf, pos = list(common), len(common)
+                    repaint()
+                    continue
+                _w("\n")
+                for row in _candidate_rows(sorted(set(cands)), term_width()):
+                    _w(row + "\n")
+                repaint()
+                continue
+
             if tok.startswith("char:"):
                 ch = tok[5:]
                 if ch.isprintable():
@@ -1010,9 +1192,7 @@ def _line_edit(prompt: str, secret: bool = False) -> str:
                     pos += 1
                     repaint()
                 continue
-            # 其余（PgUp/PgDn/Tab/鼠标）在单行输入里没有语义，忽略
-
-
+            # 其余（PgUp/PgDn/鼠标）在单行输入里没有语义，忽略
 
 def select(
     question: str,
@@ -1169,9 +1349,18 @@ def select(
 # --------------------------------------------------------------------------
 # 文本输入
 # --------------------------------------------------------------------------
-def line(prompt: str) -> str:
-    """公开的行输入（带上 tui 的编辑能力），供需要连续多行的界面复用。"""
-    return _line_edit(prompt)
+def line(
+    prompt: str,
+    history: list[str] | None = None,
+    completer=None,
+    eof_is_exit: bool = False,
+) -> str:
+    """公开的行输入（带上 tui 的编辑能力），供需要连续多行的界面复用。
+
+    history / completer 只有交互式 shell 用得上：历史翻找与 Tab 补全都在
+    `_line_edit` 里实现，非 TTY 时自动降级成 `input()`，这两项被忽略。
+    """
+    return _line_edit(prompt, history=history, completer=completer, eof_is_exit=eof_is_exit)
 
 
 def drain_reader(ms: int = 60) -> int:

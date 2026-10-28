@@ -33,6 +33,7 @@ import config as cfgmod  # noqa: E402
 import netprobe  # noqa: E402
 import setup_wizard  # noqa: E402
 import storage_ops  # noqa: E402
+import presets as presets_mod  # noqa: E402
 import tui  # noqa: E402
 
 # stub() 会把 probe_llm 换成桩，这里先留一份真身，供第 7 节的判定逻辑测试用。
@@ -97,9 +98,10 @@ def main() -> int:
     check("run_setup 返回 0", rc == 0, f"rc={rc}")
     check("setupComplete 已写入", cfg.get("setupComplete") is True)
     check("mode=pro", cfg.get("mode") == "pro", str(cfg.get("mode")))
-    check("向量模型已定", cfg["embedding"]["model"] == "qwen3.7-text-embedding-flash", cfg["embedding"]["model"])
+    check("向量模型已定", cfg["embedding"]["model"] == presets_mod.EMBEDDING_PRESETS[0].model,
+          cfg["embedding"]["model"])
     check("dims=1024（实测值）", cfg["embedding"]["dims"] == 1024, str(cfg["embedding"]["dims"]))
-    check("LLM 已定", cfg["llm"]["model"] == "deepseek-v4-flash", cfg["llm"]["model"])
+    check("LLM 已定", cfg["llm"]["model"] == presets_mod.LLM_PRESETS[0].model, cfg["llm"]["model"])
     check("密钥已落盘（向导里显式输入）", cfg["embedding"]["apiKey"] == "sk-test-embed")
 
     need, why = setup_wizard.needs_setup()
@@ -473,7 +475,6 @@ def main() -> int:
     # probe_embedding 直接拿 emb["apiKey"] 当请求头。
     # 这类 bug 只有真走一次「第二次配置」才暴露 —— 首次设置时 apiKey 有值，走不到。
     print("\n第二次配置：密钥只在环境变量里（401 事故回归）")
-    import presets as presets_mod  # noqa: E402
 
     ENV_NAME = "MEMORY_EMBEDDER_API_KEY"
     ENV_KEY = "sk-test-env-only-key-0123456789"
@@ -529,20 +530,46 @@ def main() -> int:
     check("二次配置后 keyEnv 保留", _new.get("keyEnv") == ENV_NAME, repr(_new.get("keyEnv")))
     check("二次配置后 dims 按实测写入", _new.get("dims") == 1024, str(_new.get("dims")))
 
-    # Q4 换同厂商另一个预设：继承环境变量密钥，也不该追问
+    # Q4 换到**另一个端点**：旧端点的 key 绝不能借用（那正是 401 的来源），
+    # 必须当场要求填新 key，并且提示里要说清是「换了端点」而不是「key 错了」
     _asked.clear()
     _seen.update({"key": None, "calls": 0})
     tui.select = lambda q, options, default=0, **k: 1 if "向量模型" in q else default
     _new2 = setup_wizard.step_embedding({"mode": "pro", "embedding": _probe_cfg()})
-    check("换预设（同厂商）不追问 key", not _asked, str(_asked))
-    check("换预设后仍用环境变量 key", _seen["key"] == ENV_KEY, repr(_seen["key"]))
-    check("换预设后 keyEnv 不丢", _new2.get("keyEnv") == ENV_NAME, repr(_new2.get("keyEnv")))
-    check("换预设后模型已切换", _new2.get("model") == presets_mod.EMBEDDING_PRESETS[1].model, str(_new2.get("model")))
+    _other = presets_mod.EMBEDDING_PRESETS[1]
+    check("换端点必须重填 key（不继承旧 key）", bool(_asked), str(_asked))
+    check("换端点时探针不再拿旧 key 发请求", _seen["key"] in (None, ""), repr(_seen["key"]))
+    check("换端点后 keyEnv 指向新端点的变量名", _new2.get("keyEnv") == _other.key_env,
+          repr(_new2.get("keyEnv")))
+    # 关键回归：新 keyEnv 的值为空，解析结果必须是空，**不能**回落到旧约定变量名
+    check("换端点后解析不到旧 key（不会 401）",
+          cfgmod.resolve_embed_key({"embedding": _new2}) == "",
+          repr(cfgmod.resolve_embed_key({"embedding": _new2})))
+    check("换端点后模型已切换", _new2.get("model") == _other.model, str(_new2.get("model")))
+
+    # Q8 同一端点只是改模型（自定义）：仍走继承，不追问
+    _asked.clear()
+    _seen.update({"key": None, "calls": 0})
+    tui.select = lambda q, options, default=0, **k: len(options) - 1 if "向量模型" in q else default
+    tui.ask = lambda q, default="", **k: default
+    _same = setup_wizard.step_embedding(
+        {"mode": "pro", "embedding": _probe_cfg(model="自定义同端点模型")}
+    )
+    check("同端点改模型不追问 key", not _asked, str(_asked))
+    check("同端点改模型仍用环境变量 key", _seen["key"] == ENV_KEY, repr(_seen["key"]))
+    check("同端点改模型保留 keyEnv", _same.get("keyEnv") == ENV_NAME, repr(_same.get("keyEnv")))
 
     # Q5 预设自身要把 keyEnv 带进配置（否则重选预设会把变量名冲成空）
-    check("预设 to_cfg 带 keyEnv", presets_mod.EMBEDDING_PRESETS[0].to_cfg().get("keyEnv") == ENV_NAME)
-    _local = next((p for p in presets_mod.EMBEDDING_PRESETS if not p.needs_key), None)
-    check("零 key 的本地预设不写 keyEnv", _local is not None and _local.to_cfg().get("keyEnv") == "")
+    check("预设 to_cfg 带 keyEnv",
+          presets_mod.EMBEDDING_PRESETS[0].to_cfg().get("keyEnv") == presets_mod.EMBEDDING_PRESETS[0].key_env,
+          str(presets_mod.EMBEDDING_PRESETS[0].to_cfg().get("keyEnv")))
+    check("预设收敛为「主流三家 + 自定义」",
+          len(presets_mod.EMBEDDING_PRESETS) == 3 and len(presets_mod.LLM_PRESETS) == 3,
+          f"{len(presets_mod.EMBEDDING_PRESETS)} / {len(presets_mod.LLM_PRESETS)}")
+    check("向量预设不含 DeepSeek（官方无 embedding 接口）",
+          all("deepseek" not in p.base_url.lower() for p in presets_mod.EMBEDDING_PRESETS))
+    check("LLM 预设含 DeepSeek",
+          any("deepseek" in p.base_url.lower() for p in presets_mod.LLM_PRESETS))
 
     # Q6 首次安装（**配置文件还不存在**）——最容易漏的一条路径
     #

@@ -1,103 +1,56 @@
-"""交互式主界面：无参数运行 hy-mem 时进入.
+"""交互式控制台：无参数运行 hy-mem 时进入.
 
-定位不是「把子命令再包一层菜单」，而是补 CLI 不方便做的事：
-多行输入（一条命令写多段记忆）、写前的标签与拆条选择、结果的表格化展示、
-以及模型/存储这类需要「改一项就验证一项」的设置。
+形态按 **bash / 现代 agent CLI** 的习惯来，不是「一层层箭头菜单」：
 
-实现上刻意不 import hy_mem_cli（会循环依赖），改用 dispatch 回调：
-菜单只负责收参数，执行走**子进程**调用同一套命令，保证菜单与命令行的行为
-完全一致。为什么必须是子进程（0.9.10）：0.9.9 在本进程内跑 worker，worker
-起的 chroma server 端口会写回本进程 env，退出后 env 指向死端口，整个会话
-所有命令都报 "Could not connect to a Chroma server"（PRD F1）。子进程哪怕
-把 env 改坏也只影响它自己。
+  · 一个常驻提示符 `hy-mem ›`，敲命令干活：`add`、`search 部署流程`、`queue run`；
+  · ↑↓ 翻历史（存在 `<dataDir>/shell-history`）、Tab 补全命令与子命令、
+    Ctrl+R 反查、Ctrl+L 清屏、Ctrl+D 退出 —— 全部在 `tui._line_edit` 里实现；
+  · 结果直接打在滚动区：**不清屏、不「按任意键继续」**。上一条结果往上滚就能看，
+    不再需要为了多看一眼而重进页面；
+  · 一行一条命令，参数用旗标（`-n 10`、`-t 标签`）表达，与 `hy-mem` 子命令一一对应。
 
-导航约定（与 tui.select 一致）：↑↓ 移动、Enter 选中、Esc 回上一层；
-在主界面按 Esc 直接退出。子页里 Esc 只退出当前页，不退出程序。
+为什么推翻旧版（0.9.13 及以前）：
+  旧版每做一件事都要「进页面 → 选一项 → 做完 → 按任意键 → 回主菜单 → 再选」，
+  一次会话里回车键有一半花在导航上；而且 `tui.clear()` 会把上一次的结果擦掉，
+  想对照两条检索结果只能重查。用户的原话是「很多地方反人类设计」。
 
-文案统一走 i18n.tr()：键是中文原文，默认语言下原样返回，所以中文界面与改造前
-逐字一致；只有显式切到 en 才会查词典。这里不在 import 期就把 MENU 翻好——
-设置页切语言后要能立刻重画，翻译必须发生在渲染那一刻。
+三个硬约定：
+  1. **每个动作都能用一条命令完成**，且命令名 = 子命令名（`add` / `search` / …），
+     不会出现「菜单里做的事命令行做不了」。
+  2. **非 TTY 自动降级**（管道 / 测试 / agent 调用）：同一套命令、同一套输出，
+     逐行读 stdin。所以 `scripts/test_menu.py` 能把每个命令都跑一遍。
+  3. 执行仍走**子进程** dispatch（见 `subprocess_dispatch`）：后台角色改 env
+     只影响它自己，控制台进程永远干净。
+
+文案统一走 i18n.tr()：键是中文原文，默认语言下原样返回；切到 en 才查词典。
+翻译发生在渲染那一刻，所以 `lang en` 之后下一行提示就是英文。
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
 
 import config as cfgmod
-import presets
 import storage_ops
 import tui
 from i18n import label, lang, set_lang, tr
 from tui import c
 
-# 横幅的 ASCII 骨架与右侧标签分开：英文标签宽度和中文不同，拼在一起才好换语言
-_BANNER_ART = [
-    r"   _  _  _    __  __  ___ ___",
-    r"  | || || |  |  \/  |/ __| __|",
-    r"  | __ || |__| |\/| | (__| _|",
-    r"  |_||_||____|_|  |_|\___|___|",
-]
-
-_MODE_DESC = {"lite": "纯向量，最快", "pro": "向量+事实抽取", "ultra": "再+Schema 归纳"}
+HISTORY_NAME = "shell-history"
+HISTORY_MAX = 300
 
 
-def _banner_text() -> str:
-    art = _BANNER_ART
-    return "\n".join(
-        [
-            art[0],
-            art[1] + "   " + tr("记忆库命令行"),
-            art[2],
-            art[3] + "   lite / pro / ultra",
-        ]
-    )
-
-
-def banner(cfg: dict) -> str:
-    emb = cfg.get("embedding") or {}
-    mode = str(cfg.get("mode") or "pro")
-    data_dir = str((cfg.get("storage") or {}).get("dataDir") or "?")
-    try:
-        uid = cfgmod.identity_label(cfgmod.identity_defaults(cfg))
-    except Exception:  # noqa: BLE001
-        uid = "?"
-    rows = [
-        c.cyan(_banner_text()),
-        "",
-        "  "
-        + c.gray(tr("模式") + " ")
-        + c.bold(mode)
-        + c.dim(tr("（{}）", tr(_MODE_DESC.get(mode, mode))))
-        + c.gray("   " + tr("向量") + " ")
-        + c.bold(str(emb.get("model") or "?"))
-        + c.dim(" " + tr("{} 维", emb.get("dims")))
-        + c.gray("   " + tr("身份") + " ")
-        + c.bold(uid),
-        "  "
-        + c.gray(tr("库") + " ")
-        + c.dim(_short_path(data_dir))
-        + c.gray("   " + tr("帮助") + " ")
-        + c.dim(tr("按 i 或运行 hy-mem help --json")),
-    ]
-    missing = _cfg_missing(cfg)
-    if missing:
-        # 配置不全时人一进来就该知道，而不是写完记忆才看到报错
-        rows.append("  " + tui.icon("warn") + " " + c.yellow(tr("配置未完成：缺 {}", ", ".join(missing[:3])))
-                    + c.dim("   " + tr("→ 按 s 进设置，或运行 hy-mem setup")))
-    return "\n".join(rows)
-
-
-def _cfg_missing(cfg: dict) -> list[str]:
-    try:
-        return [name for name, passed, _d in cfgmod.validate(cfg) if not passed]
-    except Exception:  # noqa: BLE001
-        return []
-
-
-
-def _short_path(p: str, width: int = 34) -> str:
+# --------------------------------------------------------------------------
+# 与子命令打交道的底座
+# --------------------------------------------------------------------------
+def _short_path(p: str, width: int = 40) -> str:
     if len(p) <= width:
         return p
     return "…" + p[-width:]
@@ -162,14 +115,14 @@ def subprocess_dispatch(argv: list[str], stdin_text: str | None = None) -> tuple
 def _capture(dispatch, argv: list[str]) -> tuple[int, object, str]:
     """跑一条子命令，把 stdout 抓回来解析 JSON。
 
-    菜单要靠结构化结果做表格；直接让子命令往终端打印会打乱菜单版面。
+    控制台要靠结构化结果做表格；直接让子命令往终端打印会打乱版面。
     """
     # --json 必须前置：argparse 的全局选项放在子命令之后会解析失败
     code, out, err = dispatch(["--json"] + argv)
     return code, _parse_json(out), (out or err)
 
 
-def _run_and_show(dispatch, argv: list[str]) -> None:
+def _run_and_show(dispatch, argv: list[str]) -> int:
     """跑子命令并把结果摆到屏幕上（子进程的 stdout 不再自动可见）。"""
     code, out, err = dispatch(argv)
     text = (out or err or "").strip()
@@ -178,19 +131,232 @@ def _run_and_show(dispatch, argv: list[str]) -> None:
             print(text)
     else:
         _show_failure(text, code)
+    return code
 
 
 # --------------------------------------------------------------------------
-# 功能页
+# 历史：存在数据目录里，跟着身份/库走
 # --------------------------------------------------------------------------
-def _add_round_title(n: int) -> str:
-    # 第 1 条不带轮次：首次进入时「写记忆（第 1 条）」像是流程强加的编号，
-    # 从第 2 条起才需要提示「还在同一个会话里」
-    return tr("写记忆") if n <= 1 else tr("写记忆（第 {} 条）", n)
+def _data_dir() -> Path:
+    raw = str((cfgmod.load().get("storage") or {}).get("dataDir") or "").strip()
+    return Path(os.path.expandvars(os.path.expanduser(raw))) if raw else cfgmod.default_data_dir()
 
 
-def _read_add_body() -> tuple[str, bool]:
-    """读一段多行正文。返回 (正文, 是否被取消)。空行结束，与改造前一致。"""
+def history_path() -> Path:
+    return _data_dir() / HISTORY_NAME
+
+
+def load_history() -> list[str]:
+    """读历史；读不到就当没有 —— 历史文件坏掉不能让人进不了控制台。"""
+    try:
+        raw = history_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [x for x in raw.splitlines() if x.strip()][-HISTORY_MAX:]
+
+
+def append_history(line: str) -> None:
+    """追加一行。只存命令行本身，正文（add 的多行内容）不进来。
+
+    连续重复的命令不重复记：翻历史时最烦的就是连按几次 ↑ 都是同一条。
+    """
+    text = line.strip().replace("\n", " ")[:200]
+    if not text:
+        return
+    try:
+        old = load_history()
+        if old and old[-1] == text:
+            return
+        p = history_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(text + "\n")
+        if len(old) + 1 > HISTORY_MAX * 2:  # 偶尔瘦身，别让文件无限长
+            keep = (old + [text])[-HISTORY_MAX:]
+            p.write_text("\n".join(keep) + "\n", encoding="utf-8")
+    except OSError:
+        pass  # 历史写不进去不影响干活
+
+
+# --------------------------------------------------------------------------
+# 参数切分 / 旗标解析
+# --------------------------------------------------------------------------
+def split_args(s: str) -> list[str]:
+    """按 shell 习惯切词：空格分隔，支持 "…" / '…'，反斜杠原样保留。
+
+    不用 shlex：posix 模式会吃掉 Windows 路径里的反斜杠，非 posix 模式又不认
+    引号，两种都会让 `storage move C:\\data\\mem` 变成乱码路径。
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    quote = ""
+    for ch in s:
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                buf.append(ch)
+        elif ch in "\"'":
+            quote = ch
+        elif ch.isspace():
+            if buf:
+                out.append("".join(buf))
+                buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return out
+
+
+def parse_flags(
+    items: list[str],
+    value_opts: dict[str, str] | None = None,
+    bool_opts: dict[str, str] | None = None,
+) -> tuple[dict[str, str], list[str], str]:
+    """解析 `-n 10` / `--tag=a,b` / `-s` 这类旗标，返回 (选项, 位置参数, 错误)。
+
+    手写而不用 argparse：这里要支持「参数顺序随意 + 未知选项给出人话提示」，
+    而 argparse 的报错会直接 `sys.exit(2)` —— 在控制台里那等于把会话踢掉。
+    """
+    value_opts = value_opts or {}
+    bool_opts = bool_opts or {}
+    opts: dict[str, str] = {}
+    pos: list[str] = []
+    i = 0
+    while i < len(items):
+        tok = items[i]
+        if tok == "--":
+            pos.extend(items[i + 1:])
+            break
+        if tok in bool_opts:
+            opts[bool_opts[tok]] = "1"
+            i += 1
+            continue
+        name, sep, val = tok.partition("=")
+        if tok in value_opts:
+            if i + 1 >= len(items):
+                return opts, pos, tr("{} 后面要跟一个值", tok)
+            opts[value_opts[tok]] = items[i + 1]
+            i += 2
+            continue
+        if sep and name in value_opts:
+            opts[value_opts[name]] = val
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            return opts, pos, tr("不认识的选项 {}", tok)
+        pos.append(tok)
+        i += 1
+    return opts, pos, ""
+
+
+def _tags_of(raw: str) -> list[str]:
+    return [t.strip() for t in raw.replace("，", ",").split(",") if t.strip()]
+
+
+# --------------------------------------------------------------------------
+# 命令表
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Command:
+    name: str
+    usage: str
+    summary: str
+    run: Callable[["Shell", list[str]], int]
+    aliases: tuple[str, ...] = ()
+    words: tuple[str, ...] = ()          # 参数补全词（子命令 / 常用选项）
+    group: str = "常用"
+
+
+class ExitShell(Exception):
+    """`exit` / `quit`：正常退出，不是错误。"""
+
+
+class Shell:
+    """控制台状态：只持有 dispatch、配置快照和历史，不碰任何业务逻辑。"""
+
+    def __init__(self, dispatch, cfg: dict | None = None) -> None:
+        self.dispatch = dispatch
+        self.cfg = cfg if cfg is not None else cfgmod.load()
+        self.history = load_history()
+
+    def reload(self) -> dict:
+        """每条命令后重读配置：`setup` / `lang` / `identity set` 都会改它。"""
+        try:
+            self.cfg = cfgmod.load()
+        except Exception:  # noqa: BLE001  配置读坏了也要能继续用控制台
+            pass
+        return self.cfg
+
+    def capture(self, argv: list[str]) -> tuple[int, object, str]:
+        return _capture(self.dispatch, argv)
+
+    def run(self, argv: list[str]) -> int:
+        return _run_and_show(self.dispatch, argv)
+
+    def remember(self, line: str) -> None:
+        self.history.append(line)
+        append_history(line)
+
+    def complete(self, text: str) -> list[str]:
+        """Tab 补全：命令名 / 子命令 / 常用选项。
+
+        只补行尾（bash 默认行为）。返回的是**整行替换文本**，行编辑器直接换上，
+        省得它还要理解 token 边界。
+        """
+        stripped = text.lstrip()
+        if not stripped:
+            return []
+        parts = stripped.split()
+        if text.endswith(" ") or (text and text[-1] in "\t"):
+            head, prefix = parts, ""
+        else:
+            head, prefix = parts[:-1], parts[-1]
+        if not head:
+            pool = []
+            for cmd in COMMANDS:
+                for name in (cmd.name, *cmd.aliases):
+                    if name.startswith(prefix):
+                        pool.append(name)
+            return pool
+        cmd = find_command(head[0])
+        if cmd is None or not cmd.words:
+            return []
+        return [" ".join(head + [w]) for w in cmd.words if w.startswith(prefix)]
+
+    def execute(self, line: str) -> int:
+        items = split_args(line)
+        if not items:
+            return 0
+        cmd = find_command(items[0])
+        if cmd is None:
+            self._unknown(items[0])
+            return 2
+        try:
+            return int(cmd.run(self, items[1:]) or 0)
+        except (tui.Aborted, KeyboardInterrupt):
+            # 命令里的确认框被 Esc / Ctrl+C / EOF 取消：只取消这一次操作，
+            # 会话继续。放在这里统一收口，省得每个命令各写一遍 try。
+            print()
+            tui.warn(tr("已取消"))
+            return 0
+
+    def _unknown(self, word: str) -> None:
+        pool = [n for cmd in COMMANDS for n in (cmd.name, *cmd.aliases)]
+        near = difflib.get_close_matches(word, pool, n=3, cutoff=0.55)
+        tui.err(tr("未知命令 {}", word))
+        if near:
+            tui.note(tr("是不是要 {}？", " / ".join(near)))
+        tui.note(tr("输入 help 看全部命令；Tab 可以补全"))
+
+
+# --------------------------------------------------------------------------
+# 命令实现：写 / 读
+# --------------------------------------------------------------------------
+def _read_body() -> tuple[str, bool]:
+    """读一段多行正文。返回 (正文, 是否被取消)。空行结束。"""
+    print(c.dim(tr("  多行输入，空行结束；Ctrl+C 取消这条")))
     lines: list[str] = []
     while True:
         try:
@@ -203,92 +369,50 @@ def _read_add_body() -> tuple[str, bool]:
         lines.append(line)
 
 
-def page_add(dispatch, cfg: dict) -> None:
-    """写记忆 —— 支持在一个会话里连着写多条。
+def cmd_add(sh: Shell, items: list[str]) -> int:
+    """写记忆。默认入队异步写（`add --async` 已自动拉起消费者，不再多问一句）。
 
-    为什么不写完一条就回主界面：写记忆几乎从不只写一条（一次复盘往往要拆成
-    四五条事实），每写一条都退出去、再进菜单、再等一次首屏，成本远超收益。
-    循环之间**不清屏**：上一条的「已入队 / 已落库」反馈要留在屏幕上，否则用户
-    看不到自己刚写的东西到底进没进库（这是 0.9.x 反复被反馈的疑点）。
-
-    退出方式只有「不输入内容直接回车」（以及 Esc / Ctrl+C）—— 不再在每条之后
-    插一个「继续 / 回主界面」的菜单。那个菜单每次多按一次键、多一次光标移动，
-    而写记忆的正文输入本来就以空行收尾，空行天然就是「不写了」的意思，
-    再让用户选一次属于重复提问。
+    为什么不问「拆条吗 / 打标签吗 / 要异步吗」：
+      · 拆条：命令行的默认就是「一段话 = 一条记忆」，要多条用 `-s`；
+      · 标签：`-t` 直接给；
+      · 异步：pro 模式同步写一条 8~40s，没人想等；改同步用 `--sync`。
+    三个问题问下来要按三次回车，而九成的写入用的是同一组答案。
     """
-    round_no = 0
-    while True:
-        round_no += 1
-        if round_no > 1:
-            print()
-            print(tui.hr())
-        print(tui.title(_add_round_title(round_no)))
-        if round_no == 1:
-            print(c.dim(tr("  一行一条最好（混在一起会稀释向量）。空行结束本条；Ctrl+C 取消。")))
-        else:
-            print(c.dim(tr("  接着写；不输入内容直接回车 = 回主界面。")))
-        print()
-
-        # 空正文 = 不想写了（第 1 轮可能是进错页）；Esc / Ctrl+C / EOF 同样收工。
-        # 两者都不再追问，直接回主界面。
-        text, cancelled = _read_add_body()
+    opts, rest, bad = parse_flags(
+        items,
+        {"-t": "tags", "--tag": "tags"},
+        {"-s": "split", "--split": "split", "--sync": "sync"},
+    )
+    if bad:
+        tui.err(bad)
+        return 2
+    text = " ".join(rest).strip()
+    if not text:
+        text, cancelled = _read_body()
         if not text:
             if not cancelled:
-                tui.note(tr("（没有输入内容，已回主界面）"))
-            return
+                tui.note(tr("（没有输入内容，什么都没写）"))
+            return 0
+    tags = _tags_of(str(opts.get("tags") or ""))
+    argv = ["add"]
+    if not opts.get("sync"):
+        argv.append("--async")
+    if opts.get("split"):
+        argv.append("--split")
+    for t in tags:
+        argv += ["--tag", t]
 
-        lines = text.splitlines()
-        split = len(lines) > 1 and tui.confirm(
-            tr("检测到 {} 行，拆成 {} 条独立记忆？", len(lines), len(lines)), default=True
-        )
-
-        tag_raw = tui.ask(
-            tr("标签（逗号分隔，可留空）"),
-            hint=tr("标签用于按类归档与过滤；pro 模式还会由 LLM 自动打 tag"),
-        )
-        tags = [t.strip() for t in tag_raw.replace("，", ",").split(",") if t.strip()]
-
-        mode = str(cfg.get("mode") or "pro")
-        hint = tr("pro 模式同步写入每条 8~40s，建议入队") if mode in ("pro", "ultra") else ""
-        use_async = tui.confirm(
-            tr("入队异步写入？") + (tr("（{}）", hint) if hint else tr("（推荐）")), default=True
-        )
-
-        argv = ["add"]
-        if use_async:
-            argv.append("--async")
-        if split:
-            argv.append("--split")
-        for t in tags:
-            argv += ["--tag", t]
-
-        # 内容走 stdin，避免 cmd.exe 把多行参数压平
-        print()
-        tui.spinner_line(tr("写入中…"))
-        code, out, err = dispatch(argv, stdin_text=text)
-        raw = (out or err or "").strip()
-        if code == 0:
-            tui.ok(raw.splitlines()[-1] if raw else tr("已提交"))
-            if use_async:
-                # 异步写入只是入队，库里还没有它 —— 这一点必须说破。
-                # 之前只说「已入队，用队列页跑 worker」，用户写完直接去检索，
-                # 得到 0 条就以为记忆丢了。
-                tui.note(tr("已入队，但还没进库 —— 此刻检索不到它是正常的。"))
-                if tui.confirm(tr("现在就跑一次 worker 落库？（pro 模式每条约 10~50s）"), default=True):
-                    tui.spinner_line(tr("落库中…"))
-                    code2, out2, err2 = dispatch(["worker", "--once"])
-                    text2 = (out2 or err2 or "").strip()
-                    if code2 == 0:
-                        tui.ok(text2.splitlines()[-1] if text2 else tr("已落库"))
-                    else:
-                        _show_failure(text2, code2)
-        else:
-            # 失败也留在会话里继续问：一条写坏了不该把「刚想好的另外三条」冲掉
-            _show_failure(raw, code)
-
-        # 输入阶段已经按过 Ctrl+C / Esc 的，写完这条就回主界面；否则直接进下一条
-        if cancelled:
-            return
+    print()
+    tui.spinner_line(tr("写入中…"))
+    code, out, err = sh.dispatch(argv, stdin_text=text)
+    raw = (out or err or "").strip()
+    if code == 0:
+        tui.ok(raw.splitlines()[-1] if raw else tr("已提交"))
+        if not opts.get("sync"):
+            tui.note(tr("已入队，后台消费者会自动落库；此刻 search 还查不到是正常的（pro 每条约 10~50s，`queue` 看进度）"))
+    else:
+        _show_failure(raw, code)
+    return code
 
 
 def search_rows(results: list[dict]) -> list[list[str]]:
@@ -316,122 +440,138 @@ def search_rows(results: list[dict]) -> list[list[str]]:
     return rows
 
 
-def page_search(dispatch, cfg: dict) -> None:
-    """检索 —— 支持连续查多次，不必每次退回主界面重进。
+def cmd_search(sh: Shell, items: list[str]) -> int:
+    opts, rest, bad = parse_flags(items, {"-n": "n", "--num": "n", "-t": "tags", "--tag": "tags"})
+    if bad:
+        tui.err(bad)
+        return 2
+    q = " ".join(rest).strip()
+    if not q:
+        tui.warn(tr("用法：search <查询> [-n 条数] [-t 标签]"))
+        tui.note(tr("例：search 部署流程 -n 10"))
+        return 2
+    try:
+        n = max(1, int(str(opts.get("n") or 5)))
+    except ValueError:
+        n = 5
+    argv = ["search", q, "-n", str(n)]
+    for t in _tags_of(str(opts.get("tags") or "")):
+        argv += ["--tag", t]
 
-    为什么不查完就返回：定位一条旧记忆常常要换 2~4 种问法（原话 / 关键词 / 标签），
-    每换一次都要重进菜单、重填「查询 / 标签 / 条数」三项，成本全耗在导航上。
-    循环之间不清屏，上一轮结果留在屏幕上方便对照。
-
-    退出同样不用菜单：查询内容留空回车即回主界面。查完直接把输入提示交还给
-    用户，想再查就继续敲，想走就回车。
-    """
-    round_no = 0
-    while True:
-        round_no += 1
-        if round_no > 1:
-            print()
-            print(tui.hr())
-        print(tui.title(tr("检索") if round_no == 1 else tr("检索（第 {} 次）", round_no)))
-        q = tui.ask(
-            tr("查询内容"),
-            hint=tr("留空回车 = 回主界面；查完可直接接着查下一次")
-            if round_no == 1 else tr("留空回车 = 回主界面"),
-        )
-        if not q:
-            # 空查询＝不想查了，直接回主界面。这里不能再问「再查一次？」，
-            # 否则会出现「不查 → 再查一次？→ 不查」的空转。
-            return
-        tag_raw = tui.ask(tr("限定标签（逗号分隔，可留空）"))
-        tags = [t.strip() for t in tag_raw.replace("，", ",").split(",") if t.strip()]
-        n_raw = tui.ask(tr("返回条数"), default="5")
-        try:
-            n = max(1, int(n_raw))
-        except ValueError:
-            n = 5
-
-        argv = ["search", q, "-n", str(n)]
-        for t in tags:
-            argv += ["--tag", t]
-
-        print()
-        code, data, raw = _capture(dispatch, argv)
-        if code != 0:
-            _show_failure(raw, code)
-        else:
-            results = (data or {}).get("results") or []
-            if not results:
-                tui.warn(tr("无命中"))
-                tui.note(tr("可试着放宽：降低阈值（设置 → 检索阈值）或换更接近原话的问法"))
-            else:
-                print(tui.table([tr("#"), tr("分数"), tr("内容"), tr("标签")], search_rows(results)))
-                tui.note(tr(
-                    "阈值 {}，命中 {} 条；看全文：hy-mem get {}",
-                    (data or {}).get("min_score"),
-                    len(results),
-                    results[0].get("memory_id") or "<id>",
-                ))
-
-
-def page_list(dispatch, cfg: dict) -> None:
-    print(tui.title(tr("最近记忆")))
-    code, data, raw = _capture(dispatch, ["list", "-n", "15"])
+    print()
+    code, data, raw = sh.capture(argv)
     if code != 0:
         _show_failure(raw, code)
-        return
-    items = (data or {}).get("memories") or []
-    if not items:
+        return code
+    results = (data or {}).get("results") or []
+    if not results:
+        tui.warn(tr("无命中"))
+        tui.note(tr("可试着放宽：降低阈值（setup search）或换更接近原话的问法"))
+        return 0
+    print(tui.table([tr("#"), tr("分数"), tr("内容"), tr("标签")], search_rows(results)))
+    tui.note(tr(
+        "阈值 {}，命中 {} 条；看全文：get {}",
+        (data or {}).get("min_score"),
+        len(results),
+        results[0].get("memory_id") or "<id>",
+    ))
+    return 0
+
+
+def cmd_list(sh: Shell, items: list[str]) -> int:
+    opts, rest, bad = parse_flags(items, {"-n": "n", "--num": "n"})
+    if bad:
+        tui.err(bad)
+        return 2
+    try:
+        n = max(1, int(str(opts.get("n") or (rest[0] if rest else 15))))
+    except ValueError:
+        n = 15
+    code, data, raw = sh.capture(["list", "-n", str(n)])
+    if code != 0:
+        _show_failure(raw, code)
+        return code
+    mem = (data or {}).get("memories") or []
+    if not mem:
         tui.warn(tr("（空）"))
-        return
+        return 0
     rows = []
     idw = 12
     content_w = max(24, tui.term_width() - idw - 2)
-    for it in items:
+    for it in mem:
         mid = str(it.get("memory_id") or it.get("id") or "?")
         body = it.get("content") or it.get("new_memory") or it.get("text") or ""
         rows.append([mid[:idw], "\n".join(tui.wrap(body, content_w))])
-    print(tui.table(["id", tr("内容")], rows, footer=tr("共 {} 条；删除用 hy-mem delete <id>", len(items))))
+    print(tui.table(["id", tr("内容")], rows, footer=tr("共 {} 条；删除用 delete <id>", len(mem))))
+    return 0
 
 
-def page_tags(dispatch, cfg: dict) -> None:
-    print(tui.title(tr("标签")))
-    code, data, raw = _capture(dispatch, ["tags"])
+def cmd_get(sh: Shell, items: list[str]) -> int:
+    if not items:
+        tui.warn(tr("用法：get <id>（id 从 list / search 的结果里取）"))
+        return 2
+    return sh.run(["get", items[0]])
+
+
+def cmd_delete(sh: Shell, items: list[str]) -> int:
+    if not items:
+        tui.warn(tr("用法：delete <id>；批量删用 forget"))
+        return 2
+    if not tui.confirm(tr("删除 {}？旧版本会一并消失", items[0]), default=False):
+        tui.note(tr("已取消"))
+        return 0
+    return sh.run(["delete", items[0], "--yes"])
+
+
+def cmd_tags(sh: Shell, items: list[str]) -> int:
+    sub = items[0] if items else ""
+    if sub == "refresh":
+        code, _d, raw = sh.capture(["tags", "--refresh"])
+        (tui.ok if code == 0 else tui.err)(raw.strip().splitlines()[-1] if raw.strip() else tr("完成"))
+        return code
+    if sub in ("rm", "del", "remove"):
+        tag = items[1] if len(items) > 1 else ""
+        if not tag:
+            tui.warn(tr("用法：tags rm <标签>"))
+            return 2
+        if not tui.confirm(tr("解绑所有 {} 标签？（不删记忆）", tag), default=False):
+            tui.note(tr("已取消"))
+            return 0
+        code, _d, raw = sh.capture(["untag", "--tag", tag, "--yes"])
+        (tui.ok if code == 0 else tui.err)(raw.strip().splitlines()[-1] if raw.strip() else tr("完成"))
+        return code
+
+    code, data, raw = sh.capture(["tags"])
     if code != 0:
         _show_failure(raw, code)
-        return
+        return code
     inv = (data or {}).get("tags") or (data or {}).get("inventory") or []
     if not inv:
         tui.warn(tr("（还没有标签）"))
-        return
+        return 0
     rows = [[t.get("tag", "?"), str(t.get("n", 0)), str(t.get("user_n", 0)), str(t.get("auto_n", 0))] for t in inv]
     print(tui.table([tr("标签"), tr("合计"), tr("手工"), tr("自动")], rows))
-
-    print()
-    action = tui.select(
-        tr("要做什么？"),
-        [
-            (tr("从记忆同步自动标签"), tr("把 SDK 侧 LLM 生成的 tag 拉进本地索引"), "s"),
-            (tr("删除某个标签"), tr("只解绑，不删记忆"), "d"),
-            (tr("返回"), "", "x"),
-        ],
-        default=2,
-    )
-    if action == 0:
-        code, _d, raw = _capture(dispatch, ["tags", "--refresh"])
-        (tui.ok if code == 0 else tui.err)(raw.strip().splitlines()[-1] if raw.strip() else tr("完成"))
-    elif action == 1:
-        tag = tui.ask(tr("要删除的标签名"))
-        if tag and tui.confirm(tr("解绑所有 {} 标签？", tag), default=False):
-            code, _d, raw = _capture(dispatch, ["untag", "--tag", tag, "--yes"])
-            (tui.ok if code == 0 else tui.err)(raw.strip().splitlines()[-1] if raw.strip() else tr("完成"))
+    tui.note(tr("同步自动标签：tags refresh ｜ 解绑：tags rm <标签>"))
+    return 0
 
 
-def page_queue(dispatch, cfg: dict) -> None:
-    print(tui.title(tr("异步队列")))
-    code, data, raw = _capture(dispatch, ["queue"])
+def cmd_queue(sh: Shell, items: list[str]) -> int:
+    sub = items[0] if items else ""
+    if sub in ("run", "drain"):
+        tui.note(tr("开始消费；Ctrl+C 可中断（已入队的任务不会丢）"))
+        return sh.run(["worker", "--idle-exit", "5"])
+    if sub in ("one", "step"):
+        return sh.run(["worker", "--once", "--max", "1"])
+    if sub in ("retry", "redeliver"):
+        if not tui.confirm(tr("把状态为 dead 的任务全部重投？"), default=False):
+            tui.note(tr("已取消"))
+            return 0
+        return sh.run(["retry", "dead"])
+
+    code, data, raw = sh.capture(["queue"])
     if code != 0:
         _show_failure(raw, code)
-        return
+        return code
     if isinstance(data, dict):
         pairs = [
             (tr("待处理"), str(data.get("pending", 0))),
@@ -442,40 +582,19 @@ def page_queue(dispatch, cfg: dict) -> None:
         if data.get("oldest_pending_age_s"):
             pairs.append((tr("最老待处理"), f"{data['oldest_pending_age_s']:.0f}s"))
         print(tui.kv(pairs))
-
-    print()
-    action = tui.select(
-        tr("操作"),
-        [
-            (tr("处理队列直到清空"), tr("跑 worker，逐条落库（pro 每条 8~40s）"), "a"),
-            (tr("只处理一条"), tr("处理 1 条后返回"), "o"),
-            (tr("重投死信任务"), tr("把 dead 任务放回待处理"), "r"),
-            (tr("返回"), "", "x"),
-        ],
-        default=3,
-    )
-    if action == 0:
-        tui.note(tr("开始消费；Ctrl+C 可中断（已入队的任务不会丢）"))
-        tui.spinner_line(tr("消费中…"))
-        _run_and_show(dispatch, ["worker", "--idle-exit", "5"])
-    elif action == 1:
-        tui.spinner_line(tr("处理一条…"))
-        _run_and_show(dispatch, ["worker", "--once", "--max", "1"])
-    elif action == 2:
-        if tui.confirm(tr("把状态为 dead 的任务全部重投？"), default=False):
-            _run_and_show(dispatch, ["retry", "dead"])
+    tui.note(tr("消费：queue run（直到清空）/ queue one（只处理一条）/ queue retry（重投死信）"))
+    return 0
 
 
 _LEVEL_STYLE = {"OK": ("ok", "green"), "WARN": ("warn", "yellow"), "CRIT": ("err", "red")}
 
 
-def page_health(dispatch, cfg: dict) -> None:
-    print(tui.title(tr("健康检查")))
+def cmd_stats(sh: Shell, items: list[str]) -> int:
     tui.spinner_line(tr("扫描库体积与条数…"))
-    code, data, raw = _capture(dispatch, ["stats", "--health"])
+    code, data, raw = sh.capture(["stats", "--health"])
     if code != 0 or not isinstance(data, dict):
         tui.err((raw or "").strip()[:400] or tr("失败"))
-        return
+        return code or 1
     verdict = data.get("verdict", "?")
     ico, col = _LEVEL_STYLE.get(verdict, ("dot", "gray"))
     print(tr("  结论 {}   ", getattr(c, col)(tui.icon(ico) + " " + verdict))
@@ -484,16 +603,15 @@ def page_health(dispatch, cfg: dict) -> None:
                      data.get("size_mb"),
                      data.get("estimated_write_latency_s"))))
     print()
+    checks = data.get("checks") or []
     rows = []
-    # 说明列吃掉剩余宽度后折行：健康检查的 detail 常有「怎么修」这类长句，
-    # 截到 60 列等于把处置建议砍掉一半。
-    for ck in data.get("checks") or []:
+    for ck in checks:
         i2, col2 = _LEVEL_STYLE.get(ck.get("level", "OK"), ("dot", "gray"))
         rows.append([tui.icon(i2), ck.get("name", ""), getattr(c, col2)(str(ck.get("value", ""))), ""])
     name_w = max([tui.vwidth(r[1]) for r in rows] + [4])
     val_w = max([tui.vwidth(r[2]) for r in rows] + [4])
     detail_w = max(24, tui.term_width() - 2 - name_w - val_w - 3 * 2)
-    for r, ck in zip(rows, data.get("checks") or []):
+    for r, ck in zip(rows, checks):
         r[3] = "\n".join(tui.wrap(ck.get("detail", ""), detail_w))
     print(tui.table(["", tr("项"), tr("值"), tr("说明")], rows))
     advice = data.get("advice") or []
@@ -502,11 +620,36 @@ def page_health(dispatch, cfg: dict) -> None:
         print(tui.section(tr("建议")))
         for i, t in enumerate(advice, 1):
             print(f"  {i}. {t}")
+    return 0
 
 
 # --------------------------------------------------------------------------
-# 设置中心
+# 命令实现：设置
 # --------------------------------------------------------------------------
+_SCOPES = ("embedding", "mode", "llm", "storage", "search", "queue")
+
+
+def cmd_setup(sh: Shell, items: list[str]) -> int:
+    """`setup` 走完整向导；`setup <项>` 只改一项。改完立刻重读配置。"""
+    scope = (items[0] if items else "all") or "all"
+    if scope in ("model", "embed"):
+        scope = "embedding"
+    import setup_wizard
+
+    if scope != "all" and scope not in _SCOPES:
+        tui.err(tr("未知的设置项 {}", scope))
+        tui.note(tr("可用：all / {}", " / ".join(_SCOPES)))
+        return 2
+    try:
+        rc = setup_wizard.run_setup(scope=scope)
+    except tui.Aborted:
+        tui.warn(tr("已取消，配置未改动。"))
+        return 0
+    finally:
+        sh.reload()
+    return rc
+
+
 def _emb_line(cfg: dict) -> str:
     emb = cfg.get("embedding") or {}
     return tr("{} · {} 维 · {}", emb.get("model"), emb.get("dims"), emb.get("provider"))
@@ -519,91 +662,43 @@ def _llm_line(cfg: dict) -> str:
     return f"{llm.get('model')}"
 
 
-def _storage_line(cfg: dict) -> str:
-    p = str((cfg.get("storage") or {}).get("dataDir") or "")
-    size, files = storage_ops.dir_usage(p)
-    if files:
-        return tr("{}  ({}/{} 文件)", _short_path(p, 40), storage_ops.human_size(size), files)
-    return tr("{}  （空）", _short_path(p, 40))
+def _cfg_missing(cfg: dict) -> list[str]:
+    try:
+        return [name for name, passed, _d in cfgmod.validate(cfg) if not passed]
+    except Exception:  # noqa: BLE001
+        return []
 
 
-def page_storage(dispatch, cfg: dict) -> None:
-    while True:
-        cfg = cfgmod.load()
-        data_dir = str((cfg.get("storage") or {}).get("dataDir") or "")
-        tui.clear()
-        print(tui.title(tr("数据存储目录")))
-        print(tui.kv(storage_ops_usage_rows(data_dir)))
-        print()
-        action = tui.select(
-            tr("要做什么？"),
-            [
-                (tr("换目录 / 迁移数据"), tr("复制现有数据到新位置并切换"), "m"),
-                (tr("恢复到默认目录"), str(cfgmod.default_data_dir()), "d"),
-                (tr("备份一份"), tr("复制成 data.bak-时间戳，改模型前用"), "b"),
-                (tr("清空重建"), tr("先自动备份，再清空（重建索引/换维度后使用）"), "w"),
-                (tr("清理队列库"), tr("删除已完成任务记录并 VACUUM，只影响队列不影响记忆"), "q"),
-                (tr("返回"), "", "x"),
-            ],
-            default=5,
-        )
-        if action == 5:
-            return
-        if action == 4:
-            if tui.confirm(tr("清理 jobs 表里已完成的记录并 VACUUM？（不动记忆）"), default=False):
-                code, _d, raw = _capture(dispatch, ["stats", "--health", "--vacuum"])
-                (tui.ok if code == 0 else tui.err)(tr("队列记录已清理") if code == 0 else raw.strip()[:300])
-            tui.pause(tr("按任意键继续…"))
-            continue
-        if action == 2:
-            ok, msg = storage_ops.backup(data_dir)
-            (tui.ok if ok else tui.err)(msg)
-            tui.pause(tr("按任意键继续…"))
-            continue
-        if action == 3:
-            if not tui.confirm(tr("先备份再清空数据目录？清空后记忆需要重新写入"), default=False):
-                continue
-            ok, msg = storage_ops.wipe(data_dir)
-            (tui.ok if ok else tui.err)(msg)
-            tui.pause(tr("按任意键继续…"))
-            continue
-
-        target = ""
-        if action == 0:
-            raw = tui.ask(tr("新目录"), hint=tr("留空取消；支持 %USERPROFILE% 与 ~"))
-            if not raw:
-                continue
-            target = storage_ops.normalize_path(raw)
-            good, msg = storage_ops.check_target(target)
-            if not good:
-                tui.err(msg)
-                tui.pause(tr("按任意键继续…"))
-                continue
-        else:
-            target = str(cfgmod.default_data_dir())
-        if target == data_dir:
-            tui.info(tr("与当前目录相同，无需切换"))
-            tui.pause(tr("按任意键继续…"))
-            continue
-
-        size, files = storage_ops.dir_usage(data_dir)
-        if files and tui.confirm(
-            tr("把现有数据（{} / {} 文件）迁移过去？", storage_ops.human_size(size), files),
-            default=True,
-        ):
-            tui.spinner_line(tr("复制中…"))
-            ok, msg = storage_ops.migrate(data_dir, target)
-            (tui.ok if ok else tui.err)(msg)
-            if not ok and not tui.confirm(tr("迁移失败，仍然切换？"), default=False):
-                tui.pause(tr("按任意键继续…"))
-                continue
-        cfg["storage"]["dataDir"] = target
-        cfgmod.save(cfg)
-        tui.ok(tr("存储目录已切到 {}", target))
-        tui.pause(tr("按任意键继续…"))
+def cmd_config(sh: Shell, items: list[str]) -> int:
+    cfg = sh.reload()
+    emb = cfg.get("embedding") or {}
+    llm = cfg.get("llm") or {}
+    pairs = [
+        (tr("配置文件"), str(cfgmod.config_path())),
+        (tr("首次设置"), tr("已完成") if cfg.get("setupComplete") else tr("未完成")),
+        (tr("身份 user_id"), cfgmod.identity_label(cfgmod.identity_defaults(cfg))
+         + tr("（来源：{}）", cfgmod.identity_source(cfg))),
+        (tr("运行模式"), str(cfg.get("mode"))),
+        (tr("向量模型"), _emb_line(cfg)),
+        (tr("嵌入入口"), str(emb.get("baseUrl") or tr("（本地 ONNX）"))),
+        (tr("嵌入密钥"), (tr("已设置") + (tr("（来自 ${}）", emb.get("keyEnv")) if not emb.get("apiKey") else ""))
+         if cfgmod.resolve_embed_key(cfg) else tr("未设置")),
+        (tr("LLM 模型"), f"{llm.get('model')} @ {llm.get('baseUrl')}"),
+        (tr("LLM 密钥"), (tr("已设置") + (tr("（来自 ${}）", llm.get("keyEnv")) if not llm.get("apiKey") else ""))
+         if cfgmod.resolve_llm_key(cfg) else tr("未设置")),
+        (tr("存储目录"), str((cfg.get("storage") or {}).get("dataDir") or cfgmod.default_data_dir())),
+        (tr("检索阈值"), str((cfg.get("search") or {}).get("minScore"))),
+        (tr("队列"), tr("重试 {} 次 / 锁超时 {}s",
+                       cfg.get("queue", {}).get("maxAttempts"),
+                       cfg.get("queue", {}).get("lockTimeout"))),
+        (tr("界面语言"), label()),
+    ]
+    print(tui.kv(pairs))
+    tui.note(tr("改这些用 setup <项>；直接改 config.json 也行，但下次运行才生效。"))
+    return 0
 
 
-def storage_ops_usage_rows(data_dir: str) -> list[tuple[str, str]]:
+def _storage_rows(data_dir: str) -> list[tuple[str, str]]:
     size, files = storage_ops.dir_usage(data_dir)
     free = storage_ops.free_space(data_dir)
     rows = [(tr("当前目录"), data_dir)]
@@ -615,313 +710,401 @@ def storage_ops_usage_rows(data_dir: str) -> list[tuple[str, str]]:
     return rows
 
 
-def page_identity(dispatch, cfg: dict) -> None:
-    """身份页：多智能体共享还是隔离，只在这一处决定。"""
-    while True:
-        cfg = cfgmod.load()
-        cur = cfgmod.identity_defaults(cfg)
-        src = cfgmod.identity_source(cfg)
-        tui.clear()
-        print(tui.title(tr("身份 user_id")))
-        print(tui.kv(
-            [
-                (tr("当前身份"), cfgmod.identity_label(cur)),
-                (tr("生效来源"), {
-                    "env": tr("环境变量 HY_MEM_USER_ID"),
-                    "config": "config.json",
-                    "general": tr("未设置 → 通用"),
-                }.get(src, src)),
-                (tr("配置文件"), str(cfgmod.config_path())),
-            ]
-        ))
-        print()
-        general = tr("通用（default）")
-        kw = tui.vwidth(general) + 1
-        print(tui.panel([
-            c.cyan(tui.lpad(general, kw)) + tr("所有智能体共享同一份记忆 —— 不设 user_id 的默认行为"),
-            c.cyan(tui.lpad(tr("其它名字"), kw)) + tr("自成一套记忆，与别处互不可见，用于隔离"),
-            "",
-            c.dim(tr("切换只改身份：模型配置、数据目录、已有记忆都不动；")),
-            c.dim(tr("原身份的记忆不会删，只是现在看不到，切回去就能看到。")),
-        ]))
-        print()
-        action = tui.select(
-            tr("要做什么？"),
-            [
-                (tr("改成另一个 user_id"), tr("为这个智能体单独隔离一份记忆"), "s"),
-                (tr("回到通用（default）"), tr("与其它智能体共享"), "r"),
-                (tr("查看见过哪些身份"), tr("只读"), "l"),
-                (tr("返回"), "", "x"),
-            ],
-            default=3,
-        )
-        if action == 3:
-            return
-        if action == 2:
-            known = [str(x) for x in ((cfg.get("identity") or {}).get("known") or []) if str(x).strip()]
-            if not known:
-                tui.note(tr("（还没有记录到别的身份）"))
-            else:
-                print(tui.table(["user_id", tr("当前")], [[u, "←" if u == cur else ""] for u in known]))
-            tui.pause(tr("按任意键继续…"))
-            continue
-        if action == 1:
-            if not tui.confirm(tr("回到通用（{}）？", cfgmod.GENERAL_USER_ID), default=True):
-                continue
-            _path, eff = cfgmod.set_user_id("")
-            tui.ok(tr("已切到 {}", cfgmod.identity_label(eff)))
-            tui.pause(tr("按任意键继续…"))
-            continue
-        uid = tui.ask(tr("新的 user_id"), hint=tr("英文/数字/-/_ 最稳；留空取消"))
-        if not uid.strip():
-            continue
-        _path, eff = cfgmod.set_user_id(uid.strip())
+def cmd_storage(sh: Shell, items: list[str]) -> int:
+    cfg = sh.reload()
+    data_dir = str((cfg.get("storage") or {}).get("dataDir") or cfgmod.default_data_dir())
+    sub = items[0] if items else ""
+
+    if not sub:
+        print(tui.kv(_storage_rows(data_dir)))
+        tui.note(tr("备份：storage backup ｜ 迁目录：storage move <路径> ｜ 重建：storage wipe ｜ "
+                    "清队列记录：storage vacuum ｜ 回默认：storage reset"))
+        return 0
+
+    if sub == "backup":
+        ok, msg = storage_ops.backup(data_dir)
+        (tui.ok if ok else tui.err)(msg)
+        return 0 if ok else 1
+
+    if sub == "vacuum":
+        if not tui.confirm(tr("清理 jobs 表里已完成的记录并 VACUUM？（不动记忆）"), default=False):
+            tui.note(tr("已取消"))
+            return 0
+        code, _d, raw = sh.capture(["stats", "--health", "--vacuum"])
+        (tui.ok if code == 0 else tui.err)(tr("队列记录已清理") if code == 0 else raw.strip()[:300])
+        return code
+
+    if sub == "wipe":
+        if not tui.confirm(tr("先备份再清空数据目录？清空后记忆需要重新写入"), default=False):
+            tui.note(tr("已取消"))
+            return 0
+        ok, msg = storage_ops.wipe(data_dir)
+        (tui.ok if ok else tui.err)(msg)
+        return 0 if ok else 1
+
+    target = ""
+    if sub == "move":
+        raw = " ".join(items[1:]).strip()
+        if not raw:
+            tui.warn(tr("用法：storage move <新目录>（支持 %USERPROFILE% 与 ~）"))
+            return 2
+        target = storage_ops.normalize_path(raw)
+        good, msg = storage_ops.check_target(target)
+        if not good:
+            tui.err(msg)
+            return 1
+    elif sub == "reset":
+        target = str(cfgmod.default_data_dir())
+    else:
+        tui.err(tr("未知的 storage 子命令 {}", sub))
+        tui.note(tr("可用：backup / move <路径> / reset / wipe / vacuum"))
+        return 2
+
+    if target == data_dir:
+        tui.info(tr("与当前目录相同，无需切换"))
+        return 0
+    size, files = storage_ops.dir_usage(data_dir)
+    if files and tui.confirm(
+        tr("把现有数据（{} / {} 文件）迁移过去？", storage_ops.human_size(size), files), default=True
+    ):
+        tui.spinner_line(tr("复制中…"))
+        ok, msg = storage_ops.migrate(data_dir, target)
+        (tui.ok if ok else tui.err)(msg)
+        if not ok and not tui.confirm(tr("迁移失败，仍然切换？"), default=False):
+            return 1
+    cfg["storage"]["dataDir"] = target
+    cfgmod.save(cfg)
+    sh.reload()
+    tui.ok(tr("存储目录已切到 {}", target))
+    return 0
+
+
+def cmd_identity(sh: Shell, items: list[str]) -> int:
+    """身份：多智能体共享（通用）还是隔离（独立名字），只在命令里决定。"""
+    cfg = sh.reload()
+    cur = cfgmod.identity_defaults(cfg)
+    sub = items[0] if items else ""
+
+    if sub in ("set", "use"):
+        uid = " ".join(items[1:]).strip()
+        if not uid:
+            tui.warn(tr("用法：identity set <名字>（英文/数字/-/_ 最稳）"))
+            return 2
+        _path, eff = cfgmod.set_user_id(uid)
+        sh.reload()
         tui.ok(tr("已切到 {}", cfgmod.identity_label(eff)))
         tui.note(tr("{} 的记忆没有删，切回去仍能看到", cfgmod.identity_label(cur)))
-        tui.pause(tr("按任意键继续…"))
+        return 0
+
+    if sub in ("reset", "default"):
+        if not tui.confirm(tr("回到通用（{}）？", cfgmod.GENERAL_USER_ID), default=True):
+            tui.note(tr("已取消"))
+            return 0
+        _path, eff = cfgmod.set_user_id("")
+        sh.reload()
+        tui.ok(tr("已切到 {}", cfgmod.identity_label(eff)))
+        return 0
+
+    if sub in ("list", "ls"):
+        known = [str(x) for x in ((cfg.get("identity") or {}).get("known") or []) if str(x).strip()]
+        if not known:
+            tui.note(tr("（还没有记录到别的身份）"))
+            return 0
+        print(tui.table(["user_id", tr("当前")],
+                        [[u, "←" if u == cfgmod.identity_defaults(cfg) else ""] for u in known]))
+        return 0
+
+    print(tui.kv([
+        (tr("当前身份"), cfgmod.identity_label(cur)),
+        (tr("生效来源"), {
+            "env": tr("环境变量 HY_MEM_USER_ID"),
+            "config": "config.json",
+            "general": tr("未设置 → 通用"),
+        }.get(cfgmod.identity_source(cfg), cfgmod.identity_source(cfg))),
+    ]))
+    tui.note(tr("切身份：identity set <名字> ｜ 回通用：identity reset ｜ 看过哪些：identity list"))
+    tui.note(tr("切换只改身份：模型配置、数据目录、已有记忆都不动"))
+    return 0
 
 
-def page_log(dispatch, cfg: dict) -> None:
-    """操作日志页：只读回放最近 50 条，唯一动作是清空（需二次确认）。
+def cmd_log(sh: Shell, items: list[str]) -> int:
+    """操作日志：只读回放最近 50 条。
 
     刻意不在这里跑任何子命令：日志页出问题时最不该依赖「再起一个子进程」——
     用户点进来往往正是因为别的操作刚刚失败。
     """
     import oplog
 
-    while True:
-        tui.clear()
-        print(tui.title(tr("操作日志")))
+    sub = items[0] if items else ""
+    if sub == "clear":
         try:
-            p = oplog.path()
             lines = oplog.recent(oplog.MAX_KEEP)
         except Exception as e:  # noqa: BLE001
             tui.err(tr("读取失败：{}", f"{type(e).__name__}: {e}"))
-            return
-        print(c.dim("  " + str(p)))
-        print()
-        if not lines:
-            tui.note(tr("（还没有操作记录）"))
-        else:
-            # 摘要列吃掉剩余宽度后折行：错误提示常常很长，截断就看不出原因
-            fixed = 8 + 10 + 5 + 6 + 3 * 2
-            sum_w = max(20, tui.term_width() - fixed - 4)
-            rows = []
-            for ln in reversed(lines):  # 最新的在最上面
-                e = oplog.parse(ln)
-                rows.append([
-                    (e["time"][11:] or "-"), e["cmd"], e["status"], e["duration"],
-                    "\n".join(tui.wrap(e["summary"], sum_w)),
-                ])
-            print(tui.table(
-                [tr("时间"), tr("命令"), tr("状态"), tr("耗时"), tr("摘要")],
-                rows,
-                footer=tr("共 {} 条（只保留最近 {} 条）；文件：{}", len(lines), oplog.MAX_KEEP, p),
-            ))
-        print()
-        action = tui.select(
-            tr("要做什么？"),
-            [
-                (tr("清空日志"), tr("删除全部记录，不可恢复"), "c"),
-                (tr("返回"), "", "x"),
-            ],
-            default=1,
-        )
-        if action != 0:
-            return
+            return 1
         if not tui.confirm(tr("清空全部 {} 条操作日志？", len(lines)), default=False):
-            continue
+            tui.note(tr("已取消"))
+            return 0
         try:
             oplog.clear()
             tui.ok(tr("日志已清空"))
         except Exception as e:  # noqa: BLE001
             tui.err(tr("清空失败：{}", f"{type(e).__name__}: {e}"))
-        tui.pause(tr("按任意键继续…"))
+            return 1
+        return 0
+
+    try:
+        p = oplog.path()
+        lines = oplog.recent(oplog.MAX_KEEP)
+    except Exception as e:  # noqa: BLE001
+        tui.err(tr("读取失败：{}", f"{type(e).__name__}: {e}"))
+        return 1
+    print(c.dim("  " + str(p)))
+    print()
+    if not lines:
+        tui.note(tr("（还没有操作记录）"))
+        return 0
+    fixed = 8 + 10 + 5 + 6 + 3 * 2
+    sum_w = max(20, tui.term_width() - fixed - 4)
+    rows = []
+    for ln in reversed(lines):  # 最新的在最上面
+        e = oplog.parse(ln)
+        rows.append([
+            (e["time"][11:] or "-"), e["cmd"], e["status"], e["duration"],
+            "\n".join(tui.wrap(e["summary"], sum_w)),
+        ])
+    print(tui.table(
+        [tr("时间"), tr("命令"), tr("状态"), tr("耗时"), tr("摘要")],
+        rows,
+        footer=tr("共 {} 条（只保留最近 {} 条）", len(lines), oplog.MAX_KEEP),
+    ))
+    tui.note(tr("清空：log clear"))
+    return 0
 
 
-def page_settings(dispatch, cfg: dict) -> None:
-    import setup_wizard
+def cmd_doctor(sh: Shell, items: list[str]) -> int:
+    return sh.run(["doctor"])
 
-    while True:
-        cfg = cfgmod.load()
-        tui.clear()
-        print(tui.title(tr("设置")))
-        print(tui.kv(
-            [
-                (tr("身份 user_id"), cfgmod.identity_label(cfgmod.identity_defaults(cfg))),
-                (tr("向量模型"), _emb_line(cfg)),
-                (tr("运行模式"), f"{cfg.get('mode')}  ({tr(_MODE_DESC.get(str(cfg.get('mode')), ''))})"),
-                (tr("LLM 模型"), _llm_line(cfg)),
-                (tr("存储目录"), _storage_line(cfg)),
-                (tr("检索阈值"), str((cfg.get("search") or {}).get("minScore"))),
-                (tr("界面语言"), label()),
-            ]
-        ))
+
+def cmd_lang(sh: Shell, items: list[str]) -> int:
+    """切界面语言。只写 config.json 的 lang 字段，下一行提示立刻生效。"""
+    want = (items[0] if items else "").strip().lower()
+    if want in ("", "toggle"):
+        want = "en" if lang() == "zh" else "zh"
+    if want not in ("zh", "en"):
+        tui.warn(tr("用法：lang zh|en|toggle"))
+        return 2
+    try:
+        set_lang(want)
+    except Exception as e:  # noqa: BLE001
+        tui.err(tr("切换失败：{}", f"{type(e).__name__}: {e}"))
+        return 1
+    sh.reload()
+    # 环境变量优先级高于配置：HY_MEM_LANG 在外部固定时，写配置也看不出变化，
+    # 必须说清楚，否则用户会反复敲这一条
+    if lang() != want:
+        tui.warn(tr("环境变量 HY_MEM_LANG 覆盖了配置，界面语言仍是 {}；取消该变量后再切换", label()))
+        return 1
+    tui.ok(tr("界面语言已切换为 {}，下一行提示就生效。", label()))
+    return 0
+
+
+def cmd_help(sh: Shell, items: list[str]) -> int:
+    import helptext
+
+    if items:
+        cmd = find_command(items[0])
+        if cmd is None:
+            tui.err(tr("没有这个命令：{}", items[0]))
+            return 2
+        print(tui.title(tr("{} 用法", cmd.name)))
+        print("  " + c.cyan(cmd.usage or cmd.name))
         print()
-        action = tui.select(
-            tr("改哪一项？"),
-            [
-                (tr("向量模型（embedding）"), tr("改后会实测维度；换模型需要重建数据目录"), "e"),
-                (tr("运行模式 MEMORY_MODE"), tr("lite 纯向量 / pro 加 LLM 抽取 / ultra 再加 Schema"), "m"),
-                (tr("LLM 模型"), tr("pro 及以上用于抽取事实与自动打标签"), "l"),
-                (tr("数据存储目录（storage）"), tr("查看用量、迁移、备份、清空重建"), "d"),
-                (tr("检索阈值 minScore"), tr("当前 {}", cfg.get("search", {}).get("minScore")), "t"),
-                (tr("队列参数"), tr("重试次数与锁超时，一般不用动"), "q"),
-                (tr("身份 user_id"), tr("多智能体共享（通用）还是隔离（独立名字）"), "u"),
-                (tr("完整向导"), tr("从向量模型开始重走一遍四步"), "f"),
-                (tr("查看当前配置"), tr("只读：所有生效值与环境变量映射"), "v"),
-                (tr("环境自检 doctor"), tr("端到端连通性与依赖检查"), "c"),
-                (tr("操作日志"), tr("最近 50 条执行记录，可清空"), "o"),
-                (tr("界面语言 / Language"), tr("当前 {}；切换后立即重绘菜单", label()), "n"),
-                (tr("返回"), "", "x"),
-            ],
-            default=12,
-        )
-        if action == 12:
-            return
-        if action == 11:
-            # 只写 config.json 的 lang 字段，立刻重画：切完还得再退出去重进才能生效，
-            # 用户会以为没切成功
-            new = "en" if lang() == "zh" else "zh"
-            try:
-                set_lang(new)
-            except Exception as e:  # noqa: BLE001
-                tui.err(tr("切换失败：{}", f"{type(e).__name__}: {e}"))
-            else:
-                # 环境变量优先级高于配置：HY_MEM_LANG 在外部固定时，写配置也看不出变化，
-                # 必须说清楚，否则用户会反复点这一项
-                if lang() != new:
-                    tui.warn(tr("环境变量 HY_MEM_LANG 覆盖了配置，界面语言仍是 {}；"
-                                "取消该变量后再切换", label()))
-                else:
-                    tui.ok(tr("界面语言已切换为 {}，菜单文案立即生效。", label()))
-            tui.pause(tr("按任意键继续…"))
-            continue
-        if action == 10:
-            page_log(dispatch, cfg)
-            continue
-        if action == 9:
-            page_doctor(dispatch, cfg)
-            tui.pause(tr("按任意键继续…"))
-            continue
-        if action == 8:
-            page_config(dispatch, cfg)
-            tui.pause(tr("按任意键继续…"))
-            continue
-        if action == 6:
-            page_identity(dispatch, cfg)
-            continue
-        if action == 3:
-            page_storage(dispatch, cfg)
-            continue
-        try:
-            if action == 7:
-                setup_wizard.run_setup(scope="all")
-            else:
-                key = ["embedding", "mode", "llm", "storage", "search", "queue"][action]
-                setup_wizard.run_setup(scope=key)
-        except tui.Aborted:
-            tui.warn(tr("已取消"))
-        tui.pause(tr("按任意键继续…"))
+        print("  " + cmd.summary)
+        if cmd.aliases:
+            print("  " + c.dim(tr("别名：{}", " / ".join(cmd.aliases))))
+        if cmd.words:
+            print("  " + c.dim(tr("可补全：{}", " ".join(cmd.words))))
+        print()
+        tui.note(tr("完整命令清单：help ｜ 机器可读规格：hy-mem help --json"))
+        return 0
+
+    print(tui.title(tr("hy-mem 命令")))
+    # 列宽按**全部**命令算一次：分组各算各的会让每组的缩进都不一样
+    uw = min(18, max([tui.vwidth(cmd.usage or cmd.name) if tui.vwidth(cmd.usage or cmd.name) <= 18
+                      else tui.vwidth(cmd.name) for cmd in COMMANDS] + [6]))
+    groups: dict[str, list[Command]] = {}
+    for cmd in COMMANDS:
+        groups.setdefault(cmd.group, []).append(cmd)
+    for gname, cmds in groups.items():
+        print(tui.section(tr(gname)))
+        # 用法串放在第一列只在它够短时成立；长了就换行，别把整张表推歪
+        shorts = [cmd.usage if tui.vwidth(cmd.usage or cmd.name) <= 18 else cmd.name for cmd in cmds]
+        for cmd, short in zip(cmds, shorts):
+            print("  " + c.cyan(tui.rpad(short, uw)) + "  " + c.dim(cmd.summary))
+            # 参数太长就换到下一行：挤在一行里会把整张表推歪，而用法串不能截断
+            if short != (cmd.usage or cmd.name):
+                print("  " + " " * uw + "  " + c.dim(cmd.usage))
+    print()
+    print(tui.kv([
+        (tr("按键"), tr("↑↓ 历史 · Tab 补全 · Ctrl+R 反查 · Ctrl+C 放弃本行 · Ctrl+D 退出")),
+        (tr("子命令"), f"hy-mem {helptext.VERSION}；任何命令也能直接在命令行执行：hy-mem <命令>"),
+        (tr("机器可读"), tr("hy-mem help --json（参数类型 / 默认值 / 返回字段 / 示例）")),
+    ]))
+    tui.note(tr("help <命令> 看单项用法，例如 help search"))
+    return 0
 
 
-def page_doctor(dispatch, cfg: dict) -> None:
-    print(tui.title(tr("环境自检")))
-    _run_and_show(dispatch, ["doctor"])
+def cmd_clear(sh: Shell, items: list[str]) -> int:
+    tui.clear()
+    print(header(sh.cfg))
+    return 0
 
 
-def page_config(dispatch, cfg: dict) -> None:
-    print(tui.title(tr("当前配置")))
+def cmd_exit(sh: Shell, items: list[str]) -> int:
+    raise ExitShell()
+
+
+# --------------------------------------------------------------------------
+# 命令表：name = 子命令名，尽量一一对应，别让人在两套词表之间换算
+# --------------------------------------------------------------------------
+COMMANDS: list[Command] = [
+    Command("add", "add [-t 标签] [-s] [文本]", "写记忆：给文本就直接写，不给就进多行输入", cmd_add,
+            ("a", "w", "write"), ("-t", "-s", "--sync"), "写"),
+    Command("search", "search <查询> [-n 条数] [-t 标签]", "语义检索（拿不准就换几种问法）", cmd_search,
+            ("s", "find"), ("-n", "-t"), "读"),
+    Command("list", "list [条数]", "最近记忆，拿 id 去 get / delete", cmd_list, ("ls",), ("-n",), "读"),
+    Command("get", "get <id>", "按 id 读全文", cmd_get, ("show",), (), "读"),
+    Command("delete", "delete <id>", "按 id 删一条（要确认）", cmd_delete, ("rm", "del"), (), "读"),
+    Command("tags", "tags [refresh|rm <标签>]", "标签清单；refresh 同步自动标签，rm 解绑", cmd_tags,
+            ("tag",), ("refresh", "rm"), "读"),
+    Command("queue", "queue [run|one|retry]", "异步队列状态与消费", cmd_queue, ("jobs",),
+            ("run", "one", "retry"), "运维"),
+    Command("stats", "stats", "库体积 / 条数 / 写入延迟预期", cmd_stats, ("health",), (), "运维"),
+    Command("doctor", "doctor", "环境自检：端到端连通性", cmd_doctor, ("doc",), (), "运维"),
+    Command("log", "log [clear]", "最近 50 条操作记录", cmd_log, ("logs",), ("clear",), "运维"),
+    Command("setup", "setup [all|embedding|mode|llm|storage|search|queue]", "改配置；不带参数走完整向导",
+            cmd_setup, ("set", "model"), _SCOPES + ("all",), "设置"),
+    Command("config", "config", "只读查看生效配置", cmd_config, ("cfg", "conf"), (), "设置"),
+    Command("storage", "storage [backup|move <路径>|reset|wipe|vacuum]", "数据目录：用量 / 迁移 / 备份 / 重建",
+            cmd_storage, ("store",), ("backup", "move", "reset", "wipe", "vacuum"), "设置"),
+    Command("identity", "identity [set <名字>|reset|list]", "身份 user_id：共享还是隔离", cmd_identity,
+            ("user",), ("set", "reset", "list"), "设置"),
+    Command("lang", "lang [zh|en|toggle]", "界面语言", cmd_lang, ("language",), ("zh", "en", "toggle"), "设置"),
+    Command("help", "help [命令]", "命令清单 / 单项用法", cmd_help, ("?", "h"), (), "其他"),
+    Command("clear", "clear", "清屏（历史还在，↑ 能翻回来）", cmd_clear, ("cls",), (), "其他"),
+    Command("exit", "exit", "退出控制台（也可以 Ctrl+D）", cmd_exit, ("quit", "q"), (), "其他"),
+]
+
+_BY_NAME: dict[str, Command] = {}
+for _cmd in COMMANDS:
+    _BY_NAME[_cmd.name] = _cmd
+    for _alias in _cmd.aliases:
+        _BY_NAME.setdefault(_alias, _cmd)
+
+
+def find_command(word: str) -> Command | None:
+    return _BY_NAME.get(word)
+
+
+# --------------------------------------------------------------------------
+# 渲染
+# --------------------------------------------------------------------------
+def _hint_line() -> str:
+    return tr("help 看命令 · Tab 补全 · ↑↓ 历史 · Ctrl+R 反查 · Ctrl+D 退出")
+
+
+def header(cfg: dict) -> str:
+    """一次性表头：版本 / 模式 / 向量模型 / 数据目录，加一行按键提示。
+
+    刻意不打印条数：那要起一次子进程查库，控制台启动就会慢半秒；
+    真要看条数敲 `stats` 就行。
+    """
+    import helptext
+
     emb = cfg.get("embedding") or {}
-    llm = cfg.get("llm") or {}
-    pairs = [
-        (tr("配置文件"), str(cfgmod.config_path())),
-        (tr("首次设置"), tr("已完成") if cfg.get("setupComplete") else tr("未完成")),
-        (tr("身份 user_id"), cfgmod.identity_label(cfgmod.identity_defaults(cfg))
-         + tr("（来源：{}）", cfgmod.identity_source(cfg))),
-        (tr("运行模式"), str(cfg.get("mode"))),
-        (tr("向量模型"), f"{emb.get('model')} ({tr('{} 维', emb.get('dims'))}, {emb.get('provider')})"),
-        (tr("嵌入入口"), str(emb.get("baseUrl") or tr("（本地 ONNX）"))),
-        (tr("嵌入密钥"), (tr("已设置") + (tr("（来自 ${}）", emb.get("keyEnv")) if not emb.get("apiKey") else ""))
-         if cfgmod.resolve_embed_key(cfg) else tr("未设置")),
-        (tr("LLM 模型"), f"{llm.get('model')} @ {llm.get('baseUrl')}"),
-        (tr("LLM 密钥"), (tr("已设置") + (tr("（来自 ${}）", llm.get("keyEnv")) if not llm.get("apiKey") else ""))
-         if cfgmod.resolve_llm_key(cfg) else tr("未设置")),
-        (tr("存储目录"), str((cfg.get("storage") or {}).get("dataDir"))),
-        (tr("检索阈值"), str((cfg.get("search") or {}).get("minScore"))),
-        (tr("队列"), tr("重试 {} 次 / 锁超时 {}s",
-                       cfg.get("queue", {}).get("maxAttempts"),
-                       cfg.get("queue", {}).get("lockTimeout"))),
-        (tr("界面语言"), label()),
+    mode = str(cfg.get("mode") or "pro")
+    data_dir = str((cfg.get("storage") or {}).get("dataDir") or cfgmod.default_data_dir())
+    room = max(12, tui.term_width() - 6)
+    rows = [
+        c.cyan(c.bold(f"hy-mem {helptext.VERSION}"))
+        + c.dim(" · ")
+        + c.bold(mode)
+        + c.dim(" · ")
+        + str(emb.get("model") or "?")
+        + c.dim(tr("（{} 维）", emb.get("dims") or "?")),
+        c.dim("  " + tr("库") + " ") + c.dim(_short_path(data_dir, room)),
+        c.dim("  " + _hint_line()),
     ]
-    print(tui.kv(pairs))
-    print()
-    tui.note(tr("改这些走「设置」；直接改 config.json 也行，但下次运行才生效。"))
+    missing = _cfg_missing(cfg)
+    if missing:
+        # 配置不全时人一进来就该知道，而不是写完记忆才看到报错
+        rows.append(
+            "  " + tui.icon("warn") + " "
+            + c.yellow(tr("配置未完成：缺 {}", ", ".join(missing[:3])))
+            + c.dim("   " + tr("→ 跑 setup（或 setup embedding）"))
+        )
+    return "\n".join(rows)
 
 
-def page_help(dispatch, cfg: dict) -> None:
-    """把命令清单直接摆在界面上 —— 不然没人知道有 help，也不知道 agent 该读哪份规格。"""
-    print(tui.title(tr("帮助 / 命令清单")))
-    _run_and_show(dispatch, ["help"])
-    print()
-    tui.note(tr("机器可读规格：hy-mem help --json （参数类型 / 默认值 / 返回字段 / 示例）"))
-    tui.note(tr("身份切换：hy-mem user set <名字> —— 不设就是「通用」，多个智能体共享同一份记忆"))
-    tui.note(tr("接入新宿主：hy-mem install —— 把启动器写到固定目录，让 hy-mem 在 PATH 上真实存在"))
-    tui.note(tr("按键自检：hy-mem tui-test —— 方向键没反应时先跑它"))
+def _banner_text() -> str:
+    """表头里的提示行 —— i18n 测试用它核对中英切换是否真的换了语言。"""
+    return _hint_line()
+
+
+def prompt(sh: Shell) -> str:
+    """提示符：`hy-mem ›`；身份不是「通用」时带上名字，提醒现在写进哪份库。"""
+    try:
+        ident = cfgmod.identity_label(cfgmod.identity_defaults(sh.cfg))
+    except Exception:  # noqa: BLE001
+        ident = ""
+    tag = ""
+    if ident and cfgmod.GENERAL_USER_ID not in ident:
+        tag = c.yellow(f"[{ident}]")
+    return c.cyan(c.bold("hy-mem")) + tag + " " + c.dim("›") + " "
 
 
 # --------------------------------------------------------------------------
 # 主循环
 # --------------------------------------------------------------------------
-# (标题, 说明, 处理函数, 英文热键)
-# 热键只用 ASCII 字母：中文标签的宽度与输入法状态在各终端不可控，而一个字母
-# 既能让人少按几下，也能让脚本/智能体用确定的方式直接选中某一项。
-# 避开 j/k/g/G（上下/首尾）与数字（直达序号）。
-MENU = [
-    ("写记忆", "多行输入，可拆条 + 打标签", page_add, "w"),
-    ("检索", "语义检索，可按标签过滤", page_search, "r"),
-    ("最近记忆", "最近 15 条，可复制 id 去删", page_list, "l"),
-    ("标签", "分类清单与解绑", page_tags, "t"),
-    ("队列", "异步写入的待处理与消费", page_queue, "q"),
-    ("健康检查", "条数 / 体积 / 写入延迟预期", page_health, "h"),
-    ("设置", "模型 / 模式 / 存储目录", page_settings, "s"),
-    ("操作日志", "最近 50 条执行记录，可清空", page_log, "o"),
-    ("环境自检", "doctor：端到端连通性", page_doctor, "d"),
-    ("当前配置", "只读查看生效配置", page_config, "c"),
-    ("帮助", "命令清单 + 给智能体读的 JSON 规格入口", page_help, "i"),
-]
-
-
 def run_menu(dispatch) -> int:
+    """进入控制台。EOF（Ctrl+D / 输入结束）与 `exit` 都正常退出，退出码 0。"""
+    tui.enable_ansi()
+    sh = Shell(dispatch)
+    print(header(sh.cfg))
+    print()
     while True:
-        cfg = cfgmod.load()
-        tui.clear()
-        print(banner(cfg))
-        print()
-        # 每次渲染才翻译：设置页切语言后回到这里必须立刻变英文
-        options = [(tr(name), tr(detail), key) for name, detail, _fn, key in MENU]
-        options.append((tr("退出"), tr("Esc / q 也可以退出"), "x"))
         try:
-            idx = tui.select(tr("选择操作"), options, default=0)
-        except tui.Aborted:
+            raw = tui.line(prompt(sh), history=sh.history, completer=sh.complete, eof_is_exit=True)
+        except EOFError:
             print()
+            print(c.dim(tr("退出。")))
             return 0
-        if idx >= len(MENU):
-            return 0
-        name, _detail, fn, _key = MENU[idx]
-        print()
+        except (tui.Aborted, KeyboardInterrupt):
+            # Ctrl+C / Esc 只放弃当前行（bash 行为），不退出会话 ——
+            # 写了一半的命令不该连会话一起丢
+            print(c.dim(tr("（已放弃这一行；exit 或 Ctrl+D 退出）")))
+            continue
+        line = raw.strip()
+        if not line:
+            continue
+        if not sys.stdin.isatty():
+            # stdin 是管道时终端不会回显输入，补打一行，脚本/日志才看得出
+            # 「这句是用户敲的」而不是程序自己冒出来的
+            print(c.dim(raw))
+        sh.remember(line)
         try:
-            fn(dispatch, cfg)
-        except tui.Aborted:
-            print()
-            tui.warn(tr("已取消"))
-        except KeyboardInterrupt:
+            sh.execute(line)
+        except ExitShell:
+            print(c.dim(tr("退出。")))
+            return 0
+        except (tui.Aborted, KeyboardInterrupt):
             print()
             tui.warn(tr("已中断"))
         except SystemExit:
-            # 子命令里 argparse 的用法错误会抛 SystemExit；在交互界面里它只应
-            # 表现为「这次没执行成功」，不能把整个主界面带走。
+            # 子命令里 argparse 的用法错误会抛 SystemExit；在控制台里它只应
+            # 表现为「这次没执行成功」，不能把整个会话带走。
             tui.warn(tr("该操作未执行（参数不合法）"))
         except Exception as e:  # noqa: BLE001
-            tui.err(tr("{} 出错：{}: {}", tr(name), type(e).__name__, e))
-        tui.pause(tr("按任意键继续…"))
+            tui.err(tr("{}: {}", type(e).__name__, e))
+        sh.reload()

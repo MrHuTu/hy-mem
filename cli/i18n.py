@@ -450,4 +450,80 @@ EN: dict[str, str] = {
     "不改配置，也不动数据": "Change nothing, touch no data",
     "环境变量里没有可用的 key（试过 {}），需要手工提供":
         "No usable key in env vars (tried {}), please enter one",
+
+    # ---- 控制台（shell）：提示符 / 帮助 / 用法 ----
+    "help 看命令 · Tab 补全 · ↑↓ 历史 · Ctrl+R 反查 · Ctrl+D 退出":
+        "help for commands · Tab completes · ↑↓ history · Ctrl+R search · Ctrl+D exits",
+    "↑↓ 历史 · Tab 补全 · Ctrl+R 反查 · Ctrl+C 放弃本行 · Ctrl+D 退出":
+        "↑↓ history · Tab completes · Ctrl+R search · Ctrl+C drops the line · Ctrl+D exits",
+    "hy-mem 命令": "hy-mem commands",
+    "{} 用法": "{} usage",
+    "别名：{}": "Aliases: {}",
+    "可补全：{}": "Completes: {}",
+    "按键": "Keys",
+    "机器可读": "Machine-readable",
+    "hy-mem help --json（参数类型 / 默认值 / 返回字段 / 示例）":
+        "hy-mem help --json (arg types / defaults / response fields / examples)",
+    "help <命令> 看单项用法，例如 help search": "help <command> for one command, e.g. help search",
+    "完整命令清单：help ｜ 机器可读规格：hy-mem help --json":
+        "Full command list: help ｜ machine-readable spec: hy-mem help --json",
+    "输入 help 看全部命令；Tab 可以补全": "Type help for all commands; Tab completes",
+    "未知命令 {}": "Unknown command {}",
+    "是不是要 {}？": "Did you mean {}?",
+    "没有这个命令：{}": "No such command: {}",
+    "{}: {}": "{}: {}",
+    "（已放弃这一行；exit 或 Ctrl+D 退出）":
+        "(line dropped; exit or Ctrl+D to quit)",
+    "退出。": "Bye.",
+    "{} 后面要跟一个值": "{} needs a value",
+    "不认识的选项 {}": "Unknown option {}",
+    "例：search 部署流程 -n 10": "e.g. search deploy -n 10",
+    "用法：search <查询> [-n 条数] [-t 标签]": "Usage: search <query> [-n count] [-t tags]",
+    "用法：get <id>（id 从 list / search 的结果里取）":
+        "Usage: get <id> (id comes from list / search)",
+    "用法：delete <id>；批量删用 forget": "Usage: delete <id>; bulk delete with forget",
+    "用法：tags rm <标签>": "Usage: tags rm <tag>",
+    "用法：identity set <名字>（英文/数字/-/_ 最稳）":
+        "Usage: identity set <name> (letters/digits/-/_ work best)",
+    "用法：storage move <新目录>（支持 %USERPROFILE% 与 ~）":
+        "Usage: storage move <new dir> (%USERPROFILE% and ~ supported)",
+    "用法：lang zh|en|toggle": "Usage: lang zh|en|toggle",
+    "可用：all / {}": "Available: all / {}",
+    "可用：backup / move <路径> / reset / wipe / vacuum":
+        "Available: backup / move <path> / reset / wipe / vacuum",
+    "未知的设置项 {}": "Unknown setting {}",
+    "未知的 storage 子命令 {}": "Unknown storage subcommand {}",
+    "已取消，配置未改动。": "Cancelled; config unchanged.",
+    "改这些用 setup <项>；直接改 config.json 也行，但下次运行才生效。":
+        "Change these with setup <item>; editing config.json also works but needs a restart.",
+    "共 {} 条；删除用 delete <id>": "{} total; delete with delete <id>",
+    "共 {} 条（只保留最近 {} 条）": "{} total (only the latest {} kept)",
+    "删除 {}？旧版本会一并消失": "Delete {}? Older versions go with it",
+    "解绑所有 {} 标签？（不删记忆）": "Unbind every {} tag? (memories stay)",
+    "同步自动标签：tags refresh ｜ 解绑：tags rm <标签>":
+        "Sync auto tags: tags refresh ｜ unbind: tags rm <tag>",
+    "消费：queue run（直到清空）/ queue one（只处理一条）/ queue retry（重投死信）":
+        "Consume: queue run (until empty) / queue one (single task) / queue retry (redeliver dead)",
+    "清空：log clear": "Clear: log clear",
+    "备份：storage backup ｜ 迁目录：storage move <路径> ｜ 重建：storage wipe ｜ 清队列记录：storage vacuum ｜ 回默认：storage reset":
+        "Backup: storage backup ｜ move: storage move <path> ｜ wipe: storage wipe ｜ "
+        "queue cleanup: storage vacuum ｜ default: storage reset",
+    "切身份：identity set <名字> ｜ 回通用：identity reset ｜ 看过哪些：identity list":
+        "Switch: identity set <name> ｜ general: identity reset ｜ seen: identity list",
+    "切换只改身份：模型配置、数据目录、已有记忆都不动":
+        "Switching only changes identity: model config, data dir and memories stay",
+    "（{} 维）": " ({} dims)",
+    "→ 跑 setup（或 setup embedding）": "→ run setup (or setup embedding)",
+    "  多行输入，空行结束；Ctrl+C 取消这条":
+        "  Multiple lines; blank line ends it; Ctrl+C drops this one",
+    "（没有输入内容，什么都没写）": "(nothing entered, nothing written)",
+    "已入队，后台消费者会自动落库；此刻 search 还查不到是正常的（pro 每条约 10~50s，`queue` 看进度）":
+        "Queued; the background consumer persists it. Not being searchable yet is normal "
+        "(pro takes 10~50s per memory; watch with `queue`)",
+    "可试着放宽：降低阈值（setup search）或换更接近原话的问法":
+        "Try loosening it: lower the threshold (setup search) or rephrase closer to the original",
+    "阈值 {}，命中 {} 条；看全文：get {}": "Threshold {}, {} hits; full text: get {}",
+    "界面语言已切换为 {}，下一行提示就生效。":
+        "UI language is now {}; the next prompt already reflects it.",
+    "子命令": "Subcommands",
 }

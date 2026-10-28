@@ -158,31 +158,74 @@ def _mask(secret: str) -> str:
     return f"{secret[:8]}…{secret[-4:]}"
 
 
+def _pick_key(
+    prev: dict,
+    preset_env: str,
+    legacy_env: str,
+    same_endpoint: bool,
+    fallback_env: str = "MEMORY_EMBEDDER_API_KEY",
+) -> tuple[str, str]:
+    """决定这一步用哪把密钥、放在哪。返回 (明文, 变量名)，二者必有其一为空。
+
+    规则只有一条主线 —— **同端点才允许继承**（C3/C4）：
+
+    · 同端点：`[预设声明的变量, 配置里的 keyEnv, 约定变量名]` 取第一个有值的，
+      明文留空、只记变量名（不落盘），也不再多问一句"要不要单独保存"；
+    · 跨端点：**只认预设声明的变量**。旧端点的 key 属于别的服务，复用只会换来
+      一次 401（2026-10-28 现场事故：百炼的 key 打到硅基流动），所以这里宁可返回空
+      让用户现填，也不“借”一把看起来有值的 key。
+    · 配置里真有明文（用户手填过）且同端点：沿用它。
+
+    `fallback_env` 是本程序的约定变量名（$MEMORY_EMBEDDER_API_KEY /
+    $MEMORY_LLM_API_KEY）。首次安装时配置是新建的，`keyEnv` 常被预设声明名占着
+    （$OPENAI_API_KEY 之类，本机根本没设），只认它就会「明明有 key 却报密钥为空」——
+    0.9.12 打包前就是这么翻车的，所以同端点时必须把它也算进候选。
+    """
+    cands = [preset_env]
+    if same_endpoint:
+        cands += [str(prev.get("keyEnv") or ""), legacy_env, fallback_env]
+    seen: set[str] = set()
+    for name in cands:
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if os.getenv(name, ""):
+            return "", name
+    if same_endpoint and prev.get("apiKey"):
+        return str(prev["apiKey"]), str(prev.get("keyEnv") or "")
+    return "", ""
+
+
+def _is_auth_error(msg: str) -> bool:
+    return " 401" in msg or " 403" in msg or "401:" in msg or "403:" in msg
+
+
 def step_embedding(cfg: dict, _depth: int = 0) -> dict:
     emb = dict(cfg.get("embedding") or {})
     cur = presets.embedding_index(emb)
 
-    options = []
-    for p in presets.EMBEDDING_PRESETS:
-        metrics = []
-        if p.discrimination:
-            metrics.append(f"区分度 {p.discrimination}x")
-        metrics.append(f"{p.dims} 维")
-        if p.latency_ms:
-            metrics.append(f"~{p.latency_ms}ms")
-        options.append((p.label, " · ".join(metrics)))
-    options.append(("自定义端点 / 自定义模型 custom", "手填 baseUrl + model，维度靠实测"))
+    # 只留主流几家 + 自定义（C1）：副标题不再堆区分度 / 延迟 / 维度三列指标，
+    # 那些数字看一次就够，摆在选择页上只会把屏幕撑成两屏半。
+    options = [(p.label, "") for p in presets.EMBEDDING_PRESETS]
+    options.append(("自定义（手填 baseUrl + model）", ""))
     options = [(lab, det, k) for (lab, det), k in zip(options, tui.keyseq(len(options)))]
 
-    idx = tui.select("[1/4] 向量模型", options, default=cur if cur >= 0 else 0)
+    idx = tui.select(
+        "[1/4] 向量模型",
+        options,
+        default=cur if cur >= 0 else 0,
+        extra_hint="DeepSeek 官方没有向量接口（只有 chat），所以这里不列它",
+    )
     chosen = presets.EMBEDDING_PRESETS[idx] if idx < len(presets.EMBEDDING_PRESETS) else None
 
-    # 密钥是否可用，只能问统一解析入口：配置里的明文可能为空（0.9.11 起只留 keyEnv），
+    # 密钥是否可用只能问统一解析入口：配置里的明文可能为空（0.9.11 起只留 keyEnv），
     # 真正生效的 key 常常在环境变量里。用 emb.get("apiKey") 判断会让「同一项重配」
     # 每次都追问 key，用户一回车就把空串交给探针 → 401（2026-10-28 实测事故）。
     have_key = bool(cfgmod.resolve_embed_key({"embedding": emb}))
-    key_in_file = bool(emb.get("apiKey"))
     key_env = str(emb.get("keyEnv") or "MEMORY_EMBEDDER_API_KEY")
+    same_endpoint = str(emb.get("baseUrl") or "").rstrip("/") == (
+        chosen.base_url.rstrip("/") if chosen else "\0"
+    )
 
     if chosen is not None and cur == idx and have_key:
         # 选的就是当前项且密钥可用：不重问 key，但仍重新验证（key 可能已轮换）
@@ -201,62 +244,57 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
             new["apiKey"] = ""
             new["keyEnv"] = emb["keyEnv"]
     elif chosen is None:
+        # 自定义：默认值预填当前值，连按回车就能"只改模型名"。
+        # keyEnv 必须原样保留 —— 老代码在这里把 keyEnv 清成空串，配好环境变量的机器
+        # 一进自定义就"密钥丢失"，只能重新贴一把明文回来。
         new = dict(emb)
         new["preset"] = "custom"
         new["provider"] = "openai"
         new["baseUrl"] = tui.ask(
             "baseUrl",
             default=str(emb.get("baseUrl") or ""),
-            hint="OpenAI 兼容入口，通常以 /v1 结尾（百炼 MaaS 用 /compatible-mode/v1）",
+            hint="OpenAI 兼容入口，通常以 /v1 结尾（百炼用 /compatible-mode/v1）",
         )
         new["model"] = tui.ask("模型名", default=str(emb.get("model") or ""))
-        new["apiKey"] = tui.ask_secret(
-            "API Key",
-            default=str(emb.get("apiKey") or ""),
-            hint=f"留空 = 沿用当前密钥（config.json 的 apiKey 或 ${key_env}）",
-        )
         new["dims"] = int(emb.get("dims") or 0)
+        api_key, env_name = _pick_key(emb, "", key_env, same_endpoint=True, fallback_env="MEMORY_EMBEDDER_API_KEY")
+        if env_name:
+            new["apiKey"] = ""
+            new["keyEnv"] = env_name
+            tui.info(f"继续用环境变量 ${env_name} 里的密钥（{_mask(os.getenv(env_name, ''))}），不落盘")
+        else:
+            new["apiKey"] = tui.ask_secret(
+                "API Key", hint="环境变量里没有可用的 key；逐字粘贴，前后别带空格"
+            )
+            new["keyEnv"] = ""
     else:
         new = chosen.to_cfg()
         if chosen.needs_key:
-            same_host = str(emb.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
-            # 密钥来源与 step_llm 完全对称：按 [预设声明的变量, 配置里的 keyEnv, 约定变量名]
-            # 找第一个**有值**的。只看「同端点才继承」会在两种场景逼用户手填：
-            #   · 首次没配好（baseUrl 为空 → same_host 恒假，环境变量里明明有 key）
-            #   · 换端点但新端点用同一把 key（本机的百炼 / 网关都是这样）
-            cands = [chosen.key_env, key_env, "MEMORY_EMBEDDER_API_KEY"]
-            seen: set[str] = set()
-            src_env, inherited = "", ""
-            for name in cands:
-                if not name or name in seen:
-                    continue
-                seen.add(name)
-                v = os.getenv(name, "")
-                if v:
-                    src_env, inherited = name, v
-                    break
-            if inherited:
-                # 环境变量里有 key 就继承，不落盘、不追问（与 step_llm 同一套策略）
-                tui.info(
-                    f"将从环境变量 ${src_env} 继承密钥（{_mask(inherited)}），不落盘"
-                    + ("" if same_host else "；端点已变，若这把 key 不适用于新端点，请改为单独填写")
-                )
+            api_key, env_name = _pick_key(emb, chosen.key_env, key_env, same_endpoint, "MEMORY_EMBEDDER_API_KEY")
+            if env_name:
+                # 同端点（或新端点自带专用变量）：继承，不落盘
+                tui.info(f"用环境变量 ${env_name} 里的密钥（{_mask(os.getenv(env_name, ''))}），不落盘")
                 new["apiKey"] = ""
-                new["keyEnv"] = src_env
-                if tui.confirm("改为在 config.json 里单独保存一个 key？", default=False):
-                    new["apiKey"] = tui.ask_secret("API Key", hint="逐字粘贴；留空 = 仍然用环境变量")
-            elif key_in_file:
-                # 环境变量全空、但配置里保存过明文：沿用它，用户回车即可
-                new["apiKey"] = tui.ask_secret(
-                    "API Key", default=str(emb["apiKey"]), hint="直接回车 = 沿用当前 key"
-                )
-                new["keyEnv"] = str(emb.get("keyEnv") or "")
+                new["keyEnv"] = env_name
+            elif api_key:
+                new["apiKey"] = api_key
             else:
-                tui.warn(f"环境变量里没有可用的 key（试过 {', '.join('$' + x for x in cands if x)}），需要手工提供")
+                # 既没有新端点专用变量、又跨端点：旧 key 不能借（C3）。
+                if emb.get("baseUrl"):
+                    tui.warn(f"端点已从 {emb.get('baseUrl')} 换到 {chosen.base_url}，旧密钥不能复用")
+                    tui.note(
+                        f"环境变量里没有 ${chosen.key_env}；旧端点那把 key 属于另一家服务，"
+                        "继续用只会拿到 401，所以这里必须填新的"
+                    )
                 new["apiKey"] = tui.ask_secret(
                     "API Key",
-                    hint=f"{chosen.label} 需要 key；逐字粘贴，前后别带空格",
+                    hint=f"{chosen.label} 需要该端点自己的 key；逐字粘贴，前后别带空格",
                 )
+                # keyEnv 保留新端点自己的变量名（通常是空的），**不要清成空串**：
+                # 空串会让 config.resolve_embed_key 回落到 $MEMORY_EMBEDDER_API_KEY，
+                # 也就是又拿旧端点的 key 去打新端点 —— 正是 401 的来源。
+                # 指到新端点变量名后解析结果就是空，探针会报「密钥为空」并让你重填。
+                new["keyEnv"] = chosen.key_env
         else:
             new["apiKey"] = ""
             new["keyEnv"] = ""
@@ -269,6 +307,14 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
         new["dims"] = dims
     else:
         tui.err(msg)
+        if _is_auth_error(msg) and not new.get("apiKey") and new.get("keyEnv"):
+            # C5：401 最常见的成因就是"拿旧端点的 key 打新端点"，必须说破，
+            # 否则用户只会反复重试同一个动作。
+            tui.note(
+                f"${new['keyEnv']} 里的 key 可能属于旧端点"
+                + (f"（{emb.get('baseUrl')}）" if emb.get("baseUrl") else "")
+                + "，换端点要同时换 key"
+            )
         choice = tui.select(
             "向量模型验证失败，怎么办？",
             [
@@ -307,68 +353,64 @@ def step_mode(cfg: dict) -> str:
 def step_llm(cfg: dict, _depth: int = 0) -> dict:
     llm = dict(cfg.get("llm") or {})
     cur = presets.llm_index(llm)
-    options = []
-    for p in presets.LLM_PRESETS:
-        bits = []
-        if p.latency_ms:
-            bits.append(f"~{p.latency_ms}ms")
-        if p.key_env:
-            bits.append(f"key 继承 ${p.key_env}")
-        options.append((p.label, " · ".join(bits)))
-    options.append(("自定义端点 / 自定义模型 custom", "手填 baseUrl + model + key"))
+
+    # 与向量模型同一套收敛策略（C1）：三家 + 自定义，副标题只留一句人话
+    options = [(p.label, "") for p in presets.LLM_PRESETS]
+    options.append(("自定义（手填 baseUrl + model）", ""))
     options = [(lab, det, k) for (lab, det), k in zip(options, tui.keyseq(len(options)))]
 
-    idx = tui.select("[3/4] LLM 模型（pro/ultra 用来抽取事实）", options, default=cur if cur >= 0 else 0)
+    idx = tui.select(
+        "[3/4] LLM 模型（pro/ultra 用来抽取事实）",
+        options,
+        default=cur if cur >= 0 else len(presets.LLM_PRESETS),
+        extra_hint="pro / ultra 模式必需；lite 模式用不到",
+    )
     chosen = presets.LLM_PRESETS[idx] if idx < len(presets.LLM_PRESETS) else None
+    key_env = str(llm.get("keyEnv") or "")
+    same_endpoint = str(llm.get("baseUrl") or "").rstrip("/") == (
+        chosen.base_url.rstrip("/") if chosen else "\0"
+    )
 
     if chosen is None:
+        # 自定义：默认值预填当前值 —— 自建网关（如本机 newapi）不必每次重敲三个字段。
+        # keyEnv 必须保留，否则"配好环境变量"的机器一进自定义就密钥丢失。
         new = dict(llm)
         new["preset"] = "custom"
         new["baseUrl"] = tui.ask("baseUrl", default=str(llm.get("baseUrl") or ""))
         new["model"] = tui.ask("模型名", default=str(llm.get("model") or ""))
-        new["apiKey"] = tui.ask_secret("API Key", default=str(llm.get("apiKey") or ""))
-        new["keyEnv"] = ""
-        new["insecureTls"] = tui.confirm("跳过 TLS 证书校验？（自签内网端点才需要）", default=False)
+        api_key, env_name = _pick_key(llm, "", key_env, same_endpoint=True, fallback_env="MEMORY_LLM_API_KEY")
+        if env_name:
+            new["apiKey"] = ""
+            new["keyEnv"] = env_name
+            tui.info(f"继续用环境变量 ${env_name} 里的密钥（{_mask(os.getenv(env_name, ''))}），不落盘")
+        else:
+            new["apiKey"] = tui.ask_secret(
+                "API Key", hint="环境变量里没有可用的 key；逐字粘贴，前后别带空格"
+            )
+            new["keyEnv"] = ""
     else:
         new = chosen.to_cfg()
-        if chosen.key_env:
-            same_host = str(llm.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
-            # 「能不能继承」不能只看预设声明的变量名：本机实际把 key 放在别的变量里
-            # （例如预设写 $YSJX_API_KEY，而配置的 keyEnv 是 $MEMORY_LLM_API_KEY），
-            # 只看预设名就会在第二次设置时逼用户重填一遍。
-            # 首次安装还有一个坑：配置不存在时 `_fill_from_env()` 会把 $MEMORY_LLM_API_KEY
-            # 的值复制进内存里的 llm.apiKey，于是 apiKey 非空 —— 但它并不是"用户手填"，
-            # 只是环境变量的临时副本。所以判断依据只能是"环境变量里有没有"，不能看 apiKey。
-            env_name = ""
-            for cand in (chosen.key_env, str(llm.get("keyEnv") or ""), "MEMORY_LLM_API_KEY"):
-                if cand and os.getenv(cand, ""):
-                    env_name = cand
-                    break
-            env_key = os.getenv(env_name, "") if env_name else ""
-            file_key = str(llm.get("apiKey") or "") if same_host else ""
-            if env_key:
-                tui.info(f"将继承当前密钥（{_mask(env_key)}，来自 ${env_name}），不落盘")
-                # 关键一步：把 keyEnv 指向「刚才真正取到 key 的那个变量名」。
-                # 预设声明的名字可能与本机实际存放的不一致（预设 $YSJX_API_KEY，
-                # 本机 $MEMORY_LLM_API_KEY），不写回就会「继承成功、保存后取不到」。
-                new["apiKey"] = ""
-                new["keyEnv"] = env_name
-                if tui.confirm("改为在 config.json 里单独保存一个 key？", default=False):
-                    new["apiKey"] = tui.ask_secret("API Key")
-                    if not new["apiKey"]:
-                        new["keyEnv"] = env_name
-            elif file_key:
-                # 真·明文 key（用户手填过，或只在 .env 里）：沿用，但不追问
-                tui.info(f"将沿用配置里的密钥（{_mask(file_key)}）")
-                new["apiKey"] = file_key
-                if llm.get("keyEnv"):
-                    new["keyEnv"] = str(llm["keyEnv"])
-            else:
-                tui.warn(f"端点 {chosen.base_url} 没有可用密钥（${chosen.key_env} 为空），需要手工提供")
-                new["apiKey"] = tui.ask_secret("API Key")
+        api_key, env_name = _pick_key(llm, chosen.key_env, key_env, same_endpoint, "MEMORY_LLM_API_KEY")
+        if env_name:
+            tui.info(f"用环境变量 ${env_name} 里的密钥（{_mask(os.getenv(env_name, ''))}），不落盘")
+            new["apiKey"] = ""
+            new["keyEnv"] = env_name
+        elif api_key:
+            new["apiKey"] = api_key
+            if llm.get("keyEnv"):
+                new["keyEnv"] = str(llm["keyEnv"])
         else:
-            same_host = str(llm.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
-            new["apiKey"] = tui.ask_secret("API Key", default=str(llm.get("apiKey") or "") if same_host else "")
+            if llm.get("baseUrl"):
+                tui.warn(f"端点已从 {llm.get('baseUrl')} 换到 {chosen.base_url}，旧密钥不能复用")
+                tui.note(
+                    f"环境变量里没有 ${chosen.key_env}；旧端点那把 key 属于另一家服务，"
+                    "继续用只会拿到 401，所以这里必须填新的"
+                )
+            new["apiKey"] = tui.ask_secret(
+                "API Key", hint=f"{chosen.label} 需要该端点自己的 key；逐字粘贴，前后别带空格"
+            )
+            # 同向量模型：保留新端点声明的变量名，别清空（见 step_embedding 的注释）
+            new["keyEnv"] = chosen.key_env
 
     print()
     tui.spinner_line("正在真实调用一次 LLM 验证…")
@@ -377,6 +419,12 @@ def step_llm(cfg: dict, _depth: int = 0) -> dict:
         tui.ok(msg)
     else:
         tui.err(msg)
+        if _is_auth_error(msg) and not new.get("apiKey") and new.get("keyEnv"):
+            tui.note(
+                f"${new['keyEnv']} 里的 key 可能属于旧端点"
+                + (f"（{llm.get('baseUrl')}）" if llm.get("baseUrl") else "")
+                + "，换端点要同时换 key"
+            )
         choice = tui.select(
             "LLM 验证失败，怎么办？",
             [("重新填写 retry", "回到本步骤重来", "r"), ("仍然保存 save", "之后用 hy-mem setup 改", "s")],

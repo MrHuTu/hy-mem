@@ -3422,18 +3422,16 @@ def main(argv=None) -> int:
             if need:
                 print(tui.title("欢迎使用 hy-mem"))
                 print(tui.panel([tui.c.dim(f"检测到：{why}")]))
-                choice = tui.select(
-                    "先做首次设置？",
-                    [
-                        ("开始设置（推荐）", "向量模型 → 运行模式 →（pro/ultra 才问）LLM → 存储目录", "s"),
-                        ("先跳过，直接进主界面", "稍后可在「设置」里补；未配好前写入/检索会报错", "x"),
-                    ],
-                    default=0,
-                )
-                if choice == 0:
+                # 一次 y/N 就够：首次运行只有「配 / 不配」两种走向，
+                # 弹一屏二选一列表等于让人先读两项说明再按键（2026-10-28 交互精简）
+                tui.note("首次设置会依次问：向量模型 → 运行模式 →（pro/ultra 才问）LLM → 存储目录")
+                tui.note("跳过也能用控制台，未配好前写入/检索会提示缺哪项；随时 setup 补齐")
+                if tui.confirm("现在开始设置？", default=True):
                     rc = setup_wizard.run_setup(first_run=True)
                     if rc != 0:
-                        tui.pause("设置未全部通过，按任意键继续进主界面…")
+                        # 不再「按任意键继续」：控制台马上就会出现在下一行，
+                        # 多按一次键纯属多余（2026-10-28 交互精简）
+                        tui.warn("设置未全部通过；进控制台后可用 setup 补齐")
                 else:
                     import config as cfgmod
 

@@ -19,11 +19,19 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "cli"))
+
+# 控制台相关的用例会构造 menu.Shell（它要读配置）。指到沙箱，
+# 免得跑测试时把真实安装目录的 config.json / 历史文件当工作区。
+_SANDBOX = Path(tempfile.mkdtemp(prefix="hymem-ui-"))
+os.environ.setdefault("HY_MEM_CONFIG", str(_SANDBOX / "config.json"))
+os.environ.setdefault("MEMORY_DATA_DIR", str(_SANDBOX / "data"))
 
 import tui  # noqa: E402
 
@@ -261,15 +269,17 @@ def main() -> int:
                 return ""
             return self._keys.pop(0) if self._keys else "ctrlc"
 
-    def line_edit(keys: list[str], secret: bool = False) -> str:
+    def line_edit(keys: list[str], secret: bool = False, history=None, completer=None) -> str:
         tui._READER = LineReader(keys)
         tui.interactive = lambda: True  # type: ignore[assignment]
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             try:
-                return tui._line_edit("› ", secret=secret)
+                return tui._line_edit("› ", secret=secret, history=history, completer=completer)
             except tui.Aborted:
                 return "<aborted>"
+            except EOFError:
+                return "<eof>"
 
     def linecase(name: str, keys: list[str], want: str, secret: bool = False) -> bool:
         got = line_edit(keys, secret)
@@ -291,6 +301,39 @@ def main() -> int:
         linecase("Esc 取消", ["char:a", "esc"], "<aborted>"),
         linecase("Ctrl+C 取消", ["char:a", "ctrlc"], "<aborted>"),
     ]
+
+    # bash 习惯：历史 / 补全 / 反查 / Ctrl+D / Ctrl+K
+    print("\n行编辑：历史、补全、反查（bash 习惯）")
+    hist = ["search 部署流程", "list"]
+
+    def hcase(name: str, keys, want, **kw) -> bool:
+        got = line_edit(keys, **kw)
+        ok = got == want
+        results.append(ok)
+        print(("  PASS  " if ok else "  FAIL  ") + f"{name:<30} → {got!r}" + ("" if ok else f"（期望 {want!r}）"))
+        return ok
+
+    hcase("↑ 取上一条命令", ["up", "enter"], "list", history=hist)
+    hcase("↑↑ 取更早一条", ["up", "up", "enter"], "search 部署流程", history=hist)
+    hcase("↑ 后 ↓ 回到草稿", ["char:x", "up", "down", "enter"], "x", history=hist)
+    hcase("Ctrl+P / Ctrl+N 等价", ["ctrl-p", "ctrl-n", "enter"], "", history=hist)
+    hcase("密码输入不翻历史", ["up", "enter"], "", history=hist, secret=True)
+    hcase("无历史时 ↑ 无副作用", ["char:a", "up", "enter"], "a", history=[])
+
+    _cands = {"se": ["search", "setup"], "sear": ["search-a", "search-b"]}
+    hcase("Tab 唯一候选直接补上", ["char:s", "char:e", "char:a", "char:r", "char:c", "char:h", "tab", "enter"],
+          "search", completer=lambda t: ["search"] if t.startswith("sear") else [])
+    hcase("Tab 补公共前缀", ["char:s", "char:e", "char:a", "char:r", "tab", "enter"], "search-",
+          completer=lambda t: _cands["sear"] if t.startswith("sear") else [])
+    hcase("Tab 无候选不改变输入", ["char:z", "tab", "enter"], "z", completer=lambda t: [])
+    hcase("补全抛异常也不打断输入", ["char:a", "tab", "enter"], "a",
+          completer=lambda t: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    hcase("Ctrl+R 反查到历史并采用", ["ctrl-r", "char:部", "enter", "enter"], "search 部署流程", history=hist)
+    hcase("Ctrl+R 后 Esc 放弃", ["char:x", "ctrl-r", "char:部", "esc", "enter"], "x", history=hist)
+    hcase("Ctrl+D 空行 = 退出（EOF）", ["ctrl-d"], "<eof>")
+    hcase("Ctrl+D 非空 = 删光标处字符", ["char:a", "char:b", "left", "ctrl-d", "enter"], "a")
+    hcase("Ctrl+K 删到行尾", ["char:a", "char:b", "char:c", "left", "left", "ctrl-k", "enter"], "a")
 
     # 输入行不得折行：长密钥粘贴时每次重绘都必须还在同一行
     print("\n输入行单行渲染（长密钥）")
@@ -358,9 +401,14 @@ def main() -> int:
         results.append(ok)
         print(("  PASS  " if ok else "  FAIL  ") + f"拦下 {s[:10]!r:<14}{msg[:34]}")
 
-    # 连续写入：写完一条不弹菜单，直接把输入提示交还；第 3 轮空回车即退出
-    print("\n菜单：写记忆连续写入")
+    # 连续写入：两条 add 之间不插菜单、不问「再写一条」、不等「按任意键」
+    print("\n控制台：写记忆 / 检索 连续操作")
     import menu
+
+    # 只在这一段强制行输入：前面的用例靠 key_mode() 走 FakeReader，
+    # 提前全局关掉会让它们直接退化成编号菜单、卡在 stdin 上等输入。
+    _prev_tui = os.environ.get("HY_MEM_TUI")
+    os.environ["HY_MEM_TUI"] = "0"
 
     calls: list[tuple[list[str], str | None]] = []
 
@@ -368,14 +416,14 @@ def main() -> int:
         calls.append((list(argv), stdin_text))
         return 0, "已写入 1 条", ""
 
-    tui.interactive = lambda: False  # type: ignore[assignment]  非 TTY → 行输入读 stdin
-    old_stdin = sys.stdin
+    sh = menu.Shell(fake_dispatch)
     out = io.StringIO()
+    old_stdin = sys.stdin
     try:
-        # 每轮：正文 / 空行结束本条 / 标签留空 / 不入队(n)；第 3 轮空回车退出
-        sys.stdin = io.StringIO("第一条\n\n\nn\n第二条\n\n\nn\n\n")
         with contextlib.redirect_stdout(out):
-            menu.page_add(fake_dispatch, {"mode": "lite"})
+            for body in ("第一条\n\n", "第二条\n\n"):
+                sys.stdin = io.StringIO(body)
+                menu.cmd_add(sh, [])
     finally:
         sys.stdin = old_stdin
     text = out.getvalue()
@@ -383,39 +431,37 @@ def main() -> int:
         len(calls) == 2
         and calls[0][1] == "第一条"
         and calls[1][1] == "第二条"
-        and "写记忆（第 2 条）" in text
-        and "写记忆（第 1 条）" not in text
         and text.count("已写入 1 条") == 2
-        # 契约 C2：一次操作结束后不得再插「继续 / 回主界面」的二选一
-        and "再写一条？" not in text
-        and "（没有输入内容，已回主界面）" in text
+        # 契约：一次操作结束后不得再插「继续 / 回主界面」的二选一，也不得带轮次标题
+        and "再写一条" not in text
+        and "第 2 条" not in text
+        and "按任意键" not in text
     )
     results.append(ok)
     print(("  PASS  " if ok else "  FAIL  ")
-          + f"两条正文 → 两次 dispatch（{len(calls)} 次），轮次标题 {'有' if '第 2 条' in text else '缺'}，"
-            f"空回车退出 {'是' if '已回主界面' in text else '否'}")
+          + f"连写两条 → 两次 dispatch（{len(calls)} 次），无二选一菜单 / 无轮次标题")
 
-    # 失败也要留在会话里继续问，而不是把界面踢回主菜单
+    # 失败只影响这一条，不能把控制台或后续写入带崩
     def failing_dispatch(argv, stdin_text=None):
         calls.append((list(argv), stdin_text))
         return 2, "", "写入失败"
 
-    tui.interactive = lambda: False  # type: ignore[assignment]
-    calls.clear()
+    sh_fail = menu.Shell(failing_dispatch)
     out2 = io.StringIO()
-    old_stdin = sys.stdin
+    raised = ""
     try:
-        sys.stdin = io.StringIO("坏的一条\n\n\nn\n好的第二条\n\n\nn\n\n")
         with contextlib.redirect_stdout(out2):
-            menu.page_add(failing_dispatch, {"mode": "lite"})
-    finally:
-        sys.stdin = old_stdin
-    ok = len(calls) == 2 and "写入失败" in out2.getvalue()
-    results.append(ok)
-    print(("  PASS  " if ok else "  FAIL  ") + f"首条失败仍继续问 → 两次 dispatch（{len(calls)} 次）")
+            menu.cmd_add(sh_fail, ["坏的一条"])
+            menu.cmd_add(sh_fail, ["好的第二条"])
+    except Exception as e:  # noqa: BLE001
+        raised = f"{type(e).__name__}: {e}"
+    ok2 = not raised and out2.getvalue().count("写入失败") == 2
+    results.append(ok2)
+    print(("  PASS  " if ok2 else "  FAIL  ")
+          + f"写入失败不抛异常，下一条照常执行（{raised or 'ok'}）")
 
-    # 连续检索：查完直接交还提示，空查询退出；同样不插二选一菜单
-    print("\n菜单：检索连续查询")
+    # 连续检索：两次查询各自拿到结果，不追问「再查一次」
+    print("\n控制台：检索连续查询")
     asked: list[str] = []
 
     def search_dispatch(argv, stdin_text=None):
@@ -426,26 +472,25 @@ def main() -> int:
         }
         return 0, json.dumps(payload, ensure_ascii=False), ""
 
-    tui.interactive = lambda: False  # type: ignore[assignment]
+    sh_s = menu.Shell(search_dispatch)
+    t3 = ""
     out3 = io.StringIO()
-    old_stdin = sys.stdin
     try:
-        # 每轮：查询 / 标签留空 / 条数 3；第 3 轮空查询退出
-        sys.stdin = io.StringIO("第一问\n\n3\n第二问\n\n3\n\n")
         with contextlib.redirect_stdout(out3):
-            menu.page_search(search_dispatch, {})
+            menu.cmd_search(sh_s, ["第一问"])
+            menu.cmd_search(sh_s, ["第二问"])
     finally:
-        sys.stdin = old_stdin
+        pass
     t3 = out3.getvalue()
-    ok = (
-        asked == ["第一问", "第二问"]
-        and "检索（第 2 次）" in t3
-        and "命中内容" in t3
-        and "再查一次？" not in t3
-    )
-    results.append(ok)
-    print(("  PASS  " if ok else "  FAIL  ")
-          + f"两次查询 → {asked}，轮次标题 {'有' if '第 2 次' in t3 else '缺'}，空查询退出 {'是' if '检索（第 2 次）' in t3 else '否'}")
+    ok3 = asked == ["第一问", "第二问"] and t3.count("命中内容") == 2 and "再查一次" not in t3
+    results.append(ok3)
+    print(("  PASS  " if ok3 else "  FAIL  ")
+          + f"两次查询 → {asked}，结果各打一次，无「再查一次」")
+
+    if _prev_tui is None:
+        os.environ.pop("HY_MEM_TUI", None)
+    else:
+        os.environ["HY_MEM_TUI"] = _prev_tui
 
     bad = results.count(False)
     print(f"\n{'全部通过' if not bad else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")

@@ -61,18 +61,12 @@ def case_zh_identical() -> None:
           i18n.tr("共 {} 条；删除用 hy-mem delete <id>", 3) == "共 3 条；删除用 hy-mem delete <id>",
           i18n.tr("共 {} 条；删除用 hy-mem delete <id>", 3))
 
-    # 横幅是改造中最容易改歪的一块（ASCII 骨架 + 中文标签拼接）
-    want_banner = "\n".join([
-        "   _  _  _    __  __  ___ ___",
-        r"  | || || |  |  \/  |/ __| __|   记忆库命令行",
-        r"  | __ || |__| |\/| | (__| _|",
-        r"  |_||_||____|_|  |_|\___|___|   lite / pro / ultra",
-    ])
+    # 控制台表头是改造中最容易改歪的一块（中文标签 + 按键提示拼接）
     got = menu._banner_text()
-    check("横幅逐字一致", got == want_banner, "首行: " + got.splitlines()[0])
-
-    check("写记忆首条标题不带轮次", menu._add_round_title(1) == "写记忆", menu._add_round_title(1))
-    check("写记忆第 2 条标题带轮次", menu._add_round_title(2) == "写记忆（第 2 条）", menu._add_round_title(2))
+    check("表头提示行是中文", "help 看命令" in got and "Tab 补全" in got, got)
+    check("未知命令提示是中文",
+          i18n.tr("未知命令 {}", "xyzzy") == "未知命令 xyzzy", i18n.tr("未知命令 {}", "xyzzy"))
+    check("退出提示是中文", i18n.tr("退出。") == "退出。", i18n.tr("退出。"))
     check("表格表头仍是中文", i18n.tr("分数") == "分数" and i18n.tr("标签") == "标签",
           i18n.tr("分数"))
     check("身份标签仍是「通用（default）」",
@@ -93,7 +87,10 @@ def case_en() -> None:
               i18n.tr("共 {} 条；删除用 hy-mem delete <id>", 2) == "2 total; delete with hy-mem delete <id>",
               i18n.tr("共 {} 条；删除用 hy-mem delete <id>", 2))
         banner = menu._banner_text()
-        check("横幅标签变英文", "memory CLI" in banner and "记忆库命令行" not in banner, banner.splitlines()[1])
+        check("表头提示行变英文", "help for commands" in banner and "help 看命令" not in banner, banner)
+        check("未知命令提示变英文",
+              i18n.tr("未知命令 {}", "x") == "Unknown command x", i18n.tr("未知命令 {}", "x"))
+        check("退出提示变英文", i18n.tr("退出。") == "Bye.", i18n.tr("退出。"))
         check("缺译回落中文", i18n.tr("这句确实没人翻译过") == "这句确实没人翻译过",
               i18n.tr("这句确实没人翻译过"))
         check("缺译不抛异常（带参数也不炸）",
