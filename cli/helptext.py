@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import argparse
 
-VERSION = "0.9.10"
+VERSION = "0.9.11"
 
 PURPOSE = (
     "跨会话长期记忆库。把用户偏好、项目事实、决策与踩坑写进去，下次会话靠语义检索取回。"
-    "底层是腾讯 Hy-Memory SDK 2.0.5（chromadb），单机运行：向量库由后台 worker 进程"
-    "内嵌的 chroma server 承载（数据唯一所有者），CLI/UI/MCP 客户端经 HttpClient 访问。"
+    "底层是腾讯 Hy-Memory SDK 2.0.5（chromadb），单机运行：向量库由 `hy-mem serve` "
+    "长驻进程承载（数据唯一所有者），worker 只是队列消费者，CLI/UI/MCP 客户端经 "
+    "HttpClient 访问。"
 )
 
 INVOCATION = {
@@ -133,6 +134,7 @@ ENV_VARS = [
     ("HY_MEM_NO_PROBE", "1", "为空结果时的嵌入端点自证探测（默认开，约 300ms）"),
     ("HY_MEM_ASYNC", "1", "设为 1 时 add 默认走队列"),
     ("HY_MEM_TUI", "0", "关掉方向键交互，回到编号菜单"),
+    ("HY_MEM_LANG", "zh|en", "界面语言（交互界面与常用命令文案）；覆盖 config.json 的 lang"),
     ("HY_MEM_MOUSE", "1", "启用鼠标上报（默认关；开着会抢走终端的拖选与右键复制）"),
     ("HY_MEM_CONFIG", "路径", "覆盖 config.json 位置"),
     ("HY_MEM_HOME", "路径", "覆盖安装根目录"),
@@ -252,7 +254,8 @@ CMD_META: dict[str, dict] = {
             "config": "{ok, path, exists, mode, embedding{model,dims,provider,apiKeySet}, llm{...keySet}, dataDir, minScore}",
             "validate": "{ok, checks:[{name,pass,detail}]}",
         },
-        "notes": ["set 用点路径，例如 embedding.model=xxx；改嵌入相关字段后要自己确认维度一致。"],
+        "notes": ["set 用点路径，例如 embedding.model=xxx；改嵌入相关字段后要自己确认维度一致。",
+                  "界面语言：hy-mem config set lang=en（或设置页的「界面语言」），立即生效。"],
     },
     "user": {
         "group": "配置",
@@ -474,6 +477,21 @@ CMD_META: dict[str, dict] = {
         "examples": ["hy-mem --json archive --by tag", "hy-mem --json archive --by layer"],
         "output": {"resp": "{ok, by, groups:[{key, n}]}"},
         "notes": ["条数接近阈值（默认 200/500）时，reconcile 开销会拖慢写入。"],
+    },
+    "log": {
+        "group": "诊断",
+        "when": "回看「刚才那条命令到底跑了什么、为什么失败」——尤其是交互界面或 worker 里发生的失败，终端滚动缓冲早就没了。",
+        "mutates": "--clear 会清空日志文件",
+        "examples": ["hy-mem log", "hy-mem log -n 10", "hy-mem --json log -n 5", "hy-mem log --clear"],
+        "output": {
+            "entries": "[{time, cmd, status, duration, summary}] 最旧在前",
+            "path": "ops.log 绝对路径（在数据目录下）",
+            "keep": "只保留最近多少条（固定 50）",
+        },
+        "notes": [
+            "只保留最近 50 条，追加时自动截断；密钥类参数（apiKey/token/secret/password）打码为 ***。",
+            "add/update/search 的正文与查询词刻意不记录——日志不该成为记忆内容的第二份明文副本。",
+        ],
     },
 }
 

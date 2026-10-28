@@ -60,6 +60,9 @@ DEFAULTS: dict[str, Any] = {
     "setupComplete": False,
     "setupSkipped": False,
     "mode": "pro",
+    # 界面语言（zh / en）。放顶层而不是 ui.language：后者是历史遗留、从未生效，
+    # 真正决定文案的是 i18n.lang()，它读的就是这个字段。
+    "lang": "zh",
     "embedding": {
         "preset": "qwen-flash",
         "provider": "openai",
@@ -268,8 +271,18 @@ def identity_source(cfg: dict | None = None) -> str:
 
 
 def identity_label(uid: str) -> str:
-    """把内部 id 翻成给人看的名字：default → 通用（default）。"""
-    return f"{GENERAL_LABEL}（{uid}）" if uid == GENERAL_USER_ID else uid
+    """把内部 id 翻成给人看的名字：default → 通用（default）。
+
+    文案走 i18n（延迟 import：本模块被 i18n 自己依赖，顶层导入会绕成环）。
+    """
+    if uid != GENERAL_USER_ID:
+        return uid
+    try:
+        from i18n import tr
+
+        return tr("通用（{}）", uid)
+    except Exception:  # noqa: BLE001
+        return f"{GENERAL_LABEL}（{uid}）"
 
 
 def set_user_id(uid: str) -> tuple[Path, str]:

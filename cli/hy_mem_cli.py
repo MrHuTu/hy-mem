@@ -243,6 +243,10 @@ _EXIT_CODES = {
     130: "E_INTERRUPTED",
 }
 
+# 最后一次 fail() 的错误码与消息。fail() 是「正常返回错误码」而不是抛异常，
+# 操作日志要记下失败原因就得从这里拿（见 _record_operation）。
+_LAST_FAIL: tuple[str, str] | None = None
+
 
 def fail(msg: str, code: int = EXIT_RUNTIME, hint: str = "", extra: dict | None = None, err_code: str | None = None) -> int:
     """报错。--json 时在 stdout 也留一份结构化错误，agent 不必去解析 stderr。
@@ -252,6 +256,8 @@ def fail(msg: str, code: int = EXIT_RUNTIME, hint: str = "", extra: dict | None 
     err_code 允许调用方给出比数字退出码更精确的枚举（如 E_CONFIG）；
     extra 用于附加机器可读的细节（例如配置缺项清单），合并进 error 对象。
     """
+    global _LAST_FAIL
+    _LAST_FAIL = (err_code or _EXIT_CODES.get(code, "E_RUNTIME"), msg)
     if _JSON:
         err = {"code": err_code or _EXIT_CODES.get(code, "E_RUNTIME"), "message": msg, "hint": hint}
         if extra:
@@ -349,6 +355,8 @@ def readiness(cfg: dict | None = None) -> dict:
 
 def _report_missing(state: dict, action: str) -> int:
     """把缺项清单打成人能照着做的样子（--json 走结构化错误）。"""
+    global _LAST_FAIL
+
     import config as cfgmod
 
     missing = state["missing"]
@@ -385,6 +393,9 @@ def _report_missing(state: dict, action: str) -> int:
         print(f"hy-mem: {msg}", file=sys.stderr)
         for m in missing:
             print(f"  - {m['item']}: {m['what']} → {m['fix']}", file=sys.stderr)
+    # 这条路径是「直接打印 + 返回退出码」，没经过 fail()：手动补一次，
+    # 否则操作日志里只剩一个 FAIL、看不出是配置不全（ops.log 靠它记原因）
+    _LAST_FAIL = ("E_CONFIG", msg)
     return EXIT_USAGE
 
 
@@ -780,16 +791,76 @@ def cmd_doctor(args) -> int:
         f"  [{'PASS' if c['pass'] else 'FAIL'}] {c['name']}: {c['detail']}"
         for c in report["checks"]
     )
-    human = ("环境可用" if report["ok"] else "环境不可用") + "\n" + human
+    import i18n
+
+    human = (i18n.tr("环境可用") if report["ok"] else i18n.tr("环境不可用")) + "\n" + human
     emit(report, args.json, human)
     return EXIT_OK if report["ok"] else EXIT_USAGE
+
+
+_SURROGATE_RE = None
+
+
+def _strip_surrogates(text: str) -> tuple[str, int]:
+    """剔除孤立的代理项（U+D800–U+DFFF）。返回 (清理后文本, 剔除个数)。
+
+    为什么必须清：孤立代理项一进 utf-8 编码就抛
+    `UnicodeEncodeError: 'utf-8' codec can't encode character '\\udcaa'
+     in position N: surrogates not allowed`，而且抛出点在建 HTTP 请求体的
+    路上，离真正的输入处隔了好几层，看起来像是密钥/地址的错。
+    """
+    global _SURROGATE_RE
+    if _SURROGATE_RE is None:
+        import re
+
+        _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+    clean, n = _SURROGATE_RE.subn("", text or "")
+    return clean, n
+
+
+def _decode_stdin(raw: bytes) -> tuple[str, str]:
+    """stdin 字节 → 文本，返回 (文本, 实际用到的编码)。
+
+    为什么不用 `sys.stdin.read()`：冻结进程（PyInstaller）的 stdin 编码是
+    **系统 locale（中文 Windows 上是 cp936）**，而错误处理是 surrogateescape。
+    上游按 UTF-8 管道喂中文时，cp936 会把字节切错，剩下的零头变成孤立代理项
+    ——2026-10-28 线上事故就是这么来的：`printf '刘德华…' | hy-mem add`
+    直接炸 `'\\udcaa' ... surrogates not allowed`，提示还指到密钥上去了。
+
+    所以一律按字节读、自己解码：BOM 优先 → UTF-8 → GBK（cmd.exe 的历史习惯）
+    → 最后兜底 replace，任何情况下都不把孤立代理项带进后续流程。
+    """
+    if not raw:
+        return "", "utf-8"
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw[3:].decode("utf-8", "replace"), "utf-8-sig"
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16", "replace"), "utf-16"
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace"), "utf-8/replace"
 
 
 def _read_text(arg_text: str | None) -> str:
     text = arg_text
     if text is None:
-        text = sys.stdin.read()
-    return (text or "").strip()
+        buf = getattr(sys.stdin, "buffer", None)
+        if buf is not None:
+            text, enc = _decode_stdin(buf.read())
+            if enc not in ("utf-8", "utf-8-sig", "utf-16"):
+                # 兼容旧习惯，但必须说破：猜错会写成乱码，静默最糟
+                print(f"hy-mem: 警告：stdin 不是 UTF-8，已按 {enc} 解码；"
+                      "建议改 `chcp 65001` 或直接把内容作为参数传入", file=sys.stderr)
+        else:
+            text = sys.stdin.read()
+    text, dropped = _strip_surrogates(text or "")
+    if dropped:
+        print(f"hy-mem: 警告：输入里有 {dropped} 个无法编码的字符（多来自非 UTF-8 "
+              "终端/管道），已剔除；内容可能不完整", file=sys.stderr)
+    return text.strip()
 
 
 def _split_lines(text: str) -> list[str]:
@@ -2366,6 +2437,47 @@ def cmd_archive(args) -> int:
 # --------------------------------------------------------------------------
 # 配置 / 向导 / 交互界面
 # --------------------------------------------------------------------------
+def cmd_log(args) -> int:
+    """最近的操作日志（默认 50 条）。
+
+    记录点在 main() 里统一做（见 _record_operation），这里只负责读和清。
+    不做 --follow：日志是用来事后回看「刚才那条命令到底跑了什么」的，
+    不是监控流；多一个长驻模式只会多一处要维护的退出路径。
+    """
+    import i18n
+    import oplog
+
+    try:
+        p = oplog.path()
+    except Exception as e:  # noqa: BLE001
+        return fail(i18n.tr("读取失败：{}", f"{type(e).__name__}: {e}"), EXIT_RUNTIME)
+
+    if args.clear:
+        try:
+            oplog.clear()
+        except Exception as e:  # noqa: BLE001
+            return fail(i18n.tr("清空失败：{}", f"{type(e).__name__}: {e}"), EXIT_RUNTIME)
+        return ok(
+            {"ok": True, "path": str(p), "cleared": True},
+            args.json,
+            f"{i18n.tr('日志已清空')}  {p}",
+        )
+
+    lines = oplog.recent(args.limit)
+    entries = [oplog.parse(ln) for ln in lines]
+    payload = {
+        "ok": True,
+        "path": str(p),
+        "keep": oplog.MAX_KEEP,
+        "count": len(entries),
+        "entries": entries,
+    }
+    if not lines:
+        return ok(payload, args.json, f"{i18n.tr('（还没有操作记录）')}\n  {p}")
+    head = f"{i18n.tr('操作日志')}  {len(entries)}/{oplog.MAX_KEEP}  {p}"
+    return ok(payload, args.json, "\n".join([head, ""] + lines))
+
+
 def cmd_help(args) -> int:
     """命令说明。--json 是给智能体的入口：一次读完所有参数与语义。"""
     import helptext
@@ -2454,6 +2566,7 @@ def cmd_version(args) -> int:
     """版本与安装信息。自动升级就靠它：比对版本 + 定位要替换的安装根。"""
     import config as cfgmod
     import helptext
+    import i18n
     import install_ops
 
     frozen = bool(getattr(sys, "frozen", False))
@@ -2477,7 +2590,11 @@ def cmd_version(args) -> int:
         "configured": configured,
         "dataDir": data_dir or str(root / "data"),
     }
-    human = f"hy-mem {payload['version']}（{'exe' if frozen else '源码'}模式）\n  安装根 {payload['installRoot']}\n  数据目录 {payload['dataDir']}"
+    human = (
+        i18n.tr("hy-mem {}（{}模式）", payload["version"], i18n.tr("exe") if frozen else i18n.tr("源码"))
+        + "\n  " + i18n.tr("安装根 {}", payload["installRoot"])
+        + "\n  " + i18n.tr("数据目录 {}", payload["dataDir"])
+    )
     return ok(payload, args.json, human)
 
 
@@ -2729,19 +2846,23 @@ def cmd_config(args) -> int:
     }
     if args.json:
         return ok(payload, True)
+    import i18n
+
+    t = i18n.tr
     lines = [
-        f"配置文件  {payload['path']}" + ("" if payload["exists"] else "  （尚未创建，运行 hy-mem setup）"),
+        t("配置文件  {}", payload["path"])
+        + ("" if payload["exists"] else t("  （尚未创建，运行 hy-mem setup）")),
         "",
-        f"身份      {payload['identity']['label']}   （hy-mem user 可切换）",
-        f"运行模式  {payload['mode']}",
-        f"向量模型  {emb.get('model')}  ({emb.get('dims')} 维, {emb.get('provider')})",
-        f"嵌入入口  {emb.get('baseUrl') or '（本地 ONNX）'}",
-        f"嵌入密钥  {'已设置' if emb.get('apiKey') else '未设置'}",
-        f"LLM 模型  {llm.get('model')} @ {llm.get('baseUrl')}",
-        f"LLM 密钥  {'已设置' if payload['llm']['keySet'] else '未设置'}"
-        + (f"（来自 ${llm.get('keyEnv')}）" if llm.get("keyEnv") and not llm.get("apiKey") else ""),
-        f"存储目录  {payload['dataDir']}",
-        f"检索阈值  {payload['minScore']}",
+        t("身份      {}   （hy-mem user 可切换）", payload["identity"]["label"]),
+        t("运行模式  {}", payload["mode"]),
+        t("向量模型  {}  ({} 维, {})", emb.get("model"), emb.get("dims"), emb.get("provider")),
+        t("嵌入入口  {}", emb.get("baseUrl") or t("（本地 ONNX）")),
+        t("嵌入密钥  {}", t("已设置") if emb.get("apiKey") else t("未设置")),
+        t("LLM 模型  {} @ {}", llm.get("model"), llm.get("baseUrl")),
+        t("LLM 密钥  {}", t("已设置") if payload["llm"]["keySet"] else t("未设置"))
+        + (t("（来自 ${}）", llm.get("keyEnv")) if llm.get("keyEnv") and not llm.get("apiKey") else ""),
+        t("存储目录  {}", payload["dataDir"]),
+        t("检索阈值  {}", payload["minScore"]),
     ]
     return ok(payload, False, "\n".join(lines))
 
@@ -3084,6 +3205,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--max-scan", type=int, default=2000, help="--by layer 时最多扫描条数")
     ps.set_defaults(func=cmd_archive)
 
+    ps = sub.add_parser("log", help="最近的操作日志（默认 50 条）")
+    ps.add_argument("-n", "--limit", type=int, default=50, help="返回最近 N 条（最多保留 50 条）")
+    ps.add_argument("--clear", action="store_true", help="清空日志（不可恢复）")
+    ps.set_defaults(func=cmd_log)
+
     return p
 
 
@@ -3145,6 +3271,63 @@ def cmd_mcp(args) -> int:
     return mcp_server.serve()
 
 
+def _sub_argv(argv: list[str], cmd: str) -> list[str]:
+    """从（已提升全局选项的）argv 里切出「子命令 + 它自己的参数」。
+
+    为什么不能直接取 argv：全局选项被 hoist 到最前面了，argv[0] 往往是
+    `--json` 而不是子命令；日志摘要要靠它判断「哪些位置参数是正文」。
+    """
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _GLOBAL_FLAGS:
+            i += 1
+            continue
+        if tok in _GLOBAL_VALUED:
+            i += 2
+            continue
+        name = tok.split("=", 1)[0]
+        if "=" in tok and (name in _GLOBAL_VALUED or name in _GLOBAL_FLAGS):
+            i += 1
+            continue
+        return [tok] + list(argv[i + 1:])
+    return [cmd] if cmd else []
+
+
+def _record_operation(args, argv: list[str], seconds: float, rc: int, exc) -> None:
+    """把这次执行写进操作日志。
+
+    只在这一处记：交互界面的每次操作都是一次子进程调用，同样经过 main()，
+    所以不用在几十个 cmd_* 里各插一行 —— 少一处记录点就少一处漏记。
+    """
+    cmd = str(getattr(args, "cmd", "") or "")
+    if cmd in ("mcp", "log"):
+        # mcp 是协议模式（stdout 属于宿主，别碰）；log 自己读日志，
+        # 记它只会把真正的操作挤出 50 条窗口
+        return
+    # 失败原因有两种来路：异常走 classify_error（在 oplog 里做），
+    # 「已判定为错、正常返回退出码」的走 fail() / _report_missing 留下的那一句；
+    # 都没有就只记退出码对应的枚举，至少能看出是用法错还是运行时错
+    if exc is not None:
+        error = exc
+    elif rc != 0:
+        error = f"{_LAST_FAIL[0]} {_LAST_FAIL[1]}" if _LAST_FAIL else _EXIT_CODES.get(rc, "E_RUNTIME")
+    else:
+        error = None
+    try:
+        import oplog
+
+        oplog.record(
+            _sub_argv(argv, cmd),
+            rc,
+            seconds,
+            error=error,
+            verbose=bool(getattr(args, "verbose", False)),
+        )
+    except Exception:  # noqa: BLE001
+        pass  # 日志是附加能力：写不进去也不能改变命令本身的退出码
+
+
 def main(argv=None) -> int:
     _force_utf8()
     load_env()
@@ -3170,7 +3353,7 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv_list)
 
-    global _QUIET, _FIELDS, _JSON
+    global _QUIET, _FIELDS, _JSON, _LAST_FAIL
     _QUIET = bool(getattr(args, "quiet", False))
     _JSON = bool(getattr(args, "json", False))
     _FIELDS = [f.strip() for f in str(getattr(args, "fields", "") or "").split(",") if f.strip()]
@@ -3265,24 +3448,33 @@ def main(argv=None) -> int:
             print()
             return EXIT_OK
 
+    # 计时与记录都放在这一处：CLI 直调与交互界面（子进程调 CLI）共用同一条路径，
+    # 于是 ops.log 覆盖全部子命令，无需在几十个 cmd_* 里各记一次。
+    started = time.time()
+    exc: BaseException | None = None
+    _LAST_FAIL = None
     try:
-        return args.func(args)
+        rc = args.func(args)
     except KeyboardInterrupt:
-        return fail("已中断", 130)
+        rc = fail("已中断", 130)
     except Exception as e:  # noqa: BLE001
         # 交互层用 Aborted 表示「用户取消」，那不是错误，不该打堆栈或 exit 2
         if type(e).__name__ == "Aborted":
             print()
             print("hy-mem: 已取消", file=sys.stderr)
-            return EXIT_OK
-        code, err_code, hint = classify_error(e)
-        if getattr(args, "verbose", False):
-            import traceback
+            rc = EXIT_OK
+        else:
+            exc = e
+            code, err_code, hint = classify_error(e)
+            if getattr(args, "verbose", False):
+                import traceback
 
-            traceback.print_exc()
-        # --json 的结构化错误由 fail() 统一输出（_JSON 已置位）——别在这里
-        # 手工再 print 一份：曾经两处各打一行，agent 会收到两行 JSON。
-        return fail(error_detail(e), code, hint=hint, err_code=err_code)
+                traceback.print_exc()
+            # --json 的结构化错误由 fail() 统一输出（_JSON 已置位）——别在这里
+            # 手工再 print 一份：曾经两处各打一行，agent 会收到两行 JSON。
+            rc = fail(error_detail(e), code, hint=hint, err_code=err_code)
+    _record_operation(args, argv_list, time.time() - started, rc, exc)
+    return rc
 
 
 if __name__ == "__main__":

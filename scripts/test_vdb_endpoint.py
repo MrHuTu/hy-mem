@@ -107,6 +107,32 @@ def main() -> int:
     vdb_endpoint.remove_port_file()  # 幂等
     check("重复删除不抛错", True)
 
+    # ---- 1b. pid 复用 ----
+    # 现场：被强杀的 serve 留下登记（pid 209972），几分钟后该 pid 被系统分给了
+    # 一个 node 进程。只看 pid_alive 会认定「主人还活着」，心跳却永远连不上，
+    # 于是整轮命令全抛 EndpointUnavailable。判据换成进程创建时间。
+    print("\npid 复用：登记指向的已经不是我们的 serve")
+    now = time.time()
+    check("没有 started_at 的老登记 → 不判复用",
+          vdb_endpoint.pid_reused({"pid": os.getpid(), "started_at": 0}) is False)
+    check("创建时间早于登记 → 同一进程，不判复用",
+          vdb_endpoint.pid_reused({"pid": os.getpid(), "started_at": now}) is False)
+    check("创建时间晚于登记 → pid 已易主",
+          vdb_endpoint.pid_reused({"pid": os.getpid(), "started_at": now - 3600}) is True)
+
+    # 整条链路：复用登记不该把命令卡死，而应清残留 + 重新拉起
+    vdb_endpoint.write_port_file(12345)
+    _pf = json.loads(vdb_endpoint.port_file().read_text(encoding="utf-8"))
+    _pf["started_at"] = now - 3600
+    vdb_endpoint.port_file().write_text(json.dumps(_pf), encoding="utf-8")
+    try:
+        vdb_endpoint.ensure_endpoint(spawn=lambda: False, wait_s=0.2)
+        raised = ""
+    except vdb_endpoint.EndpointUnavailable as e:  # 事故形态：整轮命令全废
+        raised = str(e)
+    check("复用的登记不会抛 EndpointUnavailable", not raised, raised)
+    check("复用的登记被清掉", vdb_endpoint.read_port_info() is None)
+
     # ---- 2. 心跳 ----
     print("\n心跳探测（仅本地回环）")
     closed = _free_port()

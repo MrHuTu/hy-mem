@@ -74,6 +74,66 @@ def pid_alive(pid: int | None) -> bool:
     return store.pid_alive(pid)
 
 
+def _proc_start_time(pid: int) -> float | None:
+    """进程创建时间（unix 秒）。拿不到返回 None —— 判定宁可放过，不可误杀。"""
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            k32 = ctypes.windll.kernel32
+            handle = k32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+            if not handle:
+                return None
+            try:
+                ctime, etime, ktime, utime = (wintypes.FILETIME() for _ in range(4))
+                if not k32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(ctime),
+                    ctypes.byref(etime),
+                    ctypes.byref(ktime),
+                    ctypes.byref(utime),
+                ):
+                    return None
+                ticks = (ctime.dwHighDateTime << 32) | ctime.dwLowDateTime
+                return ticks / 10_000_000 - 11644473600  # FILETIME → unix 纪元
+            finally:
+                k32.CloseHandle(handle)
+        stat = Path(f"/proc/{int(pid)}/stat").read_text()
+        # 第 22 个字段是 starttime（开机后的时钟滴答数）；comm 里可能有空格，从右往左数
+        fields = stat[stat.rfind(")") + 2:].split()
+        ticks = float(fields[19])
+        btime = 0.0
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                btime = float(line.split()[1])
+                break
+        return btime + ticks / os.sysconf("SC_CLK_TCK")
+    except Exception:  # noqa: BLE001  平台差异太大，拿不到就当不知道
+        return None
+
+
+def pid_reused(info: dict) -> bool:
+    """端口文件里的 pid 是不是被系统分配给了别的进程。
+
+    为什么必须判：Windows 的 pid 回收很快，一个被强杀的 serve 留下的登记
+    （pid 209972）几分钟后可能指向随便一个进程 —— node、explorer…… 只看
+    `pid_alive` 就会认定「主人还活着」，接着心跳当然连不上，于是**整轮命令
+    全部抛 EndpointUnavailable**：这正是 2026-10-28 那次「一个会话全废」的
+    另一种入口（实测撞到过：登记说 serve，实际是个 node 进程）。
+
+    判据用进程创建时间：serve 登记 started_at 时自己早就起来了，所以
+    `创建时间 <= started_at`；反过来就说明这个 pid 已经换了人间。
+    """
+    started = float(info.get("started_at") or 0)
+    if started <= 0:
+        return False  # 老格式登记（没有 started_at），没有证据就不动
+    created = _proc_start_time(int(info.get("pid") or 0))
+    if created is None:
+        return False  # 拿不到创建时间（权限/非 /proc 系统）：保持原有语义
+    return created > started + 3.0
+
+
 def write_port_file(port: int, owner: str = OWNER_LABEL, pid: int | None = None) -> None:
     data = {
         "port": int(port),
@@ -381,6 +441,9 @@ def ensure_endpoint(spawn: Callable[[], bool] | None = None,
 
     info = read_port_info()
     owner_alive = bool(info and pid_alive(info["pid"]))
+    if owner_alive and info and pid_reused(info):
+        # pid 被系统复用了：那不是我们的 serve，登记等同于残留
+        owner_alive = False
     if info and not owner_alive:
         # 主人已经没了：残留登记会误导后续所有客户端，清掉再拉
         remove_port_file(expect_pid=info["pid"])
@@ -407,7 +470,7 @@ def ensure_endpoint(spawn: Callable[[], bool] | None = None,
 
     # 期间可能有人抢先在起主人：再确认一次，避免把「正在启动」误判为「没人」
     info2 = read_port_info()
-    if info2 and pid_alive(info2["pid"]):
+    if info2 and pid_alive(info2["pid"]) and not pid_reused(info2):
         raise EndpointUnavailable(
             f"向量库服务（pid {info2['pid']}, :{info2['port']}）已登记但未在 "
             f"{wait_s:.0f}s 内就绪。可跑 `hy-mem serve` 手动启动看报错。"

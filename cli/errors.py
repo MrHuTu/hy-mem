@@ -15,6 +15,21 @@ EXIT_USAGE = 1
 EXIT_RUNTIME = 2
 EXIT_INTERNAL = 3
 
+
+def _tr(text: str) -> str:
+    """提示文案翻成当前界面语言。
+
+    刻意延迟 import：本模块被 MCP 与 CLI 共用，而 i18n 依赖 config，
+    顶层导入会在 MCP 那种「只加载最少模块」的进程里平白拉起配置层。
+    拿不到 i18n 就返回中文原文 —— 提示总得有，语言是次要的。
+    """
+    try:
+        from i18n import tr
+
+        return tr(text)
+    except Exception:  # noqa: BLE001
+        return text
+
 # 2 与 3 的分界线是「能不能靠改配置/换网络解决」：端点、密钥、维度、文件
 # 权限属于 2；TypeError/KeyError 这类只可能是程序自己写错了，属于 3。
 _RUNTIME_TYPES = {
@@ -33,6 +48,19 @@ def classify_error(e: BaseException) -> tuple[int, str, str]:
     if name == "Aborted":
         return EXIT_OK, "CANCELLED", ""
     if name == "UnicodeEncodeError":
+        msg = str(e)
+        if "surrogate" in msg:
+            # 孤立代理项：输入侧的问题，不是密钥。2026-10-28 事故里这条被
+            # 误报成「密钥含中文」，用户照着改了三次密钥都没用 —— 因为真正
+            # 的源头是管道/终端的编码把 UTF-8 字节切出了 \udcXX。
+            return (
+                EXIT_USAGE,
+                "E_ENCODING",
+                _tr(
+                    "写入内容里有无法编码的字符（多为终端/管道不是 UTF-8）："
+                    "改用参数直传 `hy-mem add \"内容\"`，或先 `chcp 65001` 再管道"
+                ),
+            )
         # 典型是 HTTP 头里有非 ASCII（http.client / httpx 都按 latin-1/ascii 编码
         # 请求头），**请求根本没发出去**。这是「输入内容不对」，不是网络故障，
         # 所以给 1（改配置能解决）而不是 2。
@@ -40,22 +68,28 @@ def classify_error(e: BaseException) -> tuple[int, str, str]:
         return (
             EXIT_USAGE,
             "E_CONFIG",
-            "密钥或地址里含非 ASCII 字符（中文/全角/零宽），只能是 ASCII；"
-            "重跑 hy-mem setup --step embedding 重新填一次",
+            _tr(
+                "密钥或地址里含非 ASCII 字符（中文/全角/零宽），只能是 ASCII；"
+                "重跑 hy-mem setup --step embedding 重新填一次"
+            ),
         )
     if name in _INTERNAL_TYPES:
-        return EXIT_INTERNAL, "E_INTERNAL", "这多半是程序缺陷：加 --verbose 复跑可拿到堆栈"
+        return EXIT_INTERNAL, "E_INTERNAL", _tr("这多半是程序缺陷：加 --verbose 复跑可拿到堆栈")
     if name == "EndpointUnavailable":
         # 向量库服务活着却连不上：明确失败，绝不静默回落嵌入式读旧索引
         return (
             EXIT_RUNTIME,
             "E_ENDPOINT",
-            "向量库服务异常：先 `hy-mem serve` 看它的报错，或 `hy-mem doctor` 自检；"
-            "确认无误后可以 `hy-mem queue` 观察后台任务是否卡住",
+            _tr(
+                "向量库服务异常：先 `hy-mem serve` 看它的报错，或 `hy-mem doctor` 自检；"
+                "确认无误后可以 `hy-mem queue` 观察后台任务是否卡住"
+            ),
         )
     if name in _RUNTIME_TYPES:
-        return EXIT_RUNTIME, "E_RUNTIME", "先跑 `hy-mem doctor`；嵌入密钥无效用 `hy-mem setup --step embedding`"
-    return EXIT_RUNTIME, "E_RUNTIME", "加 --verbose 复跑可看到详细堆栈"
+        return EXIT_RUNTIME, "E_RUNTIME", _tr(
+            "先跑 `hy-mem doctor`；嵌入密钥无效用 `hy-mem setup --step embedding`"
+        )
+    return EXIT_RUNTIME, "E_RUNTIME", _tr("加 --verbose 复跑可看到详细堆栈")
 
 
 def error_detail(e: BaseException) -> str:
