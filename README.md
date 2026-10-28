@@ -77,10 +77,12 @@ hy-mem/
 │   ├── setup_wizard.py    # 设置向导
 │   └── ...
 ├── skill/                 # Skill 定义
-├── scripts/               # 辅助脚本
+├── scripts/               # 业务脚本（构建 / 提交闸门 / 测试套件）
 │   ├── build_exe.py      # 打包脚本
+│   ├── check_secrets.py  # 提交前密钥扫描
 │   ├── test_cli.py       # CLI 测试
 │   └── ...
+├── .local-test/           # 本地临时脚本（探针 / 实验 / bug 复现），整目录不入库
 ├── data/                  # 数据目录
 │   ├── data/             # 记忆数据（SQLite + 向量库）
 │   ├── logs/             # 日志

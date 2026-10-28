@@ -25,7 +25,7 @@
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **48 个 py，17081 行**（`cli/` 20 个 12014 行 + `scripts/` 28 个 5067 行） | `cat cli/*.py scripts/*.py \| wc -l` |
+| 源码规模 | **33 个 py，15436 行**（`cli/` 20 个 12033 行 + `scripts/` 13 个 3403 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
 | 测试用例 | **421**（CLI 84 / UI 94 / setup 103 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 29 / encoding 10） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 34 MB）；对外分发 `dist/hy-mem-0.9.11-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
@@ -71,17 +71,25 @@ D:\tools_open\agent-bridge\
 │   ├── presets.py       (239) ← 向量/LLM/模式预设（数字全部实测，别凭想象改 dims）
 │   └── local_embedder.py (112) ← 本地 ONNX 嵌入（零 key 备选，512 维，fastembed）
 │
-├── scripts\                   ← 构建与测试（不进产物）
-│   ├── build_exe.py     (500) ← 打包主脚本：消毒 → SKILL.md → 启动器/说明 → 压缩包 → 清历史
-│   ├── test_cli.py      (325) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
-│   ├── test_ui.py       (366) ← 按键与渲染 + 连续写入的循环语义（假终端，无需真 TTY）
-│   ├── test_setup.py    (457) ← 向导 / 存储运维 / 队列积压（不发网络请求）
-│   ├── test_vdb_endpoint.py (300) ← 端点层：归属校验 / 六个 ensure 分支 / pid 复用 / 真实 chroma 线程
-│   ├── test_encoding.py (130) ← stdin 解码链 + 代理项闸门 + **复刻事故环境**（PYTHONIOENCODING=gbk:surrogateescape）
-│   ├── test_oplog.py    (160) ← 操作日志：只留 50 条 / 脱敏 / 写不进去也不影响命令
-│   ├── test_i18n.py     (170) ← 中英切换：默认 zh 逐字不变 / en 生效 / 缺译回落
-│   ├── doctor.py         (88) ← 早期独立自检脚本（现已被 `hy-mem doctor` 取代，留作参考）
-│   └── bench_embed.py    (50) ← 嵌入模型跑分（dims / 延迟 / 区分度）
+├── scripts\                   ← **只放业务相关**：构建 / 提交闸门 / 密钥入口 / 产品测试套件（不进产物）
+│   ├── build_exe.py     (507) ← 打包主脚本：消毒 → SKILL.md → 启动器/说明 → 压缩包 → 清历史
+│   ├── check_secrets.py (260) ← 提交前密钥/隐私闸门（ERROR 挡提交，WARN 要人看一眼）
+│   ├── _secrets.py      (121) ← 密钥唯一入口：只读 `MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`
+│   ├── test_cli.py      (367) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
+│   ├── test_ui.py       (417) ← 按键与渲染 + 连续写入的循环语义（假终端，无需真 TTY）
+│   ├── test_setup.py    (471) ← 向导 / 存储运维 / 队列积压（不发网络请求）
+│   ├── test_vdb_endpoint.py (282) ← 端点层：归属校验 / 六个 ensure 分支 / pid 复用 / 真实 chroma 线程
+│   ├── test_encoding.py (118) ← stdin 解码链 + 代理项闸门 + **复刻事故环境**（PYTHONIOENCODING=gbk:surrogateescape）
+│   ├── test_oplog.py    (151) ← 操作日志：只留 50 条 / 脱敏 / 写不进去也不影响命令
+│   ├── test_i18n.py     (144) ← 中英切换：默认 zh 逐字不变 / en 生效 / 缺译回落
+│   ├── test_queue.py    (163) ← 队列核心（旧库迁移 / claim 原子性 / 退避 / 死信）
+│   ├── test_mcp.py      (252) ← MCP stdio 八工具端到端
+│   └── test_concurrency.py (150) ← 并发写 + 检索风暴（独立沙箱）
+│
+├── .local-test\               ← 临时/诊断脚本，**整目录 `.gitignore` 忽略、永不入库**
+│                                 probe_*（巡检/探针）、graph_ab_*（检索 A/B 实验）、
+│                                 bench_embed（嵌入跑分，presets 数字出处）、
+│                                 bug 复现、一次性迁移、历史遗留 doctor.py
 │
 ├── skill\hy-mem\SKILL.md      ← 面向调用方的用法说明（516 行）。打包时复制进产物
 ├── data\                      ← 源码环境的记忆库 + 队列库（整体备份）
@@ -95,6 +103,17 @@ D:\tools_open\agent-bridge\
 ```
 
 **别在这几处凭直觉改**：`helptext.py` 是帮助文本唯一真源（改命令必须同步改它）；`presets.py` 的 `dims` 必须与真实模型一致；`SKILL.md` 只改 `skill/hy-mem/SKILL.md`，宿主里的副本用 `hy-mem skill --install` 铺过去。
+
+**两个脚本目录别放错**（2026-10-28 约定的硬规则）：
+
+| 目录 | 放什么 | 进 git？ |
+| --- | --- | --- |
+| `scripts/` | **业务相关**：构建、提交闸门、密钥入口、产品测试套件 | ✅ 进 |
+| `.local-test/` | **临时/诊断**：探针巡检、A/B 实验、bug 复现、一次性迁移、历史遗留 | ❌ 整目录被 `.gitignore` 忽略 |
+
+- 排查 bug 时新写的脚本一律落 `.local-test/`，不要往 `scripts/` 里塞——仓库要公开，这类脚本最容易带上本机路径、内部主机名、测试数据。
+- `.local-test/` 脚本要 key 就加一行路径后 `import _secrets`（只读环境变量），**不许明文**；也不许指向真实库，跑前自己设 `HY_MEM_CONFIG` + `MEMORY_DATA_DIR` 沙箱。
+- 某个探针一旦成为发版必跑的门禁，就**转正**成 `scripts/test_*.py` 的用例并计入套件总数，别继续躺在 `.local-test/`。详见 `.local-test/README.md`。
 
 ---
 
@@ -160,8 +179,8 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 - 注入时同步补 `NO_PROXY=127.0.0.1,localhost`——chroma 的 httpx 吃代理环境变量与 Windows 系统代理，回环被代理劫持即 502（实测）。
 - 两个实测坑：chroma `Settings` 必须传 `is_persistent=True`（否则 server 静默变内存库，检索永远空）；`chroma_api_impl` 不可传 server 类（System 递归构造自爆）。
 - 第三个坑（同日二次事故，`tolist`）：跨进程写入落在向量段 brute force/queue 路径时 `GetResult.embeddings` 是 list，而 FastAPI 响应层硬编码 `cast(Embedding, e).tolist()` → **HTTP 的 `get`/`query` 一带 embeddings 就 500**；SDK 的 `get_by_ids`/`get_embeddings` 静默返回空 → `expand_evolution_chains` 整批走 fallback（`READ_EVOLUTION evolved_count=0`）→ superseded 条目漏进结果（「最美/最丑/最帅」三条同时返回，正是 0.9.9 首包的症状）。修法：`_patch_api_embeddings()` 在 API 实例的 `_get`/`_query` 出口把 list 归一化成 numpy，实例级包装，不依赖 `chroma_api_impl` 解析出的具体类（1.5.9 默认是 `RustBindingsAPI`，不是 `SegmentAPI`）。
-- 排查口诀：**检索多出历史版本 → 先验 HTTP 读 embeddings**（`scripts/probe_vdb_http.py`），失败就是上面那个坑，别一头钻进检索管线。
-- 分发前的两条实测：`scripts/probe_vdb_http.py`（已装 server 的 embeddings 契约）、`scripts/probe_mcp_stdio.py`（真实 stdio：initialize → tools/list → search/add）。两者默认指向 `D:\tools_open\hy-mem-0.9.9-win64`，可用 `HYMEM_EXE` 覆盖。
+- 排查口诀：**检索多出历史版本 → 先验 HTTP 读 embeddings**（`.local-test/probe_vdb_http.py`），失败就是上面那个坑，别一头钻进检索管线。
+- 分发前的两条实测：`.local-test/probe_vdb_http.py`（已装 server 的 embeddings 契约）、`.local-test/probe_mcp_stdio.py`（真实 stdio：initialize → tools/list → search/add）。两者默认指向 `dist/hy-mem/hy-mem.exe`，可用 `HYMEM_EXE` 覆盖。（这两个探针在 `.local-test/`，本机有、仓库里没有。）
 - 新增依赖 `fastapi` + `opentelemetry-instrumentation-fastapi`（chromadb 未把前者列为运行时依赖），打包需 `--collect-submodules fastapi uvicorn opentelemetry.instrumentation.fastapi`（uvicorn/otel 有 importlib 动态加载）。
 
 ### 3.3 终端显示口径：折行，不截断（0.9.10，改任何结果输出前必读）
@@ -651,7 +670,7 @@ ls -1 dist/ | grep -E "hy-mem|zip"
 | 数据目录位置 | 有意偏离规范 | 仍在安装根 `data/`，未改 `%LOCALAPPDATA%`（理由是「整包拷走即迁移」）。**未配置时也必须落在安装根**：`load_env()` 会把 `MEMORY_DATA_DIR` 预设成 `default_data_dir()`，否则首次运行写进 `~/.hy_memory`，向导一保存就「记忆消失」 |
 | JSON 字段命名 | 有意偏离 | 部分保留 camelCase（如 `userId` / `dataDir`） |
 | `hy-mem.spec` | 未使用 | `build_exe.py` 走命令行参数，不读 spec。改打包参数只改 `build_exe.py` |
-| `scripts/doctor.py` | 历史遗留 | 已被 `hy-mem doctor` 取代，留作参考，别在里面加逻辑 |
+| `.local-test/doctor.py` | 历史遗留、已移出仓库 | 早期 skill 漂移检测，已被 `hy-mem doctor` 取代；现放 `.local-test/`（不入库），别在里面加逻辑 |
 | scipy / sklearn | 未验证能否排除 | 若排除可再省 60~100MB，但有运行期风险，需实测 |
 | Hindsight 数据迁入 | 未执行 | 把外部记忆库导入 hy-mem 的一次性工作 |
 | 测试残留 | 已清 | 早期探针记忆（Loki/Apollo）与验证用队列条目已删除 |

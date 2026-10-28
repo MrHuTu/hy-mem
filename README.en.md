@@ -77,10 +77,12 @@ hy-mem/
 │   ├── setup_wizard.py    # Setup wizard
 │   └── ...
 ├── skill/                 # Skill Definitions
-├── scripts/               # Utility Scripts
+├── scripts/               # Project scripts (build / secret gate / test suites)
 │   ├── build_exe.py      # Packaging script
+│   ├── check_secrets.py  # Pre-commit secret scan
 │   ├── test_cli.py       # CLI Testing
 │   └── ...
+├── .local-test/           # Local scratch scripts (probes / experiments / repros), git-ignored
 ├── data/                  # Data Directory
 │   ├── data/             # Memory data (SQLite + Vector DB)
 │   ├── logs/             # Logs
