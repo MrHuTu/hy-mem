@@ -2,7 +2,10 @@ import json
 import math
 import urllib.request
 
-KEY = "sk-ws-H.YHMRXMM.Q3Xv.MEUCIQCpdXnYDjeFddFoQldPXS2LvunCurwj5_odLbse3-UhjgIgVDtUUtGg7pcgrtSgNqV7jkYBKVThXymf1zbxX4JYX_c"
+KEY = json.load(open(
+    __import__("os").path.join(__import__("os").path.dirname(__file__), "..", "config.json"),
+    encoding="utf-8",
+))["embedding"]["apiKey"]
 BASE = "https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1"
 
 QUERY = "活动报名的审批流怎么落库"

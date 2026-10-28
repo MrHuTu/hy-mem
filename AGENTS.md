@@ -19,18 +19,18 @@
 
 | 项 | 值 | 复核方式 |
 |---|---|---|
-| 版本 | `0.9.10`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
+| 版本 | `0.9.11`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
 | 语言/运行时 | Python **3.12.10**，venv 在 `.venv/` | `.venv/Scripts/python.exe -V` |
 | 核心 SDK | `hy-memory 2.0.5` | `.venv/Scripts/python.exe -m pip show hy-memory` |
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **24 个 py，14003 行**（`cli/` 18 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
-| 子命令 | **30** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；**0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **301**（UI 92 / setup 103 / CLI 84 / vdb 22） | 见 §8 |
-| 产物 | 目录 `dist/hy-mem/` **351 MB**（exe 本体 27.5 MB）；对外分发的是 `dist/hy-mem-0.9.5-win64.zip` **152 MB** | `du -sh dist/hy-mem dist/*.zip` |
+| 源码规模 | **48 个 py，17081 行**（`cli/` 20 个 12014 行 + `scripts/` 28 个 5067 行） | `cat cli/*.py scripts/*.py \| wc -l` |
+| 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
+| 测试用例 | **421**（CLI 84 / UI 94 / setup 103 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 29 / encoding 10） | 见 §8 |
+| 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 34 MB）；对外分发 `dist/hy-mem-0.9.11-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
-| 构建耗时 | 约 **110 s**（含压缩包 23 s） | 构建日志末行 |
+| 构建耗时 | 约 **196 s**（含压缩包 24 s） | 构建日志末行 |
 | 默认数据目录 | `<安装根>/data`（源码=`仓库/data`，exe=`dist/hy-mem/data`） | `hy-mem config show` |
 | 向量维度 | **1024**（`qwen3.7-text-embedding-flash`） | `hy-mem doctor` 的 `embedding_live` |
 | LLM | `deepseek-v4-flash` @ `https://newapi.jxdata.com:18000/v1`（推理模型） | `hy-mem config show` |
@@ -52,13 +52,15 @@ D:\tools_open\agent-bridge\
 │
 ├── cli\                       ← 全部业务代码（全部可改，改完必须跑测试）
 │   ├── _pyi_entry.py          ← 打包入口。只做两件事：冻结进程强制 UTF-8、转发 main
-│   ├── hy_mem_cli.py   (3040) ← 大脑：30 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
-│   ├── helptext.py      (579) ← 命令规格单一真源（`help` / `help --json` 的数据源）
-│   ├── config.py        (480) ← config.json 读写 + env 映射 + 校验 + 身份默认值（`MEMORY_DATA_DIR` 优先于配置文件）
+│   ├── hy_mem_cli.py   (3481) ← 大脑：31 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类 + stdin 解码链
+│   ├── helptext.py      (672) ← 命令规格单一真源（`help` / `help --json` 的数据源）
+│   ├── config.py        (499) ← config.json 读写 + env 映射 + 校验 + 身份默认值（`MEMORY_DATA_DIR` 优先于配置文件）
 │   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0；get_json(direct=True) 供回环探活
-│   ├── vdb_endpoint.py  (420) ← chroma server 端点层（0.9.10）：`serve` 独占数据 + owner 化的 server.port；客户端 ensure_endpoint 注入/复验 MEMORY_VECTOR_HOST/PORT，端点该在却连不上就抛 EndpointUnavailable（不静默降级）
+│   ├── vdb_endpoint.py  (484) ← chroma server 端点层（0.9.10）：`serve` 独占数据 + owner 化的 server.port；客户端 ensure_endpoint 注入/复验 MEMORY_VECTOR_HOST/PORT，端点该在却连不上就抛 EndpointUnavailable（不静默降级）；0.9.11 起用进程创建时间识破 pid 复用
 │   ├── setup_wizard.py  (654) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
-│   ├── menu.py          (740) ← 交互主界面 + 设置中心 + 12 个页面（子命令一律子进程派发）
+│   ├── menu.py          (907) ← 交互主界面 + 设置中心 + 13 个页面（子命令一律子进程派发；写记忆支持连续写入）
+│   ├── i18n.py          (434) ← 中英切换：中文原文当 key，`tr()` 缺译回落中文，语言来源 HY_MEM_LANG > config.lang > zh
+│   ├── oplog.py         (243) ← 操作日志：`<dataDir>/ops.log`，只留最近 50 条，正文/查询词不落盘，密钥打码
 │   ├── tui.py          (1367) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪 / 折行（wrap）
 │   ├── runtime_check.py (323) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
 │   ├── store.py         (511) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
@@ -71,9 +73,13 @@ D:\tools_open\agent-bridge\
 │
 ├── scripts\                   ← 构建与测试（不进产物）
 │   ├── build_exe.py     (500) ← 打包主脚本：消毒 → SKILL.md → 启动器/说明 → 压缩包 → 清历史
-│   ├── test_cli.py      (325) ← 73 项接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
-│   ├── test_ui.py       (366) ← 92 项按键与渲染（假终端，无需真 TTY）
-│   ├── test_setup.py    (457) ← 101 项向导 / 存储运维 / 队列积压（不发网络请求）
+│   ├── test_cli.py      (325) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
+│   ├── test_ui.py       (366) ← 按键与渲染 + 连续写入的循环语义（假终端，无需真 TTY）
+│   ├── test_setup.py    (457) ← 向导 / 存储运维 / 队列积压（不发网络请求）
+│   ├── test_vdb_endpoint.py (300) ← 端点层：归属校验 / 六个 ensure 分支 / pid 复用 / 真实 chroma 线程
+│   ├── test_encoding.py (130) ← stdin 解码链 + 代理项闸门 + **复刻事故环境**（PYTHONIOENCODING=gbk:surrogateescape）
+│   ├── test_oplog.py    (160) ← 操作日志：只留 50 条 / 脱敏 / 写不进去也不影响命令
+│   ├── test_i18n.py     (170) ← 中英切换：默认 zh 逐字不变 / en 生效 / 缺译回落
 │   ├── doctor.py         (88) ← 早期独立自检脚本（现已被 `hy-mem doctor` 取代，留作参考）
 │   └── bench_embed.py    (50) ← 嵌入模型跑分（dims / 延迟 / 区分度）
 │
@@ -83,9 +89,9 @@ D:\tools_open\agent-bridge\
 ├── .models\                   ← fastembed 的 ONNX 模型缓存（本地生成，不入库；首跑自动下载）
 ├── .venv\                     ← 虚拟环境（本地生成，不入库；pip install -r requirements.txt 重建）
 ├── build\                     ← PyInstaller 中间物（本地生成，不入库）
-└── dist\                      ← 产物（本地生成，不入库；`python scripts/build_exe.py` 约 110s）
+└── dist\                      ← 产物（本地生成，不入库；`python scripts/build_exe.py` 约 196s）
     ├── hy-mem\                ← 产物目录：_internal/ + hy-mem.exe + skill/ + 启动器 (+ 自用 config/data)
-    └── hy-mem-0.9.5-win64.zip ← 对外分发物（152MB，解压即完整目录）
+    └── hy-mem-0.9.11-win64.zip ← 对外分发物（178MB，解压即完整目录）
 ```
 
 **别在这几处凭直觉改**：`helptext.py` 是帮助文本唯一真源（改命令必须同步改它）；`presets.py` 的 `dims` 必须与真实模型一致；`SKILL.md` 只改 `skill/hy-mem/SKILL.md`，宿主里的副本用 `hy-mem skill --install` 铺过去。
@@ -170,6 +176,34 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 | 非交互（`cmd_search` / `cmd_list` / `cmd_history`） | 多行正文按原始缩进对齐展开（`pad = len(head)`），不再压平、不再按字符截断 |
 
 判定标准：管道或窄终端下逐行宽度 ≤ `term_width()`，且**任何一条记忆的 History 都能完整看到**（`scripts/test_ui.py` 的宽度裁剪用例守着这条）。
+
+### 3.4 stdin 编码：一律按字节读（0.9.11，改任何「从 stdin 收正文」的路径前必读）
+
+**禁止用 `sys.stdin.read()` 收记忆正文。** 冻结进程（PyInstaller）的 `sys.stdin` 是**系统 locale 编码 + surrogateescape**（中文 Windows = cp936），而上游按 UTF-8 喂字节：cp936 会把字节切错，剩下的零头变成孤立代理项 `\udcXX`，一路活到「建 HTTP 请求体」才炸：
+
+```
+UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17: surrogates not allowed
+```
+
+现场还把这句误报成「密钥或地址含非 ASCII」，照着改密钥永远修不好（2026-10-28 线上事故）。
+
+| 层 | 做法 |
+|---|---|
+| 读 | `hy_mem_cli._read_text` 读 `sys.stdin.buffer`，用 `_decode_stdin` 显式解：BOM → UTF-8 → GBK → `replace` 兜底；GBK 命中时 stderr 告警（猜错会写乱码，不能静默） |
+| 闸 | `_strip_surrogates` 在拼请求体之前剔除孤立代理项并告警，保证「无论如何都能 utf-8 编码」 |
+| 报 | `errors.classify_error` 按消息分流：含 `surrogate` → `E_ENCODING` 指向输入侧；`latin-1`/position N → 才是密钥/地址 |
+| 验 | `scripts/test_encoding.py`（含**复刻事故环境**的子进程用例：`PYTHONIOENCODING=gbk:surrogateescape` 下 `_read_text` 必须逐字正确） |
+
+反面教材：不要改成「把 stdin reconfigure 成 utf-8」——那样 `cmd.exe` 的 GBK 管道会变成一堆替换字符，静默乱码比报错更糟。
+
+### 3.5 操作日志与界面语言（0.9.11）
+
+| 机制 | 口径 |
+|---|---|
+| 操作日志 | `cli/oplog.py`：`<dataDir>/ops.log`，**只留最近 50 条**（超限截尾 + 原子替换）；在 `main()` 统一计时记退出码，CLI 与 TUI（子进程调 CLI）一次覆盖；`add/update/search` 的**正文与查询词不落盘**，密钥类参数打码 `***`；写失败静默（`--verbose` 才吭声），绝不影响命令。查看 `hy-mem log` 或设置页「操作日志」 |
+| 界面语言 | `cli/i18n.py`：中文原文当 key，`tr()` 缺译**回落中文**；优先级 `HY_MEM_LANG` > `config.lang` > `zh`；`hy-mem config set lang=en` 立即生效。覆盖交互界面全部页面 + 错误提示 + 常用命令摘要；命令行正文输出仍为中文（测试断言了大量中文字面量，默认 zh 必须逐字不变） |
+
+新增界面文案时：`menu.py` 用 `tr("中文")` 包一层并在 `i18n.EN` 补一行；忘记补只是回落中文，不会报错。
 
 ## 4. ⚠️ 两套完全独立的环境（最高频误解）
 
@@ -291,13 +325,16 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 
 | 套件 | 用例 | 覆盖 | 跑法 |
 |---|---|---|---|
-| `scripts/test_ui.py` | **92** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航 | `.venv/Scripts/python.exe scripts/test_ui.py` |
+| `scripts/test_ui.py` | **94** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航、**写记忆连续写入的循环语义** | `.venv/Scripts/python.exe scripts/test_ui.py` |
 | `scripts/test_setup.py` | **103** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像** | `.venv/Scripts/python.exe scripts/test_setup.py` |
 | `scripts/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
 | `scripts/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe scripts/test_queue.py` |
 | `scripts/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe scripts/test_concurrency.py [exe]` |
 | `scripts/test_mcp.py` | **22** | MCP stdio 八工具端到端：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe scripts/test_mcp.py [exe]` |
-| `scripts/test_vdb_endpoint.py` | **31** | 端点层契约：端口文件 owner 校验、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe scripts/test_vdb_endpoint.py` |
+| `scripts/test_vdb_endpoint.py` | **36** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe scripts/test_vdb_endpoint.py` |
+| `scripts/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe scripts/test_encoding.py` |
+| `scripts/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe scripts/test_oplog.py` |
+| `scripts/test_i18n.py` | **29** | 中英切换：默认 zh 逐字不变、`HY_MEM_LANG=en` 生效、缺译回落中文、`config set lang=en` 读到 en | `.venv/Scripts/python.exe scripts/test_i18n.py` |
 
 ```bash
 # 源码模式
@@ -309,7 +346,7 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe scripts/test_cli
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：三套全绿 + exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：九套全绿（cli 84 / ui 94 / setup 103 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 29 / encoding 10 = **421**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
 
 ---
 
@@ -607,7 +644,7 @@ ls -1 dist/ | grep -E "hy-mem|zip"
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 源码侧嵌入 key | **401 失效** | 源码 `config.json` 里是旧 key（`sk-ws-…YX_c`，**116 位**），exe 侧是新 key（`sk-ws-…g73m`，**117 位**）且正常。长度差 1 位，典型是复制时被截断。所以源码 doctor 报 `embedding_live FAIL`，exe 全 PASS。**要修就把 exe 那份 key 抄到源码 config.json** |
+| 源码侧嵌入 key | **401 失效** | 源码 `config.json` 里是旧 key（旧 key，**116 位**），exe 侧是新 key（新 key，**117 位**）且正常。长度差 1 位，典型是复制时被截断。所以源码 doctor 报 `embedding_live FAIL`，exe 全 PASS。**要修就把 exe 那份 key 抄到源码 config.json** |
 | 数据目录位置 | 有意偏离规范 | 仍在安装根 `data/`，未改 `%LOCALAPPDATA%`（理由是「整包拷走即迁移」）。**未配置时也必须落在安装根**：`load_env()` 会把 `MEMORY_DATA_DIR` 预设成 `default_data_dir()`，否则首次运行写进 `~/.hy_memory`，向导一保存就「记忆消失」 |
 | JSON 字段命名 | 有意偏离 | 部分保留 camelCase（如 `userId` / `dataDir`） |
 | `hy-mem.spec` | 未使用 | `build_exe.py` 走命令行参数，不读 spec。改打包参数只改 `build_exe.py` |
