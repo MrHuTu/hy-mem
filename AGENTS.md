@@ -28,7 +28,7 @@
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
 | 源码规模 | **34 个 py，15703 行**（`cli/` 20 个 12080 行 + `scripts/` 14 个 3623 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **451**（CLI 84 / UI 94 / setup 133 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 29 / encoding 10） | 见 §8 |
+| 测试用例 | **452**（CLI 84 / UI 95 / setup 133 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 29 / encoding 10） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 34 MB）；对外分发 `dist/hy-mem-0.9.11-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **196 s**（含压缩包 24 s） | 构建日志末行 |
@@ -353,7 +353,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 
 | 套件 | 用例 | 覆盖 | 跑法 |
 |---|---|---|---|
-| `scripts/test_ui.py` | **94** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航、**写记忆连续写入的循环语义** | `.venv/Scripts/python.exe scripts/test_ui.py` |
+| `scripts/test_ui.py` | **95** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航、**写记忆连续写入的循环语义** | `.venv/Scripts/python.exe scripts/test_ui.py` |
 | `scripts/test_setup.py` | **133** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）** | `.venv/Scripts/python.exe scripts/test_setup.py` |
 | `scripts/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
 | `scripts/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe scripts/test_queue.py` |
@@ -374,7 +374,7 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe scripts/test_cli
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：九套全绿（cli 84 / ui 94 / setup 133 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 29 / encoding 10 = **451**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：九套全绿（cli 84 / ui 95 / setup 133 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 29 / encoding 10 = **452**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
 
 ### 8.1 怎么测 CLI —— 四条铁律（2026-10-28 补，源自 401 事故）
 
@@ -802,7 +802,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 | 阶段 | 位置 | 入库 |
 |---|---|---|
 | 开发期红 → 绿 | `.local-test/repro_<slug>.py` / `case_<slug>.py` | ❌（整目录被忽略） |
-| 稳定后**转正** | `scripts/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 451** | ✅ |
+| 稳定后**转正** | `scripts/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 452** | ✅ |
 
 判据：这条用例是发版必跑的门禁吗？是 → 转正；只是一次性复现 → 留 `.local-test/`。
 
