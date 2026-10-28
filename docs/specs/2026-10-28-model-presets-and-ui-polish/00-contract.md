@@ -34,12 +34,12 @@
 
 | # | 根因 / 动机 | 分片 | 改动 | 状态 | commit |
 | --- | --- | --- | --- | --- | --- |
-| S1 | 预设 5+4 条，带区分度/延迟/维度三列指标，选择页 6~7 屏；用户只想要"选个主流模型" | `S1-presets.md` | `cli/presets.py`、`cli/i18n.py` | 已实现 | 待填 |
-| S2 | 继承候选链兜底写死 `MEMORY_EMBEDDER_API_KEY`，跨端点照用 → 401；且继承分支还多问一句"是否单独保存" | `S2-cross-endpoint-key.md` | `cli/setup_wizard.py`、`cli/config.py` | 已实现 | 待填 |
-| S3 | 第 2 次起打「写记忆（第 2 条）」标题；入队后又问「现在就跑一次 worker？」 | `S3-round-title.md` | `cli/menu.py`、`cli/i18n.py` | 已实现（随 S4 重构） | 待填 |
-| S4 | 箭头菜单一次操作要按 4~6 次键，「按任意键继续」打断流；`tui.clear()` 擦掉上一次结果 | `S4-shell.md` | `cli/menu.py`（整体重写）、`cli/hy_mem_cli.py`、`cli/i18n.py` | 已实现 | 待填 |
-| S5 | 控制台没有历史 / 补全 / 反查，按错一个字只能整行重打 | `S5-line-editing.md` | `cli/tui.py` | 已实现 | 待填 |
-| S6 | 没有一条测试保证"每个菜单都能进去再出来" | `S6-menu-sweep.md` | `scripts/test_menu.py` | 已实现 | 待填 |
+| S1 | 预设 5+4 条，带区分度/延迟/维度三列指标，选择页 6~7 屏；用户只想要"选个主流模型" | `S1-presets.md` | `cli/presets.py`、`cli/i18n.py` | 已实现 | e50f141 |
+| S2 | 继承候选链兜底写死 `MEMORY_EMBEDDER_API_KEY`，跨端点照用 → 401；且继承分支还多问一句"是否单独保存" | `S2-cross-endpoint-key.md` | `cli/setup_wizard.py`、`cli/config.py` | 已实现 | e50f141 |
+| S3 | 第 2 次起打「写记忆（第 2 条）」标题；入队后又问「现在就跑一次 worker？」 | `S3-round-title.md` | `cli/menu.py`、`cli/i18n.py` | 已实现（随 S4 重构） | e50f141 |
+| S4 | 箭头菜单一次操作要按 4~6 次键，「按任意键继续」打断流；`tui.clear()` 擦掉上一次结果 | `S4-shell.md` | `cli/menu.py`（整体重写）、`cli/hy_mem_cli.py`、`cli/i18n.py` | 已实现 | e50f141 |
+| S5 | 控制台没有历史 / 补全 / 反查，按错一个字只能整行重打 | `S5-line-editing.md` | `cli/tui.py` | 已实现 | e50f141 |
+| S6 | 没有一条测试保证"每个菜单都能进去再出来" | `S6-menu-sweep.md` | `scripts/test_menu.py` | 已实现 | e50f141 |
 
 ## 3. 变更记录（只追加）
 
@@ -55,12 +55,12 @@
 
 | 条款 | 分片 | commit | 产物 | 验收证据 |
 | --- | --- | --- | --- | --- |
-| C1 / C2 | S1 | 待填 | 待打包 | `test_setup.py`：向量预设恰 3 条 + 自定义、LLM 预设恰 3 条 + 自定义、向量不含 DeepSeek |
-| C3 / C4 / C5 | S2 | 待填 | 待打包 | `test_setup.py` Q4/Q8：换端点 → 不继承、`keyEnv` 指向新端点变量名、`resolve_embed_key()` 解析为空；同端点改模型 → 继承且不再追问 |
-| C6 / C7 | S3 | 待填 | 待打包 | 真 CLI 连写两条：第二次不出现「第 N 条」字样；入队后无「现在就跑一次 worker」 |
-| C8 | S6 | 待填 | 待打包 | `test_menu.py` 112 项全绿 |
-| C9 / C10 / C11 | S4 | 待填 | 待打包 | `printf 'help\nconfig\nqueue\nlog\nexit\n' \| hy-mem menu` 逐条执行并正常退出；stdout 无「按任意键继续」 |
-| C12 | S5 | 待填 | 待打包 | `test_ui.py` 15 项行编辑用例（↑历史 / Tab / Ctrl+R / Ctrl+D / Ctrl+K）全绿 |
+| C1 / C2 | S1 | e50f141 | 待打包 | `test_setup.py`：向量预设恰 3 条 + 自定义、LLM 预设恰 3 条 + 自定义、向量不含 DeepSeek |
+| C3 / C4 / C5 | S2 | e50f141 | 待打包 | `test_setup.py` Q4/Q8：换端点 → 不继承、`keyEnv` 指向新端点变量名、`resolve_embed_key()` 解析为空；同端点改模型 → 继承且不再追问 |
+| C6 / C7 | S3 | e50f141 | 待打包 | 真 CLI 连写两条：第二次不出现「第 N 条」字样；入队后无「现在就跑一次 worker」 |
+| C8 | S6 | e50f141 | 待打包 | `test_menu.py` 112 项全绿 |
+| C9 / C10 / C11 | S4 | e50f141 | 待打包 | `printf 'help\nconfig\nqueue\nlog\nexit\n' \| hy-mem menu` 逐条执行并正常退出；stdout 无「按任意键继续」 |
+| C12 | S5 | e50f141 | 待打包 | `test_ui.py` 15 项行编辑用例（↑历史 / Tab / Ctrl+R / Ctrl+D / Ctrl+K）全绿 |
 
 ## 5. 结论
 
