@@ -28,6 +28,7 @@
 | C9 | 命令名即子命令名 | 交互层不再自造一套菜单动作名。每条命令 `Command.name` 与 `hy-mem <name>` 子命令同名（`add` / `search` / `setup` …），别名只做输入便利（`a`、`s`、`ls`）。旧菜单 18 个功能项必须有明确承接，见 `S6-menu-sweep.md` 映射表 | `cli/menu.py::COMMANDS` |
 | C10 | 结果留在滚动区 | 一次操作结束即回到提示符，**不清屏、不「按任意键继续」、不重画表头**。只有 `clear` 命令自己清屏 | `cli/menu.py` |
 | C11 | 非 TTY 可管道驱动 | `hy-mem menu` 在 stdin 非 TTY 时逐行读命令、逐条执行，不降级成编号菜单；stdin EOF 等价 `Ctrl+D` 退出并打印「退出。」，**不得**在 EOF 上原地打转 | `cli/menu.py::run_menu`、`cli/tui.py::line(eof_is_exit=True)` |
+| C13 | 设置流程四段式（用户规范） | 设置模型（embedding / llm）必须按序：①等用户把 baseUrl / 模型 / key 补充完整——继承来的 key 也要明示来源（`_confirm_credentials` 三件套确认，可当场换 key，信息不齐不发探针）；②信息完整才测连通性；③不可用可重设（retry/save/abort 菜单）；④连通性通过后，**与旧配置有差异时**先摆出旧→新对比再问「覆盖旧配置？」（`_credential_diff`），无差异不问 | `cli/setup_wizard.py` |
 | C12 | 行编辑对齐 bash | ↑/↓ 与 `Ctrl+P/N` 翻历史（落盘 `<dataDir>/shell-history`，上限 300 条、单条截 200 字符、连续重复不记）、`Tab` 补全命令名与已知参数词、`Ctrl+R` 反查、`Ctrl+A/E` 行首行尾、`Ctrl+U/W/K` 删、`Ctrl+L` 清屏、`Ctrl+D` 空行退出、`Ctrl+C`/`Esc` 只放弃本行不退出会话 | `cli/tui.py::_line_edit` |
 
 ## 2. 分片表（根因表）
@@ -39,6 +40,7 @@
 | S3 | 第 2 次起打「写记忆（第 2 条）」标题；入队后又问「现在就跑一次 worker？」 | `S3-round-title.md` | `cli/menu.py`、`cli/i18n.py` | 已实现（随 S4 重构） | e50f141 |
 | S4 | 箭头菜单一次操作要按 4~6 次键，「按任意键继续」打断流；`tui.clear()` 擦掉上一次结果 | `S4-shell.md` | `cli/menu.py`（整体重写）、`cli/hy_mem_cli.py`、`cli/i18n.py` | 已实现 | e50f141 |
 | S5 | 控制台没有历史 / 补全 / 反查，按错一个字只能整行重打 | `S5-line-editing.md` | `cli/tui.py` | 已实现 | e50f141 |
+| S7 | 函数级桩测复现不了真实按键流（401 事故发生在「设置→选当前项→按 N」的 UI 流里）；且 C13 落地后需要 UI 级验证 | `S7-setup-ui-test.md` | `scripts/test_setup_ui.py` | 已实现 | 216545e |
 | S6 | 没有一条测试保证"每个菜单都能进去再出来" | `S6-menu-sweep.md` | `scripts/test_menu.py` | 已实现 | e50f141 |
 
 ## 3. 变更记录（只追加）
@@ -49,6 +51,7 @@
 | 2026-10-28 | C1 定为「向量 GPT/GLM/百炼qwen + 自定义」 | 用户选择：保留 qwen 作为独立预设，避免当前配置重选时落到自定义要手填端点 | S1 | 是（已问） |
 | 2026-10-28 | LLM 默认档位定为轻量档 | 用户选择：gpt-4o-mini / glm-4-flash / deepseek-chat | S1 | 是（已问） |
 | 2026-10-28 | 新增 C9~C12，分片表扩到 S1~S6 | 用户补充"ui 界面交互很多地方反人类，仿照 pi / bash shell 重做，别偷懒" —— 原 S4（worker 确认）/ S5（菜单扫描）被合并进 S3 / S6，空出的编号给控制台与行编辑 | S3 / S4 / S5 / S6 | 否（用户已给方向） |
+| 2026-10-28 | 新增 C13（设置四段式）与 S7（UI 级测试）；同时修掉 3 个「第二次配置」残留 bug：自定义分支 same_endpoint 写死 True、自定义配置默认光标落第 1 预设、ask_secret 空回车放行 | 用户给出明确交互规范（信息补齐→测连通→可重设→覆盖确认）；UI 级测试首跑红测抓到 | S2 / S7 | 是（用户已给规范） |
 | 2026-10-28 | C6 措辞从"第 2 次起不打标题"改为"任何一次都不打计数标题" | 控制台里没有"轮次"这个概念了，结果直接写进滚动区 | S3 / S4 | 否 |
 
 ## 4. 追溯表
@@ -60,6 +63,7 @@
 | C6 / C7 | S3 | e50f141 | 待打包 | 真 CLI 连写两条：第二次不出现「第 N 条」字样；入队后无「现在就跑一次 worker」 |
 | C8 | S6 | e50f141 | 待打包 | `test_menu.py` 112 项全绿 |
 | C9 / C10 / C11 | S4 | e50f141 | 待打包 | `printf 'help\nconfig\nqueue\nlog\nexit\n' \| hy-mem menu` 逐条执行并正常退出；stdout 无「按任意键继续」 |
+| C13 | S7 | 216545e | 待打包 | `test_setup_ui.py` 25 项全绿（含三件套确认、跨端点不继承、覆盖提示、EOF 中止不落盘） |
 | C12 | S5 | e50f141 | 待打包 | `test_ui.py` 15 项行编辑用例（↑历史 / Tab / Ctrl+R / Ctrl+D / Ctrl+K）全绿 |
 
 ## 5. 结论
@@ -70,4 +74,5 @@
 
 1. **401 不是"key 填错了"，是继承链回落到旧变量名。** `resolve_embed_key()` 在 `keyEnv` 显式写了名字但值为空时，又退回去读 `MEMORY_EMBEDDER_API_KEY` —— 于是新端点拿着旧端点的 key 发请求。改成"`keyEnv` 非空就只认它"，同时跨端点填完 key 后 `keyEnv` 指向**新端点自己的变量名**（不是清空，清空会重新触发回落）。
 2. **"标题头太傻"其实是"菜单式交互"的症状。** 只要还在"进页面 → 读标题 → 作答 → 按任意键 → 回菜单"这套里，就必须给每次循环一个标题来分隔。换成常驻提示符后，结果直接续在滚动区，C6 自然满足，不需要单独做补丁。
-3. **测试缺口在中间层。** `test_cli` 只管子命令、`test_ui` 只管按键解码，中间"界面把命令接错"没人管。`test_menu.py` 把旧菜单 18 个功能项逐一映射到命令并真跑，补上了这一层。
+3. **UI 级测试抓到了函数级测不到的三个 bug。** 自定义分支 same_endpoint 写死 True（换 baseUrl 静默继承旧 key）、自定义配置默认光标落第 1 预设（回车秒变跨端点）、ask_secret 空回车放行（空 key 落盘后 resolve 回落拿旧 key）——全部在「第二次配置」家族，全部由 `test_setup_ui.py`（真子进程 + 管道喂键 + 假端点只认自家 key）首跑红测抓到。
+4. **测试缺口在中间层。** `test_cli` 只管子命令、`test_ui` 只管按键解码，中间"界面把命令接错"没人管。`test_menu.py` 把旧菜单 18 个功能项逐一映射到命令并真跑，补上了这一层。
