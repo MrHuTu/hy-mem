@@ -6,6 +6,8 @@
   - 单步修改是否只动那一项、其余不动
   - 数据目录迁移是否复制了文件、源目录是否保留
   - 路径校验能否挡住明显不是路径的输入
+  - **第二次配置**能不能用（第 Q 节）：密钥只在环境变量里时，向导要能继承，
+    而不是追问一个空 key 然后拿空串去请求（2026-10-28 的 401 事故）
 
 用法：.venv/Scripts/python.exe scripts/test_setup.py
 """
@@ -461,6 +463,131 @@ def main() -> int:
     _net = (ROOT / "cli" / "netprobe.py").read_text(encoding="utf-8")
     check("netprobe 拒绝 status<100", "self.status < 100" in _net)
     check("netprobe 发送前预检", "precheck(url, key" in _net or "precheck(" in _net)
+
+    # ---- Q. 第二次配置：密钥只配在环境变量里也要能用 ----
+    #
+    # 事故现场（2026-10-28，用户截图 401）：
+    #   设置 → 向量模型 → 选「当前项」→ 向导追问 API Key → 用户回车 → 探针拿空串请求
+    #   → `401 No API-key provided`，而环境变量里那把有效 key 根本没被读到。
+    # 两个根因都在「密钥判据」上：step_embedding 用 emb["apiKey"] 判断有没有 key、
+    # probe_embedding 直接拿 emb["apiKey"] 当请求头。
+    # 这类 bug 只有真走一次「第二次配置」才暴露 —— 首次设置时 apiKey 有值，走不到。
+    print("\n第二次配置：密钥只在环境变量里（401 事故回归）")
+    import presets as presets_mod  # noqa: E402
+
+    ENV_NAME = "MEMORY_EMBEDDER_API_KEY"
+    ENV_KEY = "sk-test-env-only-key-0123456789"
+    _saved_env = os.environ.get(ENV_NAME)
+    _real_post = netprobe.post_json
+    _seen = {"key": None, "calls": 0}
+
+    def _fake_post(url, body, key, timeout, insecure=False, **kw):
+        _seen["key"] = key
+        _seen["calls"] += 1
+        if url.endswith("/chat/completions"):
+            return netprobe.Sent(status=200, payload={"choices": [{"message": {"content": "可用"},
+                                                                    "finish_reason": "stop"}]}, seconds=0.02)
+        return netprobe.Sent(status=200, payload={"data": [{"embedding": [0.01] * 1024}]}, seconds=0.02)
+
+    def _probe_cfg(**over):
+        base = dict(presets_mod.EMBEDDING_PRESETS[0].to_cfg())
+        base.update({"apiKey": "", "keyEnv": ENV_NAME, "dims": 1024})
+        base.update(over)
+        return base
+
+    setup_wizard.probe_embedding = _REAL_PROBE_EMB  # 用真探针，只桩掉网络
+    netprobe.post_json = _fake_post
+
+    # Q1 探针能从环境变量取到 key（而不是把空串塞进 Authorization）
+    os.environ[ENV_NAME] = ENV_KEY
+    _seen.update({"key": None, "calls": 0})
+    _ok, _msg, _dims = _REAL_PROBE_EMB(_probe_cfg())
+    check("探针用环境变量里的 key", _ok and _seen["key"] == ENV_KEY, f"ok={_ok} key={_seen['key']!r} msg={_msg}")
+    check("探针拿到实测维度", _dims == 1024, str(_dims))
+
+    # Q2 一个 key 都取不到时：不发请求，报「密钥为空」而不是 401
+    os.environ.pop(ENV_NAME, None)
+    _seen.update({"key": None, "calls": 0})
+    _ok, _msg, _dims = _REAL_PROBE_EMB(_probe_cfg(keyEnv="HY_MEM_NOT_SET_ANYWHERE"))
+    check("无密钥时不发请求", _seen["calls"] == 0, f"calls={_seen['calls']}")
+    check("无密钥时报错说清来源", (not _ok) and "密钥为空" in _msg, _msg)
+
+    # Q3 核心回归：第二次进设置、选当前项、密钥只在环境变量里
+    os.environ[ENV_NAME] = ENV_KEY
+    _asked: list[str] = []
+    _infos: list[str] = []
+    tui.select = lambda q, options, default=0, **k: 0 if "向量模型" in q else default
+    tui.ask_secret = lambda q, default="", hint=None: (_asked.append(q), "")[1]
+    tui.ask = lambda q, default="", **k: default
+    tui.confirm = lambda q, default=False, **k: False
+    tui.info = lambda msg, *a, **k: _infos.append(str(msg))
+    _seen.update({"key": None, "calls": 0})
+    _new = setup_wizard.step_embedding({"mode": "pro", "embedding": _probe_cfg()})
+    check("二次配置不再追问 API Key", not _asked, str(_asked))
+    check("二次配置的探针用的是环境变量 key", _seen["key"] == ENV_KEY, repr(_seen["key"]))
+    check("二次配置后 apiKey 仍为空（不落盘）", _new.get("apiKey") == "", repr(_new.get("apiKey")))
+    check("二次配置后 keyEnv 保留", _new.get("keyEnv") == ENV_NAME, repr(_new.get("keyEnv")))
+    check("二次配置后 dims 按实测写入", _new.get("dims") == 1024, str(_new.get("dims")))
+
+    # Q4 换同厂商另一个预设：继承环境变量密钥，也不该追问
+    _asked.clear()
+    _seen.update({"key": None, "calls": 0})
+    tui.select = lambda q, options, default=0, **k: 1 if "向量模型" in q else default
+    _new2 = setup_wizard.step_embedding({"mode": "pro", "embedding": _probe_cfg()})
+    check("换预设（同厂商）不追问 key", not _asked, str(_asked))
+    check("换预设后仍用环境变量 key", _seen["key"] == ENV_KEY, repr(_seen["key"]))
+    check("换预设后 keyEnv 不丢", _new2.get("keyEnv") == ENV_NAME, repr(_new2.get("keyEnv")))
+    check("换预设后模型已切换", _new2.get("model") == presets_mod.EMBEDDING_PRESETS[1].model, str(_new2.get("model")))
+
+    # Q5 预设自身要把 keyEnv 带进配置（否则重选预设会把变量名冲成空）
+    check("预设 to_cfg 带 keyEnv", presets_mod.EMBEDDING_PRESETS[0].to_cfg().get("keyEnv") == ENV_NAME)
+    _local = next((p for p in presets_mod.EMBEDDING_PRESETS if not p.needs_key), None)
+    check("零 key 的本地预设不写 keyEnv", _local is not None and _local.to_cfg().get("keyEnv") == "")
+
+    # Q6 走完整单步设置（scope=embedding）落盘后，配置里仍是「apiKey 空 + keyEnv 在」
+    _seen.update({"key": None, "calls": 0})
+    tui.select = lambda q, options, default=0, **k: 0 if "向量模型" in q else 0
+    tui.confirm = lambda q, default=False, **k: True
+    _rc = setup_wizard.run_setup(scope="embedding", existing={"mode": "lite", "embedding": _probe_cfg(),
+                                                              "storage": {"dataDir": str(TMP / "data")},
+                                                              "search": {"minScore": 0.35}})
+    _afterq = cfgmod.load_raw()
+    check("单步设置返回 0", _rc == 0, str(_rc))
+    check("落盘后 apiKey 仍为空", (_afterq.get("embedding") or {}).get("apiKey") == "", str(_afterq.get("embedding")))
+    check("落盘后 keyEnv 保留", (_afterq.get("embedding") or {}).get("keyEnv") == ENV_NAME, str(_afterq.get("embedding")))
+
+    # Q7 同一类坑的另一半：LLM 预设声明 $YSJX_API_KEY，本机实际存在 $MEMORY_LLM_API_KEY。
+    # 只看预设名会逼重填；继承之后还必须把 keyEnv 写回成本机那个变量名，否则保存后取不到。
+    print("\n第二次配置 LLM：变量名与预设不一致")
+    LLM_ENV = "MEMORY_LLM_API_KEY"
+    LLM_KEY = "sk-test-llm-only-key-9876543210"
+    _saved_llm_env = os.environ.get(LLM_ENV)
+    os.environ[LLM_ENV] = LLM_KEY
+    setup_wizard.probe_llm = _REAL_PROBE_LLM  # 用真探针，只桩掉网络
+    _asked.clear()
+    _seen.update({"key": None, "calls": 0})
+    tui.select = lambda q, options, default=0, **k: 0
+    tui.confirm = lambda q, default=False, **k: False
+    _llm_new = setup_wizard.step_llm({
+        "mode": "pro",
+        "embedding": _probe_cfg(),
+        "llm": {"preset": "ysjx-flash", "baseUrl": presets_mod.LLM_PRESETS[0].base_url,
+                "model": presets_mod.LLM_PRESETS[0].model, "apiKey": "", "keyEnv": LLM_ENV},
+    })
+    check("LLM 二次配置不追问 key", not _asked, str(_asked))
+    check("LLM 探针用的是本机环境变量的 key", _seen["key"] == LLM_KEY, repr(_seen["key"]))
+    check("LLM 继承后 keyEnv 指向真实变量", _llm_new.get("keyEnv") == LLM_ENV, repr(_llm_new.get("keyEnv")))
+    check("LLM 继承不落盘", _llm_new.get("apiKey") == "", repr(_llm_new.get("apiKey")))
+    if _saved_llm_env is None:
+        os.environ.pop(LLM_ENV, None)
+    else:
+        os.environ[LLM_ENV] = _saved_llm_env
+
+    netprobe.post_json = _real_post
+    if _saved_env is None:
+        os.environ.pop(ENV_NAME, None)
+    else:
+        os.environ[ENV_NAME] = _saved_env
 
     bad = results.count(False)
     print(f"\n{'全部通过' if not bad else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")

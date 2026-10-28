@@ -27,6 +27,9 @@ class EmbeddingPreset:
     latency_ms: int | None = None
     discrimination: float | None = None
     needs_key: bool = True
+    # 密钥在环境变量里的变量名。0.9.11 起配置只留这个名字，明文不再落盘；
+    # 预设必须把它一起带进 to_cfg()，否则「重选预设」会把用户自定义的变量名冲掉。
+    key_env: str = "MEMORY_EMBEDDER_API_KEY"
 
     def to_cfg(self) -> dict:
         return {
@@ -35,6 +38,7 @@ class EmbeddingPreset:
             "baseUrl": self.base_url,
             "model": self.model,
             "apiKey": "",
+            "keyEnv": self.key_env if self.needs_key else "",
             "dims": self.dims,
         }
 

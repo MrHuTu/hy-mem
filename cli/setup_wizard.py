@@ -67,9 +67,16 @@ def probe_embedding(emb: dict, timeout: int = 45) -> tuple[bool, str, int]:
 
     base = str(emb.get("baseUrl") or "").rstrip("/")
     model = str(emb.get("model") or "")
-    key = str(emb.get("apiKey") or "")
+    # 密钥来源必须走统一解析（config.json 明文 > keyEnv 变量 > 约定变量名）。
+    # 直接读 emb["apiKey"] 是 0.9.11 的实测 bug：配置里只留 keyEnv 之后，
+    # 这里读到空串，仍然发出 `Authorization: Bearer `，服务端回
+    # 「401 No API-key provided」，而环境变量里的有效 key 根本没被用上。
+    key = cfgmod.resolve_embed_key({"embedding": emb})
     if not base or not model:
         return False, "baseUrl / model 未填", 0
+    if not key:
+        env_name = emb.get("keyEnv") or "MEMORY_EMBEDDER_API_KEY"
+        return False, f"密钥为空（config.json 的 apiKey 与 ${env_name} 都取不到）", 0
     res = netprobe.post_json(
         f"{base}/embeddings",
         {"model": model, "input": [PROBE_TEXT]},
@@ -170,8 +177,15 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
     idx = tui.select("[1/4] 向量模型", options, default=cur if cur >= 0 else 0)
     chosen = presets.EMBEDDING_PRESETS[idx] if idx < len(presets.EMBEDDING_PRESETS) else None
 
-    if chosen is not None and cur == idx and emb.get("apiKey"):
-        # 选的就是当前项且已有 key：不重复要 key，但仍重新验证（key 可能已轮换）
+    # 密钥是否可用，只能问统一解析入口：配置里的明文可能为空（0.9.11 起只留 keyEnv），
+    # 真正生效的 key 常常在环境变量里。用 emb.get("apiKey") 判断会让「同一项重配」
+    # 每次都追问 key，用户一回车就把空串交给探针 → 401（2026-10-28 实测事故）。
+    have_key = bool(cfgmod.resolve_embed_key({"embedding": emb}))
+    key_in_file = bool(emb.get("apiKey"))
+    key_env = str(emb.get("keyEnv") or "MEMORY_EMBEDDER_API_KEY")
+
+    if chosen is not None and cur == idx and have_key:
+        # 选的就是当前项且密钥可用：不重问 key，但仍重新验证（key 可能已轮换）
         new = {
             **emb,
             "preset": chosen.id,
@@ -194,19 +208,31 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
         new["apiKey"] = tui.ask_secret(
             "API Key",
             default=str(emb.get("apiKey") or ""),
-            hint="存进 config.json（权限已收紧）；也可由 HY_MEM_EMBEDDER_KEY 环境变量提供",
+            hint=f"留空 = 沿用当前密钥（config.json 的 apiKey 或 ${key_env}）",
         )
         new["dims"] = int(emb.get("dims") or 0)
     else:
         new = chosen.to_cfg()
         if chosen.needs_key:
-            # 同厂商端点下密钥通常可复用，把旧 key 作为默认值
             same_host = str(emb.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
-            new["apiKey"] = tui.ask_secret(
-                "API Key",
-                default=str(emb.get("apiKey") or "") if same_host or emb.get("provider") == "openai" else "",
-                hint=f"{chosen.label} 需要 key",
-            )
+            # 只有同一个端点才继承：换厂商还沿用上家的 key，只会换来一个 401
+            inherited = os.getenv(key_env, "") if same_host else ""
+            if inherited and not key_in_file:
+                # 与 step_llm 同一套策略：环境变量里有 key 就继承，不落盘、不追问
+                tui.info(f"将从环境变量 ${key_env} 继承密钥（{_mask(inherited)}），不落盘")
+                if tui.confirm("改为在 config.json 里单独保存一个 key？", default=False):
+                    new["apiKey"] = tui.ask_secret("API Key", hint="逐字粘贴；留空 = 仍然用环境变量")
+            elif key_in_file and same_host:
+                new["apiKey"] = tui.ask_secret("API Key", default=str(emb["apiKey"]), hint="直接回车 = 沿用当前 key")
+            else:
+                new["apiKey"] = tui.ask_secret(
+                    "API Key",
+                    hint=f"{chosen.label} 需要 key；逐字粘贴，前后别带空格"
+                    + ("" if not inherited else f"（当前还有 ${key_env} 里的 key，换端点就要换 key）"),
+                )
+            if same_host and emb.get("keyEnv"):
+                # 同一端点重配时保留用户自定义的变量名，别被预设默认值覆盖
+                new["keyEnv"] = emb["keyEnv"]
         else:
             new["apiKey"] = ""
 
@@ -281,13 +307,25 @@ def step_llm(cfg: dict, _depth: int = 0) -> dict:
     else:
         new = chosen.to_cfg()
         if chosen.key_env:
-            inherited = os.getenv(chosen.key_env, "")
+            # 「能不能继承」不能只看预设声明的变量名：本机实际把 key 放在别的变量里
+            # （例如预设写 $YSJX_API_KEY，而配置的 keyEnv 是 $MEMORY_LLM_API_KEY），
+            # 只看预设名就会在第二次设置时逼用户重填一遍。同端点下优先沿用当前 key。
+            same_host = str(llm.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
+            cur_key = cfgmod.resolve_llm_key({"llm": llm}) if same_host else ""
+            inherited = os.getenv(chosen.key_env, "") or cur_key
             if inherited:
-                tui.info(f"将从环境变量 ${chosen.key_env} 继承密钥（{_mask(inherited)}），不落盘")
+                src = "config.json" if (same_host and llm.get("apiKey")) else "$" + (
+                    (llm.get("keyEnv") if same_host and llm.get("keyEnv") else chosen.key_env))
+                tui.info(f"将继承当前密钥（{_mask(inherited)}，来自 {src}），不落盘")
                 if tui.confirm("改为在 config.json 里单独保存一个 key？", default=False):
                     new["apiKey"] = tui.ask_secret("API Key")
+                elif same_host and llm.get("keyEnv") and not llm.get("apiKey"):
+                    # 关键一步：把 keyEnv 指向「刚才真正取到 key 的那个变量名」。
+                    # 预设声明的名字可能与本机实际存放的不一致（预设 $YSJX_API_KEY，
+                    # 本机 $MEMORY_LLM_API_KEY），不写回就会「继承成功、保存后取不到」。
+                    new["keyEnv"] = llm["keyEnv"]
             else:
-                tui.warn(f"环境变量 ${chosen.key_env} 为空，需要手工提供 key")
+                tui.warn(f"端点 {chosen.base_url} 没有可用密钥（${chosen.key_env} 为空），需要手工提供")
                 new["apiKey"] = tui.ask_secret("API Key")
         else:
             same_host = str(llm.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
@@ -461,10 +499,13 @@ _STEP_TITLES = {k: t for k, t, _ in STEPS}
 def _summary_rows(cfg: dict) -> list[tuple[str, str]]:
     emb = cfg.get("embedding") or {}
     llm = cfg.get("llm") or {}
+    # 密钥一律看解析结果：明文常为空（只留 keyEnv），真正的 key 在环境变量里
+    emb_key = cfgmod.resolve_embed_key(cfg)
+    emb_src = "" if emb.get("apiKey") else (f"（来自 ${emb.get('keyEnv')}）" if emb.get("keyEnv") else "")
     rows = [
         ("向量模型", f"{emb.get('model')}  ({emb.get('dims')} 维, {emb.get('provider')})"),
         ("嵌入入口", str(emb.get("baseUrl") or "（本地 ONNX）")),
-        ("嵌入密钥", _mask(str(emb.get("apiKey") or "")) or "（未设置）"),
+        ("嵌入密钥", (_mask(emb_key) or "（未设置）") + (emb_src if emb_key else "")),
         ("运行模式", str(cfg.get("mode"))),
     ]
     if cfg.get("mode") in ("pro", "ultra"):

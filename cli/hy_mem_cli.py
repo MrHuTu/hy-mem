@@ -2828,7 +2828,7 @@ def cmd_config(args) -> int:
             "dims": emb.get("dims"),
             "provider": emb.get("provider"),
             "baseUrl": emb.get("baseUrl"),
-            "apiKey": "***" if emb.get("apiKey") else "",
+            "apiKey": "***" if cfgmod.resolve_embed_key(cfg) else "",
         },
         "llm": {
             "model": llm.get("model"),
@@ -2857,7 +2857,8 @@ def cmd_config(args) -> int:
         t("运行模式  {}", payload["mode"]),
         t("向量模型  {}  ({} 维, {})", emb.get("model"), emb.get("dims"), emb.get("provider")),
         t("嵌入入口  {}", emb.get("baseUrl") or t("（本地 ONNX）")),
-        t("嵌入密钥  {}", t("已设置") if emb.get("apiKey") else t("未设置")),
+        t("嵌入密钥  {}", t("已设置") if cfgmod.resolve_embed_key(cfg) else t("未设置"))
+        + (t("（来自 ${}）", emb.get("keyEnv")) if emb.get("keyEnv") and not emb.get("apiKey") else ""),
         t("LLM 模型  {} @ {}", llm.get("model"), llm.get("baseUrl")),
         t("LLM 密钥  {}", t("已设置") if payload["llm"]["keySet"] else t("未设置"))
         + (t("（来自 ${}）", llm.get("keyEnv")) if llm.get("keyEnv") and not llm.get("apiKey") else ""),

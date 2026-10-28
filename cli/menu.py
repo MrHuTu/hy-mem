@@ -823,7 +823,8 @@ def page_config(dispatch, cfg: dict) -> None:
         (tr("运行模式"), str(cfg.get("mode"))),
         (tr("向量模型"), f"{emb.get('model')} ({tr('{} 维', emb.get('dims'))}, {emb.get('provider')})"),
         (tr("嵌入入口"), str(emb.get("baseUrl") or tr("（本地 ONNX）"))),
-        (tr("嵌入密钥"), tr("已设置") if emb.get("apiKey") else tr("未设置")),
+        (tr("嵌入密钥"), (tr("已设置") + (tr("（来自 ${}）", emb.get("keyEnv")) if not emb.get("apiKey") else ""))
+         if cfgmod.resolve_embed_key(cfg) else tr("未设置")),
         (tr("LLM 模型"), f"{llm.get('model')} @ {llm.get('baseUrl')}"),
         (tr("LLM 密钥"), (tr("已设置") + (tr("（来自 ${}）", llm.get("keyEnv")) if not llm.get("apiKey") else ""))
          if cfgmod.resolve_llm_key(cfg) else tr("未设置")),
