@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sys
 from pathlib import Path
 
@@ -357,7 +358,7 @@ def main() -> int:
         results.append(ok)
         print(("  PASS  " if ok else "  FAIL  ") + f"拦下 {s[:10]!r:<14}{msg[:34]}")
 
-    # 连续写入：写完一条不回主界面，接着问「再写一条？」，直到选 N
+    # 连续写入：写完一条不弹菜单，直接把输入提示交还；第 3 轮空回车即退出
     print("\n菜单：写记忆连续写入")
     import menu
 
@@ -371,8 +372,8 @@ def main() -> int:
     old_stdin = sys.stdin
     out = io.StringIO()
     try:
-        # 每轮：正文 / 空行结束 / 标签留空 / 不入队 / 再写一条=回车；第 2 轮最后选 n 退出
-        sys.stdin = io.StringIO("第一条\n\n\nn\n\n第二条\n\n\nn\nn\n")
+        # 每轮：正文 / 空行结束本条 / 标签留空 / 不入队(n)；第 3 轮空回车退出
+        sys.stdin = io.StringIO("第一条\n\n\nn\n第二条\n\n\nn\n\n")
         with contextlib.redirect_stdout(out):
             menu.page_add(fake_dispatch, {"mode": "lite"})
     finally:
@@ -385,9 +386,14 @@ def main() -> int:
         and "写记忆（第 2 条）" in text
         and "写记忆（第 1 条）" not in text
         and text.count("已写入 1 条") == 2
+        # 契约 C2：一次操作结束后不得再插「继续 / 回主界面」的二选一
+        and "再写一条？" not in text
+        and "（没有输入内容，已回主界面）" in text
     )
     results.append(ok)
-    print(("  PASS  " if ok else "  FAIL  ") + f"两条正文 → 两次 dispatch（{len(calls)} 次），轮次标题 {'有' if '第 2 条' in text else '缺'}")
+    print(("  PASS  " if ok else "  FAIL  ")
+          + f"两条正文 → 两次 dispatch（{len(calls)} 次），轮次标题 {'有' if '第 2 条' in text else '缺'}，"
+            f"空回车退出 {'是' if '已回主界面' in text else '否'}")
 
     # 失败也要留在会话里继续问，而不是把界面踢回主菜单
     def failing_dispatch(argv, stdin_text=None):
@@ -399,7 +405,7 @@ def main() -> int:
     out2 = io.StringIO()
     old_stdin = sys.stdin
     try:
-        sys.stdin = io.StringIO("坏的一条\n\n\nn\n\n好的第二条\n\n\nn\nn\n")
+        sys.stdin = io.StringIO("坏的一条\n\n\nn\n好的第二条\n\n\nn\n\n")
         with contextlib.redirect_stdout(out2):
             menu.page_add(failing_dispatch, {"mode": "lite"})
     finally:
@@ -407,6 +413,39 @@ def main() -> int:
     ok = len(calls) == 2 and "写入失败" in out2.getvalue()
     results.append(ok)
     print(("  PASS  " if ok else "  FAIL  ") + f"首条失败仍继续问 → 两次 dispatch（{len(calls)} 次）")
+
+    # 连续检索：查完直接交还提示，空查询退出；同样不插二选一菜单
+    print("\n菜单：检索连续查询")
+    asked: list[str] = []
+
+    def search_dispatch(argv, stdin_text=None):
+        asked.append(argv[argv.index("search") + 1])
+        payload = {
+            "results": [{"memory_id": "m1", "score": 0.91, "content": "命中内容", "tags": ["t"]}],
+            "min_score": 0.35,
+        }
+        return 0, json.dumps(payload, ensure_ascii=False), ""
+
+    tui.interactive = lambda: False  # type: ignore[assignment]
+    out3 = io.StringIO()
+    old_stdin = sys.stdin
+    try:
+        # 每轮：查询 / 标签留空 / 条数 3；第 3 轮空查询退出
+        sys.stdin = io.StringIO("第一问\n\n3\n第二问\n\n3\n\n")
+        with contextlib.redirect_stdout(out3):
+            menu.page_search(search_dispatch, {})
+    finally:
+        sys.stdin = old_stdin
+    t3 = out3.getvalue()
+    ok = (
+        asked == ["第一问", "第二问"]
+        and "检索（第 2 次）" in t3
+        and "命中内容" in t3
+        and "再查一次？" not in t3
+    )
+    results.append(ok)
+    print(("  PASS  " if ok else "  FAIL  ")
+          + f"两次查询 → {asked}，轮次标题 {'有' if '第 2 次' in t3 else '缺'}，空查询退出 {'是' if '检索（第 2 次）' in t3 else '否'}")
 
     bad = results.count(False)
     print(f"\n{'全部通过' if not bad else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")

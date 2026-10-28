@@ -203,15 +203,6 @@ def _read_add_body() -> tuple[str, bool]:
         lines.append(line)
 
 
-def _ask_write_again() -> bool:
-    """问「再写一条？」。EOF / Esc / Ctrl+C 一律当作结束，别让循环卡死。"""
-    try:
-        return tui.confirm(tr("再写一条？"), default=True)
-    except (EOFError, KeyboardInterrupt, tui.Aborted):
-        print()
-        return False
-
-
 def page_add(dispatch, cfg: dict) -> None:
     """写记忆 —— 支持在一个会话里连着写多条。
 
@@ -219,6 +210,11 @@ def page_add(dispatch, cfg: dict) -> None:
     四五条事实），每写一条都退出去、再进菜单、再等一次首屏，成本远超收益。
     循环之间**不清屏**：上一条的「已入队 / 已落库」反馈要留在屏幕上，否则用户
     看不到自己刚写的东西到底进没进库（这是 0.9.x 反复被反馈的疑点）。
+
+    退出方式只有「不输入内容直接回车」（以及 Esc / Ctrl+C）—— 不再在每条之后
+    插一个「继续 / 回主界面」的菜单。那个菜单每次多按一次键、多一次光标移动，
+    而写记忆的正文输入本来就以空行收尾，空行天然就是「不写了」的意思，
+    再让用户选一次属于重复提问。
     """
     round_no = 0
     while True:
@@ -227,17 +223,19 @@ def page_add(dispatch, cfg: dict) -> None:
             print()
             print(tui.hr())
         print(tui.title(_add_round_title(round_no)))
-        print(c.dim(tr("  一行一条最好（混在一起会稀释向量）。空行结束；Ctrl+C 取消。")))
+        if round_no == 1:
+            print(c.dim(tr("  一行一条最好（混在一起会稀释向量）。空行结束本条；Ctrl+C 取消。")))
+        else:
+            print(c.dim(tr("  接着写；不输入内容直接回车 = 回主界面。")))
         print()
 
-        # 取消（Esc/Ctrl+C/EOF）与「敲了空行」要区别对待：前者是想走，后者是
-        # 手滑；只有后者才值得再问一句「再写一条？」
+        # 空正文 = 不想写了（第 1 轮可能是进错页）；Esc / Ctrl+C / EOF 同样收工。
+        # 两者都不再追问，直接回主界面。
         text, cancelled = _read_add_body()
         if not text:
-            tui.warn(tr("没有输入内容"))
-            if cancelled or not _ask_write_again():
-                return
-            continue
+            if not cancelled:
+                tui.note(tr("（没有输入内容，已回主界面）"))
+            return
 
         lines = text.splitlines()
         split = len(lines) > 1 and tui.confirm(
@@ -288,8 +286,8 @@ def page_add(dispatch, cfg: dict) -> None:
             # 失败也留在会话里继续问：一条写坏了不该把「刚想好的另外三条」冲掉
             _show_failure(raw, code)
 
-        # 输入阶段已经按过 Ctrl+C 的，写完这条就回主界面，不再追问
-        if cancelled or not _ask_write_again():
+        # 输入阶段已经按过 Ctrl+C / Esc 的，写完这条就回主界面；否则直接进下一条
+        if cancelled:
             return
 
 
@@ -319,39 +317,60 @@ def search_rows(results: list[dict]) -> list[list[str]]:
 
 
 def page_search(dispatch, cfg: dict) -> None:
-    print(tui.title(tr("检索")))
-    q = tui.ask(tr("查询内容"))
-    if not q:
-        return
-    tag_raw = tui.ask(tr("限定标签（逗号分隔，可留空）"))
-    tags = [t.strip() for t in tag_raw.replace("，", ",").split(",") if t.strip()]
-    n_raw = tui.ask(tr("返回条数"), default="5")
-    try:
-        n = max(1, int(n_raw))
-    except ValueError:
-        n = 5
+    """检索 —— 支持连续查多次，不必每次退回主界面重进。
 
-    argv = ["search", q, "-n", str(n)]
-    for t in tags:
-        argv += ["--tag", t]
+    为什么不查完就返回：定位一条旧记忆常常要换 2~4 种问法（原话 / 关键词 / 标签），
+    每换一次都要重进菜单、重填「查询 / 标签 / 条数」三项，成本全耗在导航上。
+    循环之间不清屏，上一轮结果留在屏幕上方便对照。
 
-    print()
-    code, data, raw = _capture(dispatch, argv)
-    if code != 0:
-        _show_failure(raw, code)
-        return
-    results = (data or {}).get("results") or []
-    if not results:
-        tui.warn(tr("无命中"))
-        tui.note(tr("可试着放宽：降低阈值（设置 → 检索阈值）或换更接近原话的问法"))
-        return
-    print(tui.table([tr("#"), tr("分数"), tr("内容"), tr("标签")], search_rows(results)))
-    tui.note(tr(
-        "阈值 {}，命中 {} 条；看全文：hy-mem get {}",
-        (data or {}).get("min_score"),
-        len(results),
-        results[0].get("memory_id") or "<id>",
-    ))
+    退出同样不用菜单：查询内容留空回车即回主界面。查完直接把输入提示交还给
+    用户，想再查就继续敲，想走就回车。
+    """
+    round_no = 0
+    while True:
+        round_no += 1
+        if round_no > 1:
+            print()
+            print(tui.hr())
+        print(tui.title(tr("检索") if round_no == 1 else tr("检索（第 {} 次）", round_no)))
+        q = tui.ask(
+            tr("查询内容"),
+            hint=tr("留空回车 = 回主界面；查完可直接接着查下一次")
+            if round_no == 1 else tr("留空回车 = 回主界面"),
+        )
+        if not q:
+            # 空查询＝不想查了，直接回主界面。这里不能再问「再查一次？」，
+            # 否则会出现「不查 → 再查一次？→ 不查」的空转。
+            return
+        tag_raw = tui.ask(tr("限定标签（逗号分隔，可留空）"))
+        tags = [t.strip() for t in tag_raw.replace("，", ",").split(",") if t.strip()]
+        n_raw = tui.ask(tr("返回条数"), default="5")
+        try:
+            n = max(1, int(n_raw))
+        except ValueError:
+            n = 5
+
+        argv = ["search", q, "-n", str(n)]
+        for t in tags:
+            argv += ["--tag", t]
+
+        print()
+        code, data, raw = _capture(dispatch, argv)
+        if code != 0:
+            _show_failure(raw, code)
+        else:
+            results = (data or {}).get("results") or []
+            if not results:
+                tui.warn(tr("无命中"))
+                tui.note(tr("可试着放宽：降低阈值（设置 → 检索阈值）或换更接近原话的问法"))
+            else:
+                print(tui.table([tr("#"), tr("分数"), tr("内容"), tr("标签")], search_rows(results)))
+                tui.note(tr(
+                    "阈值 {}，命中 {} 条；看全文：hy-mem get {}",
+                    (data or {}).get("min_score"),
+                    len(results),
+                    results[0].get("memory_id") or "<id>",
+                ))
 
 
 def page_list(dispatch, cfg: dict) -> None:

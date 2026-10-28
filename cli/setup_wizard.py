@@ -220,32 +220,46 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
         new = chosen.to_cfg()
         if chosen.needs_key:
             same_host = str(emb.get("baseUrl") or "").rstrip("/") == chosen.base_url.rstrip("/")
-            # 只有同一个端点才继承：换厂商还沿用上家的 key，只会换来一个 401
-            inherited = os.getenv(key_env, "") if same_host else ""
-            # 环境变量优先：首次安装时 `_fill_from_env()` 会把 env 里的 key 复制进内存配置，
-            # 此时 key_in_file 为真但不是"用户手填"，不该因此追问一遍（也不该把它烤进配置文件）。
+            # 密钥来源与 step_llm 完全对称：按 [预设声明的变量, 配置里的 keyEnv, 约定变量名]
+            # 找第一个**有值**的。只看「同端点才继承」会在两种场景逼用户手填：
+            #   · 首次没配好（baseUrl 为空 → same_host 恒假，环境变量里明明有 key）
+            #   · 换端点但新端点用同一把 key（本机的百炼 / 网关都是这样）
+            cands = [chosen.key_env, key_env, "MEMORY_EMBEDDER_API_KEY"]
+            seen: set[str] = set()
+            src_env, inherited = "", ""
+            for name in cands:
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                v = os.getenv(name, "")
+                if v:
+                    src_env, inherited = name, v
+                    break
             if inherited:
-                # 与 step_llm 同一套策略：环境变量里有 key 就继承，不落盘、不追问
-                tui.info(f"将从环境变量 ${key_env} 继承密钥（{_mask(inherited)}），不落盘")
+                # 环境变量里有 key 就继承，不落盘、不追问（与 step_llm 同一套策略）
+                tui.info(
+                    f"将从环境变量 ${src_env} 继承密钥（{_mask(inherited)}），不落盘"
+                    + ("" if same_host else "；端点已变，若这把 key 不适用于新端点，请改为单独填写")
+                )
                 new["apiKey"] = ""
-                new["keyEnv"] = key_env
+                new["keyEnv"] = src_env
                 if tui.confirm("改为在 config.json 里单独保存一个 key？", default=False):
                     new["apiKey"] = tui.ask_secret("API Key", hint="逐字粘贴；留空 = 仍然用环境变量")
-            elif key_in_file and same_host:
-                new["apiKey"] = tui.ask_secret("API Key", default=str(emb["apiKey"]), hint="直接回车 = 沿用当前 key")
-                if emb.get("keyEnv"):
-                    new["keyEnv"] = emb["keyEnv"]
+            elif key_in_file:
+                # 环境变量全空、但配置里保存过明文：沿用它，用户回车即可
+                new["apiKey"] = tui.ask_secret(
+                    "API Key", default=str(emb["apiKey"]), hint="直接回车 = 沿用当前 key"
+                )
+                new["keyEnv"] = str(emb.get("keyEnv") or "")
             else:
+                tui.warn(f"环境变量里没有可用的 key（试过 {', '.join('$' + x for x in cands if x)}），需要手工提供")
                 new["apiKey"] = tui.ask_secret(
                     "API Key",
-                    hint=f"{chosen.label} 需要 key；逐字粘贴，前后别带空格"
-                    + ("" if not inherited else f"（当前还有 ${key_env} 里的 key，换端点就要换 key）"),
+                    hint=f"{chosen.label} 需要 key；逐字粘贴，前后别带空格",
                 )
-            if same_host and emb.get("keyEnv"):
-                # 同一端点重配时保留用户自定义的变量名，别被预设默认值覆盖
-                new["keyEnv"] = emb["keyEnv"]
         else:
             new["apiKey"] = ""
+            new["keyEnv"] = ""
 
     print()
     tui.spinner_line("正在真实请求一次嵌入以确定维度…")
@@ -563,8 +577,21 @@ def _commit(old_cfg: dict, cfg: dict) -> int:
         if files:
             print(c.dim(f"  数据目录已有 {storage_ops.human_size(size)} / {files} 个文件。"
                         "不重建的话，新旧向量混在一起，检索结果会失真。"))
-            if tui.confirm("备份并重建数据目录？（原数据会复制一份 .bak-时间戳）", default=True):
-                rebuild = True
+            # 重建是破坏性操作，不能和「写入配置？」串成两条默认「是」的连问：
+            # 那样用户一路回车就等于换模型顺手清库（2026-10-28 实测），之后不敢再改模型。
+            # 这里给「先不重建」一个明确出口并设为默认，重建必须显式选。
+            action = tui.select(
+                "数据目录怎么处理？",
+                [
+                    ("重建（备份后清空，推荐）", "旧向量与新模型不兼容，混用会让检索失真", "r"),
+                    ("先不重建", "只改配置；旧向量仍在，检索可能失真，之后可在 设置 → 存储 里清空重建", "k"),
+                    ("放弃这次修改", "不改配置，也不动数据", "x"),
+                ],
+                default=1,
+            )
+            if action == 2:
+                raise tui.Aborted()
+            rebuild = action == 0
 
     print()
     if not tui.confirm("写入配置？", default=True):

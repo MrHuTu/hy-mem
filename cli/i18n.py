@@ -158,9 +158,11 @@ EN: dict[str, str] = {
 
     # ---- 写记忆 ----
     "写记忆（第 {} 条）": "Write ({})",
-    "  一行一条最好（混在一起会稀释向量）。空行结束；Ctrl+C 取消。":
-        "  One memory per line (mixing dilutes the vector). Blank line ends; Ctrl+C cancels.",
-    "没有输入内容": "Nothing entered",
+    "  一行一条最好（混在一起会稀释向量）。空行结束本条；Ctrl+C 取消。":
+        "  One memory per line (mixing dilutes the vector). Blank line ends this one; Ctrl+C cancels.",
+    "  接着写；不输入内容直接回车 = 回主界面。":
+        "  Keep going; press Enter with nothing typed to return to the main menu.",
+    "（没有输入内容，已回主界面）": "(Nothing entered — back to the main menu)",
     "检测到 {} 行，拆成 {} 条独立记忆？": "{} lines detected, split into {} memories?",
     "标签（逗号分隔，可留空）": "Tags (comma separated, optional)",
     "标签用于按类归档与过滤；pro 模式还会由 LLM 自动打 tag":
@@ -177,10 +179,12 @@ EN: dict[str, str] = {
         "Run the worker now to persist? (pro mode: ~10-50s each)",
     "落库中…": "Persisting…",
     "已落库": "Persisted",
-    "再写一条？": "Write another?",
 
     # ---- 检索 ----
     "查询内容": "Query",
+    "留空回车 = 回主界面；查完可直接接着查下一次":
+        "Enter to leave blank = back to main menu; after a search just type the next one",
+    "留空回车 = 回主界面": "Enter to leave blank = back to main menu",
     "限定标签（逗号分隔，可留空）": "Filter by tags (comma separated, optional)",
     "返回条数": "Number of results",
     "无命中": "No matches",
@@ -431,4 +435,19 @@ EN: dict[str, str] = {
     "结论：{} 项未通过": "Result: {} checks failed",
     "已更新 {}": "Updated {}",
     "配置完整": "Config complete",
+
+    # ---- 页面循环（写记忆、检索）：默认续用，空输入退出 ----
+    "检索（第 {} 次）": "Search (#{})",
+
+    # ---- 换嵌入模型后的数据目录处置 ----
+    "数据目录怎么处理？": "What about the data directory?",
+    "重建（备份后清空，推荐）": "Rebuild (backup then wipe, recommended)",
+    "旧向量与新模型不兼容，混用会让检索失真": "Old vectors are incompatible with the new model; mixing them distorts search",
+    "先不重建": "Keep it for now",
+    "只改配置；旧向量仍在，检索可能失真，之后可在 设置 → 存储 里清空重建":
+        "Config only; old vectors remain and search may be distorted — wipe & rebuild later in Settings → Storage",
+    "放弃这次修改": "Discard this change",
+    "不改配置，也不动数据": "Change nothing, touch no data",
+    "环境变量里没有可用的 key（试过 {}），需要手工提供":
+        "No usable key in env vars (tried {}), please enter one",
 }
