@@ -242,6 +242,37 @@ def post_json(
 # --------------------------------------------------------------------------
 # 结果 → 人话
 # --------------------------------------------------------------------------
+def get_json(url: str, timeout: float = 5, direct: bool = False) -> ProbeResult:
+    """GET 一个 JSON 端点。要么返回 `Sent`（带真实状态码），要么返回 `NotSent`。
+
+    direct=True 时绕过一切代理（urllib 默认吃 HTTPS_PROXY/系统代理，本机
+    回环探活绝不能被代理劫持）。典型调用方：vdb_endpoint 的 chroma 心跳。
+    """
+    t0 = time.time()
+    req = urllib.request.Request(url, method="GET")
+    try:
+        if direct:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            resp_ctx = opener.open(req, timeout=timeout)
+        else:
+            resp_ctx = urllib.request.urlopen(req, timeout=timeout)
+        with resp_ctx as resp:
+            return Sent(int(resp.status), _parse(resp.read()), time.time() - t0)
+    except urllib.error.HTTPError as e:
+        return Sent(int(e.code), _parse(e.read()), time.time() - t0)
+    except urllib.error.URLError as e:
+        return _from_net_error(e.reason, timeout, t0)
+    except (socket.timeout, TimeoutError) as e:
+        return _from_net_error(e, timeout, t0)
+    except Exception as e:  # noqa: BLE001
+        return NotSent(
+            f"请求没有发出：{type(e).__name__}: {str(e)[:200]}",
+            cause="other",
+            seconds=time.time() - t0,
+            detail=f"{type(e).__name__}: {e}",
+        )
+
+
 def brief(payload: Any, limit: int = 220) -> str:
     """从响应体里取一句最像「错误原因」的话。"""
     if not isinstance(payload, dict):

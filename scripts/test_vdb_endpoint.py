@@ -1,0 +1,190 @@
+"""vdb_endpoint 自测 —— 端口文件 / 心跳 / 端点注入 / chroma server 线程.
+
+背景（2026-10-28 事故）：chroma embedded 多进程共享导致长驻进程召回池为空。
+收敛后 worker 独占数据（内嵌 chroma server 线程），其余进程经
+MEMORY_VECTOR_HOST/PORT 走 HttpClient。本文件验证端点层契约：
+
+  1. 端口文件读写与容错（垃圾内容不当有效端口）
+  2. 心跳探测（本地回环，不发外部网络请求）
+  3. ensure_endpoint 注入：文件有效 → 设 env；尊重已配置的 HOST；
+     文件过期 → 清文件 + 拉起 worker → 轮询到就绪
+  4. 集成：真实 chroma server 线程 起/停 + HttpClient 读写（较慢，~10s）
+
+用法：.venv/Scripts/python.exe scripts/test_vdb_endpoint.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "cli"))
+
+TMP = Path(tempfile.mkdtemp(prefix="hy-mem-test-vdb-"))
+os.environ["MEMORY_DATA_DIR"] = str(TMP / "data")
+os.environ["HY_MEM_TUI"] = "0"
+(TMP / "data").mkdir(parents=True, exist_ok=True)
+
+import vdb_endpoint  # noqa: E402
+
+results: list[bool] = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    results.append(bool(cond))
+    print(("  PASS  " if cond else "  FAIL  ") + name + (f"  {detail}" if detail and not cond else ""))
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+class _FakeHeartbeat(BaseHTTPRequestHandler):
+    """伪装 chroma 的 /api/v2/heartbeat，只回 200。"""
+
+    def do_GET(self):  # noqa: N802
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *a):  # 静默
+        pass
+
+
+def _start_fake_heartbeat() -> tuple[int, ThreadingHTTPServer]:
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _FakeHeartbeat)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv.server_address[1], srv
+
+
+def _clean_env() -> None:
+    os.environ.pop("MEMORY_VECTOR_HOST", None)
+    os.environ.pop("MEMORY_VECTOR_PORT", None)
+
+
+def main() -> int:
+    print(f"临时目录 {TMP}")
+
+    # ---- 1. 端口文件 ----
+    print("\n端口文件读写与容错")
+    vdb_endpoint.write_port_file(12345)
+    check("写入后能读回", vdb_endpoint.read_port() == 12345)
+    vdb_endpoint.port_file().write_text("not-json", encoding="utf-8")
+    check("垃圾内容 → None", vdb_endpoint.read_port() is None)
+    vdb_endpoint.port_file().write_text(json.dumps({"port": "x"}), encoding="utf-8")
+    check("port 非整数 → None", vdb_endpoint.read_port() is None)
+    vdb_endpoint.remove_port_file()
+    check("删除后 → None", vdb_endpoint.read_port() is None)
+    vdb_endpoint.remove_port_file()  # 幂等
+    check("重复删除不抛错", True)
+
+    # ---- 2. 心跳 ----
+    print("\n心跳探测（仅本地回环）")
+    closed = _free_port()
+    check("未监听端口 → False", vdb_endpoint.heartbeat_ok(closed, timeout=0.5) is False)
+    hport, hsrv = _start_fake_heartbeat()
+    try:
+        check("伪造心跳 200 → True", vdb_endpoint.heartbeat_ok(hport, timeout=1.0) is True)
+    finally:
+        hsrv.shutdown()
+
+    # ---- 3. ensure_endpoint ----
+    print("\n端点注入")
+    _clean_env()
+    check("已配置 HOST 时不覆盖", True)  # 占位，真实断言在下方块内
+    os.environ["MEMORY_VECTOR_HOST"] = "10.0.0.9"
+    os.environ["MEMORY_VECTOR_PORT"] = "9999"
+    vdb_endpoint.write_port_file(_free_port())
+    port = vdb_endpoint.ensure_endpoint(spawn=lambda: False, wait_s=1.0)
+    check("外部已配置 → 不动 env", port is None
+          and os.environ["MEMORY_VECTOR_HOST"] == "10.0.0.9")
+    _clean_env()
+    vdb_endpoint.remove_port_file()
+
+    # 文件过期（端口无人听）+ spawn 无作为 → 返回 None 且清掉过期文件
+    vdb_endpoint.write_port_file(closed)
+    spawned: list[bool] = []
+
+    def _spawn_noop() -> bool:
+        spawned.append(True)
+        return False
+
+    port = vdb_endpoint.ensure_endpoint(spawn=_spawn_noop, wait_s=1.0)
+    check("过期端点 + spawn 失败 → None", port is None)
+    check("过期文件被清理", vdb_endpoint.read_port() is None)
+    check("spawn 被尝试过", bool(spawned))
+    check("失败时不设 env", "MEMORY_VECTOR_HOST" not in os.environ)
+
+    # spawn 中途写好端口文件（模拟 worker 冷启）→ 轮询到就绪并设 env
+    hport2, hsrv2 = _start_fake_heartbeat()
+
+    def _spawn_slow() -> bool:
+        def _late():
+            time.sleep(0.3)
+            vdb_endpoint.write_port_file(hport2)
+        threading.Thread(target=_late, daemon=True).start()
+        return True
+
+    port = vdb_endpoint.ensure_endpoint(spawn=_spawn_slow, wait_s=5.0)
+    check("拉起后轮询到就绪 → 返回端口", port == hport2)
+    check("env 被正确注入",
+          os.environ.get("MEMORY_VECTOR_HOST") == "127.0.0.1"
+          and os.environ.get("MEMORY_VECTOR_PORT") == str(hport2))
+    hsrv2.shutdown()
+    _clean_env()
+    vdb_endpoint.remove_port_file()
+
+    # ---- 4. 集成：真实 chroma server 线程 ----
+    print("\nchroma server 线程（集成，较慢）")
+    t0 = time.time()
+    persist = TMP / "vdb"
+    persist.mkdir(parents=True, exist_ok=True)
+    try:
+        sport, srv = vdb_endpoint.start_server_thread(persist)
+        check("server 线程就绪", bool(sport))
+        check("心跳可达", vdb_endpoint.heartbeat_ok(sport, timeout=2.0) is True)
+
+        import chromadb
+        c = chromadb.HttpClient(host="127.0.0.1", port=sport)
+        col = c.get_or_create_collection("probe_vdb", metadata={"hnsw:space": "cosine"})
+        col.upsert(ids=["a"], embeddings=[[0.1] * 8], documents=["v1"])
+        col.upsert(ids=["a"], embeddings=[[0.9] * 8], documents=["v2"])
+        got = col.get(ids=["a"])
+        check("HttpClient 写读一致", (got.get("documents") or [""])[0] == "v2")
+
+        vdb_endpoint.stop_server_thread(srv, sport)
+        time.sleep(0.2)
+        check("停后端口文件已清", vdb_endpoint.read_port() is None)
+        check("停后心跳不可达", vdb_endpoint.heartbeat_ok(sport, timeout=0.5) is False)
+
+        # 持久性契约（防「内存库」回归：只传 persist_directory 不传
+        # is_persistent 时 server 静默变内存库，检索永远空——2026-10-28 实测）
+        sport2, srv2 = vdb_endpoint.start_server_thread(persist)
+        c2 = chromadb.HttpClient(host="127.0.0.1", port=sport2)
+        got2 = c2.get_collection("probe_vdb").get(ids=["a"])
+        check("重启后数据仍在（is_persistent 生效）",
+              (got2.get("documents") or [""])[0] == "v2")
+        vdb_endpoint.stop_server_thread(srv2, sport2)
+        print(f"  （集成段耗时 {time.time() - t0:.1f}s）")
+    except Exception as e:  # noqa: BLE001
+        check("chroma 集成段异常", False, f"{type(e).__name__}: {e}")
+
+    ok = all(results)
+    print(f"\n{'全部通过' if ok else '存在失败'}：{results.count(True)}/{len(results)}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
