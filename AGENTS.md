@@ -92,7 +92,7 @@ D:\tools_open\agent-bridge\
 │                                 bug 复现、一次性迁移、历史遗留 doctor.py
 │
 ├── skill\hy-mem\SKILL.md      ← 面向调用方的用法说明（516 行）。打包时复制进产物
-├── data\                      ← 源码环境的记忆库 + 队列库（整体备份）
+├── data\                      ← 源码环境的记忆库 + 队列库（**本地运行时数据，不入库**；目录由程序自建）
 ├── requirements.txt           ← 环境重建清单（114 个包，pip install -r 一键装回）
 ├── .models\                   ← fastembed 的 ONNX 模型缓存（本地生成，不入库；首跑自动下载）
 ├── .venv\                     ← 虚拟环境（本地生成，不入库；pip install -r requirements.txt 重建）

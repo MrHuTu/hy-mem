@@ -83,7 +83,7 @@ hy-mem/
 │   ├── test_cli.py       # CLI Testing
 │   └── ...
 ├── .local-test/           # Local scratch scripts (probes / experiments / repros), git-ignored
-├── data/                  # Data Directory
+├── data/                  # Runtime data (git-ignored, auto-created)
 │   ├── data/             # Memory data (SQLite + Vector DB)
 │   ├── logs/             # Logs
 │   └── hy_mem_queue.db   # Async task queue

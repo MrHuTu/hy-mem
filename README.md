@@ -83,7 +83,7 @@ hy-mem/
 │   ├── test_cli.py       # CLI 测试
 │   └── ...
 ├── .local-test/           # 本地临时脚本（探针 / 实验 / bug 复现），整目录不入库
-├── data/                  # 数据目录
+├── data/                  # 运行时数据（不入库，程序自建）
 │   ├── data/             # 记忆数据（SQLite + 向量库）
 │   ├── logs/             # 日志
 │   └── hy_mem_queue.db   # 异步任务队列
