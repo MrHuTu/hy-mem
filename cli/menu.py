@@ -664,7 +664,10 @@ def _llm_line(cfg: dict) -> str:
 
 def _cfg_missing(cfg: dict) -> list[str]:
     try:
-        return [name for name, passed, _d in cfgmod.validate(cfg) if not passed]
+        # 带上 detail（如「MEMORY_EMBEDDER_API_KEY 为空」），
+        # 引导用户去环境变量而不是把 key 写进 config.json
+        return [name if not detail else f"{name}（{detail}）"
+                for name, passed, detail in cfgmod.validate(cfg) if not passed]
     except Exception:  # noqa: BLE001
         return []
 
