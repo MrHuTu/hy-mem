@@ -4,7 +4,7 @@
 > **目标**：只读这一份，就能改代码、跑测试、打 exe、排障、判断该不该动。
 > **边界**：本文件是**开发者视角**。面向调用方（智能体实际怎么用命令）的说明在 `skill/hy-mem/SKILL.md`，那份会被打包进产物发出去，两者不重复。
 > **动代码前先读**：`skill/hy-dev/SKILL.md` —— 开发/修复流水线（分道 → 契约文档 → 分片 → 测试 → 回写 → 提交）。本文是「事实与规则」，那份是「执行顺序」，冲突时以本文的事实为准、按那份的步骤执行。
-> **最后校准**：2026-10-28，对应 hy-mem **0.9.8**。文中所有数字都是实测值，附了复核命令。
+> **最后校准**：2026-10-28（0.9.13 发版），对应 hy-mem **0.9.13**。文中所有数字都是实测值，附了复核命令。
 
 ---
 
@@ -20,18 +20,18 @@
 
 | 项 | 值 | 复核方式 |
 |---|---|---|
-| 版本 | `0.9.11`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
+| 版本 | `0.9.13`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
 | 语言/运行时 | Python **3.12.10**，venv 在 `.venv/` | `.venv/Scripts/python.exe -V` |
 | 核心 SDK | `hy-memory 2.0.5` | `.venv/Scripts/python.exe -m pip show hy-memory` |
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **34 个 py，15703 行**（`cli/` 20 个 12080 行 + `scripts/` 14 个 3623 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
+| 源码规模 | **34 个 py，15878 行**（`cli/` 20 个 12170 行 + `scripts/` 14 个 3708 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
 | 测试用例 | **452**（CLI 84 / UI 95 / setup 133 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 29 / encoding 10） | 见 §8 |
-| 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 34 MB）；对外分发 `dist/hy-mem-0.9.11-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
+| 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 33 MB）；对外分发 `dist/hy-mem-0.9.13-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
-| 构建耗时 | 约 **196 s**（含压缩包 24 s） | 构建日志末行 |
+| 构建耗时 | 约 **160 s**（含压缩包 24 s） | 构建日志末行 |
 | 默认数据目录 | `<安装根>/data`（源码=`仓库/data`，exe=`dist/hy-mem/data`） | `hy-mem config show` |
 | 向量维度 | **1024**（`qwen3.7-text-embedding-flash`） | `hy-mem doctor` 的 `embedding_live` |
 | LLM | `deepseek-v4-flash` @ `https://newapi.jxdata.com:18000/v1`（推理模型） | `hy-mem config show` |
