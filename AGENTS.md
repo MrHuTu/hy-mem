@@ -19,14 +19,14 @@
 
 | 项 | 值 | 复核方式 |
 |---|---|---|
-| 版本 | `0.9.9`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
+| 版本 | `0.9.10`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
 | 语言/运行时 | Python **3.12.10**，venv 在 `.venv/` | `.venv/Scripts/python.exe -V` |
 | 核心 SDK | `hy-memory 2.0.5` | `.venv/Scripts/python.exe -m pip show hy-memory` |
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
 | 源码规模 | **24 个 py，14003 行**（`cli/` 18 个 + `scripts/` 6 个） | `cat cli/*.py scripts/*.py \| wc -l` |
-| 子命令 | **29** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes`，改为单 supervisor 进程 + 消费线程池，重试改延迟队列 `jobs.not_before`；0.9.9 `worker` 加 `--no-fast-exit` 并内嵌 chroma server） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
+| 子命令 | **30** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；**0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
 | 测试用例 | **301**（UI 92 / setup 103 / CLI 84 / vdb 22） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **351 MB**（exe 本体 27.5 MB）；对外分发的是 `dist/hy-mem-0.9.5-win64.zip` **152 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
@@ -52,13 +52,13 @@ D:\tools_open\agent-bridge\
 │
 ├── cli\                       ← 全部业务代码（全部可改，改完必须跑测试）
 │   ├── _pyi_entry.py          ← 打包入口。只做两件事：冻结进程强制 UTF-8、转发 main
-│   ├── hy_mem_cli.py   (2842) ← 大脑：29 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
+│   ├── hy_mem_cli.py   (3040) ← 大脑：30 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类
 │   ├── helptext.py      (579) ← 命令规格单一真源（`help` / `help --json` 的数据源）
-│   ├── config.py        (461) ← config.json 读写 + env 映射 + 校验 + 身份默认值
+│   ├── config.py        (480) ← config.json 读写 + env 映射 + 校验 + 身份默认值（`MEMORY_DATA_DIR` 优先于配置文件）
 │   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0；get_json(direct=True) 供回环探活
-│   ├── vdb_endpoint.py  (218) ← chroma server 端点层（0.9.9）：worker 起内嵌 server 线程 + server.port 端口文件；客户端 ensure_endpoint 注入 MEMORY_VECTOR_HOST/PORT。数据唯一所有者 = worker，其余进程一律 HttpClient（chroma embedded 多进程共享会读到过期/空索引，2026-10-28 事故）
+│   ├── vdb_endpoint.py  (420) ← chroma server 端点层（0.9.10）：`serve` 独占数据 + owner 化的 server.port；客户端 ensure_endpoint 注入/复验 MEMORY_VECTOR_HOST/PORT，端点该在却连不上就抛 EndpointUnavailable（不静默降级）
 │   ├── setup_wizard.py  (654) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
-│   ├── menu.py          (715) ← 交互主界面 + 设置中心 + 12 个页面
+│   ├── menu.py          (740) ← 交互主界面 + 设置中心 + 12 个页面（子命令一律子进程派发）
 │   ├── tui.py          (1367) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪 / 折行（wrap）
 │   ├── runtime_check.py (323) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
 │   ├── store.py         (511) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
@@ -125,12 +125,32 @@ D:\tools_open\agent-bridge\
 
 ---
 
-### 3.2 向量库端点架构（0.9.9，改 `make_client` / `cmd_worker` 前必读）
+### 3.2 向量库端点架构（0.9.10，改 `make_client` / `cmd_serve` / `cmd_worker` 前必读）
 
-chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker 写入并翻转 supersede 后，其他进程的内存索引不更新，召回池直接为空（2026-10-28 实测事故，且不自愈）。因此 0.9.9 起数据唯一所有者是 worker 进程内嵌的 chroma server 线程：
+chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker 写入并翻转 supersede 后，其他进程的内存索引不更新，召回池直接为空（2026-10-28 实测事故，且不自愈）。因此数据必须由一个进程独占。
 
-- worker 启动即起 server（`vdb_endpoint.start_for_worker`），端口写 `data/server.port`，退出时清理；自身 SDK 调用也走 HttpClient（env 注入），防同进程双实例。
-- 一切客户端（CLI / 交互 UI / MCP stdio）的唯一 SDK 入口 `make_client()` 开头调 `ensure_endpoint()`：读端口文件 → `netprobe.get_json(direct=True)` 心跳校验 → 设 `MEMORY_VECTOR_HOST/PORT`（SDK 原生支持，自动切 HttpClient）；端点不可用 → 复用 `_spawn_detached_worker` 拉起（cap=1 防重）→ 轮询就绪。
+**0.9.10 的关键修正：把「数据所有者」和「队列消费者」拆成两个命令。** 0.9.9 让 `worker` 兼当宿主，消费者跑完就退、顺手把 server 带走，还无条件删掉别人的端口登记——于是「检索→写入→立即消费→再检索」直接报 `Could not connect to a Chroma server`，此后整个会话全废（PRD F1/F2/F5）。
+
+| 角色 | 命令 | 生命周期 | 硬约束 |
+|---|---|---|---|
+| 数据所有者 | `hy-mem serve` | 长驻单例，空闲 `--idle-exit`（默认 1800s）自退 | 同一数据目录只能有一个；抢输的那个立即收摊 |
+| 队列消费者 | `hy-mem worker` | 短命（`--once` / 空闲 30s 退） | **永不起 server**，自己是 HttpClient 客户端 |
+
+`ensure_endpoint()` 的分支顺序每条都对应一个实测缺陷：
+
+1. `MEMORY_VECTOR_HOST` 有值且**无** `MEMORY_VECTOR_HOST_SRC=hymem` → 外部配置（远程 chroma/qdrant），不动；
+2. 有值且带标记（自己注入的）→ **每次复验心跳**，失效就清掉重取（0.9.9 把它当外部配置，进程内坏一次永久坏）；
+3. 端口文件主人 pid 活着且心跳可达 → 采纳；
+4. 主人活着但连不上 → 等一轮后抛 `EndpointUnavailable`（`E_ENDPOINT`，exit 2），**绝不静默回落嵌入式**——那会读到别人写过的旧索引；
+5. 主人已死（`store.pid_alive`：Windows `OpenProcess` / POSIX `kill-0`）→ 清残留登记 → 拉起 `serve` 再等；
+6. 拉起失败且从无主人 → 才允许回落嵌入式，并在 stderr 明确告警。
+
+其他要点：
+
+- 端口文件 `data/server.port` 带 `{port, pid, owner, started_at}`，写入走临时文件 + `replace`（读方不会看到半截 JSON）；删除必须给 `expect_pid`——**只删自己的登记**（0.9.9 的 F2 就是无差别删除）。
+- 交互界面（`menu.py`）的子命令一律**子进程**派发（`menu.subprocess_dispatch`）：同进程跑 worker 会把后台角色写进本进程 env。
+- 拉起闸门 `claim_worker_slot` 会先清「pid 已不存在」的注册行（`store._purge_dead_pids`，只对 3s 以上的行探活），否则被 SIGKILL 的 worker 要占满 15s 名额，期间检索只能干等（F10）。
+- serve 主体是 `vdb_endpoint.start_server_thread`（uvicorn 线程 + `_patch_api_embeddings`），外加 ASGI 包装记录最后请求时间供空闲退出。
 - 注入时同步补 `NO_PROXY=127.0.0.1,localhost`——chroma 的 httpx 吃代理环境变量与 Windows 系统代理，回环被代理劫持即 502（实测）。
 - 两个实测坑：chroma `Settings` 必须传 `is_persistent=True`（否则 server 静默变内存库，检索永远空）；`chroma_api_impl` 不可传 server 类（System 递归构造自爆）。
 - 第三个坑（同日二次事故，`tolist`）：跨进程写入落在向量段 brute force/queue 路径时 `GetResult.embeddings` 是 list，而 FastAPI 响应层硬编码 `cast(Embedding, e).tolist()` → **HTTP 的 `get`/`query` 一带 embeddings 就 500**；SDK 的 `get_by_ids`/`get_embeddings` 静默返回空 → `expand_evolution_chains` 整批走 fallback（`READ_EVOLUTION evolved_count=0`）→ superseded 条目漏进结果（「最美/最丑/最帅」三条同时返回，正是 0.9.9 首包的症状）。修法：`_patch_api_embeddings()` 在 API 实例的 `_get`/`_query` 出口把 list 归一化成 numpy，实例级包装，不依赖 `chroma_api_impl` 解析出的具体类（1.5.9 默认是 `RustBindingsAPI`，不是 `SegmentAPI`）。
@@ -138,7 +158,7 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 - 分发前的两条实测：`scripts/probe_vdb_http.py`（已装 server 的 embeddings 契约）、`scripts/probe_mcp_stdio.py`（真实 stdio：initialize → tools/list → search/add）。两者默认指向 `D:\tools_open\hy-mem-0.9.9-win64`，可用 `HYMEM_EXE` 覆盖。
 - 新增依赖 `fastapi` + `opentelemetry-instrumentation-fastapi`（chromadb 未把前者列为运行时依赖），打包需 `--collect-submodules fastapi uvicorn opentelemetry.instrumentation.fastapi`（uvicorn/otel 有 importlib 动态加载）。
 
-### 3.3 终端显示口径：折行，不截断（0.9.9 收尾，改任何结果输出前必读）
+### 3.3 终端显示口径：折行，不截断（0.9.10，改任何结果输出前必读）
 
 **记忆正文一行放不下就换行，禁止把正文截断成 `xxx…`。** 起因：检索结果里演化链的 `content` 本身就是多行（`- Current: …` / `When:` / `History:` / 各旧版本），旧实现先 `.replace("\n"," ")` 压平再 `[:150]`/`trunc(90)`，用户只看到 `用户认…`，误以为记忆内容就这么短（2026-10-28 反馈）。
 
@@ -277,6 +297,7 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 | `scripts/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe scripts/test_queue.py` |
 | `scripts/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe scripts/test_concurrency.py [exe]` |
 | `scripts/test_mcp.py` | **22** | MCP stdio 八工具端到端：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe scripts/test_mcp.py [exe]` |
+| `scripts/test_vdb_endpoint.py` | **31** | 端点层契约：端口文件 owner 校验、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe scripts/test_vdb_endpoint.py` |
 
 ```bash
 # 源码模式

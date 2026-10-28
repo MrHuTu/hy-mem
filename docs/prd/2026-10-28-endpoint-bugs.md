@@ -3,6 +3,7 @@
 > 提出人：胡超　｜　记录：阿衡　｜　日期：2026-10-28
 > 触发事故：TUI 内「检索 → 写入 → 立即消费 → 再检索」直接报 `Could not connect to a Chroma server`，此后该会话内**所有**命令都不可用。
 > 处理方式（按你的要求）：**本轮只测不修**。先把功能点全部跑一遍，缺陷集中记在这里，之后一次性修 + 一次性打包。
+> 状态更新（同日 15:00）：**已按 B1–B4 一次性修完并打包 0.9.10**，逐条对照见 §7。
 
 ---
 
@@ -209,3 +210,42 @@ HY_MEM_CONFIG=D:\tools_open\tmp-hymem-sweep\config.json \
 ```
 
 沙箱数据：`D:\tools_open\tmp-hymem-sweep\data`（真实库的拷贝，可随时删除重来）。
+
+---
+
+## 7. 修复记录（0.9.10，一次性交付）
+
+批次与 PRD §4 一致；每条都写明改在哪、怎么验。**B5（data 移出版本控制）未执行**——属破坏性 git 操作，等你点头。
+
+| 缺陷 | 修法（落点） | 验收 |
+|---|---|---|
+| F1 交互进程内跑 worker | `menu.subprocess_dispatch`：子命令一律子进程（`cli/menu.py`），`cmd_menu` / 无参入口都换过去 | `probe_endpoint_lifecycle.py` 第 3 步「父进程 env 未被污染 PASS」 |
+| F2 端口文件无差别删除 | `server.port` 带 `{port,pid,owner}`，`remove_port_file(expect_pid=…)` 只删自己的；`stop_server_thread` 必带本进程 pid | `test_vdb_endpoint`「别人的 pid 删不掉我的登记」「停 server 不误删别人的登记」 |
+| F3 静默回落嵌入式 | 主人活着但连不上 → 抛 `EndpointUnavailable`（`E_ENDPOINT`/exit 2，`cli/errors.py` 给专属 hint）；只有「从无主人 + 拉起失败」才允许回落且 stderr 告警 | `test_vdb_endpoint`「主人活着但连不上 → 抛 EndpointUnavailable」「失败时不注入 env」 |
+| F4 自注入 env 不复验 | 注入时打 `MEMORY_VECTOR_HOST_SRC=hymem`；`ensure_endpoint` 见标记就每次复验心跳，失效即清 env 重取；无标记（外部配置）不动 | `test_vdb_endpoint`「自注入端点失效 → 清 env 并重新获取」 |
+| F5 `worker` 兼当 server 宿主 | 新增 `hy-mem serve`（长驻单例、空闲自退、抢占登记）；`cmd_worker` 删掉起 server 与停 server 的代码，退回纯消费者 | `probe_cli_sweep`「serve 幂等 PASS」；`worker --once` 不再写/删端口文件 |
+| F6 `MEMORY_DATA_DIR` 被配置覆盖 | `config.load()` 让 `MEMORY_DATA_DIR` **无条件**压过配置文件；新增 `data_dir_source()`，`doctor` 的 `data_dir` 项显示来源 | `probe_cli_sweep`「version --json（数据目录隔离）PASS」（沙箱 dataDir 生效） |
+| F7 `add --tag` 标签丢 | 新增 `_bind_tags_to_new()`：写入前后 `list_memories` 差分，把标签绑到**真正新建的可检索节点**；同步/异步两条路径都换掉 | `probe_cli_sweep`「list --tag（用户标签可见）count=1 PASS」 |
+| F8 `add` 返回影子 id | 返回体 `memory_id` 一律指向 `memory_ids[0]`（可检索节点），原 l1 id 留在 `raw_memory_id`；`get` 读影子节点时附提示 | 人工 `add` 后 `get <memory_id>` 直接命中 l2_fact |
+| F9 影子态静默成功 | `_execute_job` 检测「无 memory_ids（只落 l1_raw）」→ stderr 告警 + `jobs.error='shadow_only…'`；`queue` 顶部提示计数；新增 `hy-mem retry --shadow` 一键重投 | `queue` 输出含 `shadow_only`；`store.requeue_shadow()` |
+| F10 闸门 15s 空窗 | `claim_worker_slot` 先 `_purge_dead_pids`（只对 3s 以上的行探活，Windows `OpenProcess` / POSIX `kill-0`），被强杀的 worker 立即腾出名额 | `probe_cli_sweep`「search 宿主死后（应自愈）rc=0 6.0s，回落嵌入式=False」 |
+| F11 安装版落后源码 | 重打包 0.9.10；装到 `D:/tools_open/hy-mem-0.9.10-win64`（0.9.9 目录保留为备份）；`~/.local/bin` 与 `%LOCALAPPDATA%\hy-mem\bin` 两处启动器都改指 0.9.10 | `hy-mem version` → 0.9.10；`tools/list` 8 个工具 |
+| F12 `data/` 入库 | **未执行**，需你授权 `git rm -r --cached data` + `.gitignore` | — |
+
+### 修复后的端点语义（一句话）
+
+`serve` 是数据唯一所有者（长驻单例、空闲 30 分钟自退、登记带 owner）；`worker` 只是队列消费者，永不起 server；客户端每次复验自己注入的端点，主人活着却连不上就**明确失败**，绝不静默读旧索引。
+
+### 本轮回归
+
+| 套件 | 结果 |
+|---|---|
+| `test_vdb_endpoint.py` | **31/31**（原 23，新增 owner 校验 / 六个 ensure 分支 / 自注入复验） |
+| `test_cli.py` | 84/84 |
+| `test_queue.py` | 18/18 |
+| `test_ui.py` | 92/92 |
+| `test_setup.py` | 103/103 |
+| `test_mcp.py` | 22/22（含 add → 后台 worker → 搜索全链路） |
+| `probe_endpoint_lifecycle.py` | 6/6 PASS（含「杀 serve 后自愈」） |
+| `probe_cli_sweep.py` | 见下（对 0.9.10 安装版） |
+| `probe_vdb_http.py` / `probe_mcp_stdio.py` | 见下 |
