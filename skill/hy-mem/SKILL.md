@@ -51,7 +51,7 @@ hy-mem version --json   # 版本与安装信息（自动升级比对用）
 
 `migrate` 在后台 worker 运行中会拒绝执行（防止新旧目录数据分家），等它空闲自退后再跑；目标目录非空也拒绝。
 
-命令跑不起来时按这个顺序查：`hy-mem --version`（找不到 → 走 install）→ `hy-mem skill`（宿主没看到帮助 → 走 skill --install）→ `hy-mem doctor`（配置问题）→ `hy-mem tui-test`（只影响人在终端里的按键）。
+命令跑不起来时按这个顺序查：`hy-mem --version`（找不到 → 走 install）→ `hy-mem skill`（宿主没看到帮助 → 走 skill --install）→ `hy-mem doctor`（配置问题）→ `hy-mem tui-test`（只影响人在终端里的按键）。想知道**上一次操作到底跑了什么、为什么失败**（尤其是交互界面/worker 里发生的），看 `hy-mem log`。
 
 ## 何时用
 
@@ -63,6 +63,7 @@ hy-mem version --json   # 版本与安装信息（自动升级比对用）
 | 只想在某一类知识里找（如全部 infra 事实） | `search --tag <tag>` |
 | 看知识库有哪些分类、各自多少条 | `tags` / `archive` |
 | 不确定环境是否正常、报错排查 | `doctor` |
+| 回顾刚才那条命令跑了什么 / 为什么失败 | `log`（最近 50 条，含退出码与错误码） |
 | 用户要查/删已记的内容 | `list` / `get` / `delete` |
 | 会话收尾、需要沉淀演化 | `finalize` |
 
@@ -395,6 +396,19 @@ hy-mem config reset --yes                # 删除配置（含密钥）
 - **首次运行从 .env 回填**：如果只配了 .env 没配 config.json，向导会把现有值读成默认项（显示「← 当前」），不用重填。
 
 agent 调用时**不要**用 `menu` / `setup`——它们会等待输入（非 TTY 下退化为编号模式，仍然读 stdin）。脚本里一律用具体子命令。
+
+## 操作日志（排障用，0.9.11）
+
+```bash
+hy-mem log              # 最近 50 条，最旧在前
+hy-mem log -n 10        # 最近 10 条
+hy-mem --json log -n 5  # 结构化：{entries:[{time,cmd,status,duration,summary}], path, keep}
+hy-mem log --clear      # 清空
+```
+
+`<数据目录>/ops.log`，一行一条，人能直接读。记录每条子命令的时间 / 退出码 / 耗时 / 错误码 —— 失败经常发生在子进程里（交互界面每次操作都是一次子进程调用、异步写入还要等 worker），事后只有这里还留得住。
+
+三条边界：**只保留最近 50 条**；`add` / `update` / `search` 的正文与查询词**不落盘**（日志不该是记忆内容的第二份明文副本）；密钥类参数打码为 `***`。日志写入失败不影响命令本身。
 
 ## 库体积策略
 
