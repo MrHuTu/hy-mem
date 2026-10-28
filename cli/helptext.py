@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 
-VERSION = "0.9.9"
+VERSION = "0.9.10"
 
 PURPOSE = (
     "跨会话长期记忆库。把用户偏好、项目事实、决策与踩坑写进去，下次会话靠语义检索取回。"
@@ -389,6 +389,18 @@ CMD_META: dict[str, dict] = {
         },
         "notes": ["pro 写入延迟随条数上升，verdict=CRIT 时应改 --async 或归档收缩。"],
     },
+    "serve": {
+        "group": "队列",
+        "when": "起向量库服务（chroma server）。客户端会按需自动拉起，一般不用手跑；排查端点问题或想常驻时用。",
+        "mutates": False,
+        "examples": ["hy-mem serve", "hy-mem serve --idle-exit 300", "hy-mem --json serve"],
+        "output": {"resp": "{ok, already(bool), port, pid, reason, uptime_s}"},
+        "notes": [
+            "数据唯一所有者：同一数据目录只允许一个 serve，重复启动会立即退出（already=true）。",
+            "空闲 --idle-exit 秒（默认 1800）内没有请求就自行退出；退出只删自己登记的端口文件。",
+            "worker 是纯消费者，不会替代 serve（0.9.9 的端点事故根因就是把两者塞进一个进程）。",
+        ],
+    },
     "worker": {
         "group": "队列",
         "when": "消费 --async 入队的任务。agent 可在后台跑一次 --once。",
@@ -398,6 +410,7 @@ CMD_META: dict[str, dict] = {
         "notes": [
             "单写者：同时只应有一个 worker 在跑（内部用 WriteLock 与 SQLite 抢占兜底）。",
             "--once 处理完当前队列即退出，适合 agent 调用；常驻模式给人用。",
+            "worker 永不起 chroma server；需要端点时会自动拉起 serve。",
         ],
     },
     "queue": {
@@ -431,9 +444,12 @@ CMD_META: dict[str, dict] = {
         "group": "队列",
         "when": "死信任务修复后重投。",
         "mutates": True,
-        "examples": ["hy-mem --json retry dead", "hy-mem --json retry job_ab12"],
+        "examples": ["hy-mem --json retry dead", "hy-mem --json retry job_ab12", "hy-mem --json retry --shadow"],
         "output": {"resp": "{ok, requeued, queue{}}"},
-        "notes": ["retry dead 会重投全部死信，量大时先 queue --status dead 看原因。"],
+        "notes": [
+            "retry dead 会重投全部死信，量大时先 queue --status dead 看原因。",
+            "retry --shadow 重投「完成任务但只落了 l1_raw 影子、检索不到」的那些（queue 里 shadow_only 计数）。",
+        ],
     },
     "tags": {
         "group": "标签",

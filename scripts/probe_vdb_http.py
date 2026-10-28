@@ -1,6 +1,6 @@
-"""对 exe 内嵌 chroma server 做协议级探针：验证垫片是否真的在 exe 里。
+"""对 exe 的 chroma server 做协议级探针：验证垫片是否真的在包里。
 
-1) 起 exe 的 worker（宿主 server）
+1) 起 exe 的 `serve`（数据所有者；0.9.10 起 worker 不再承担这个角色）
 2) 用 dev venv 的 chromadb HttpClient 直连
 3) get(include=['metadatas','embeddings']) —— 垫片不在就会 500
 4) 顺带看 metadatas 里 supersedes/superseded_by 是否原样返回
@@ -26,7 +26,7 @@ def main() -> int:
     env = dict(os.environ)
     env.pop("MEMORY_VECTOR_HOST", None)
     env.pop("MEMORY_VECTOR_PORT", None)
-    w = subprocess.Popen([str(EXE), "worker", "--no-fast-exit", "--idle-exit", "60"],
+    w = subprocess.Popen([str(EXE), "serve", "--idle-exit", "60"],
                          cwd=str(INSTALL), env=env,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     port = None
@@ -37,7 +37,7 @@ def main() -> int:
         except Exception:
             pass
         if w.poll() is not None:
-            print("worker died", w.returncode)
+            print("serve died", w.returncode)
             return 2
         time.sleep(0.2)
     if not port:

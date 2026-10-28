@@ -569,11 +569,17 @@ def cmd_doctor(args) -> int:
     # 2. 数据目录
     dd = Path(args.data_dir) if args.data_dir else data_dir()
     try:
+        import config as _cfgdir
+
+        _src = _cfgdir.data_dir_source()  # env / config / default（PRD F6 的可观测性）
+    except Exception:  # noqa: BLE001
+        _src = "?"
+    try:
         dd.mkdir(parents=True, exist_ok=True)
         probe = dd / ".write_probe"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
-        check("data_dir", True, str(dd))
+        check("data_dir", True, f"{dd}（来源 {_src}）")
     except Exception as e:  # noqa: BLE001
         check("data_dir", False, f"{dd}: {e}")
 
@@ -859,6 +865,25 @@ def _bind_tags(ids: list[str], tags: list[str], source: str = "user") -> int:
         conn.close()
 
 
+def _bind_tags_to_new(client, ident: dict, before: set[str], returned: list[str],
+                      tags: list[str]) -> tuple[list[str], set[str]]:
+    """把用户标签绑到「本次真正新建的可检索节点」上，返回 (绑定的 id, 新快照)。
+
+    为什么不直接用 add 返回的 ids（0.9.9 / PRD F7）：抽取没产出节点时，
+    add 只回 l1_raw（status=shadow）的 id，标签就挂在一个永远搜不到的影子
+    节点上——用户看到的现象是「标签丢了」，而且 list/search --tag 都返回空。
+    改用「写入前后 list_memories 差分」，拿到的是向量库里真实存在的节点。
+
+    差分对 reconcile 也成立：把内容合并进老节点时 fresh 为空，退回
+    `_new_ids_only` 的老逻辑（至少挂一个，别让标签彻底没有去处）。
+    """
+    after = _snapshot_ids(client, ident)
+    fresh = sorted(after - before)
+    target = fresh or _new_ids_only(returned, before)
+    _bind_tags(target, tags, "user")
+    return target, after
+
+
 def _remember_auto(items: list[dict]) -> None:
     """把检索/列表顺带看到的 LLM 标签缓存进本地索引，供 tags 统计与过滤复用。"""
     if os.getenv("HY_MEM_TAG_AUTOSYNC") == "0":
@@ -1002,6 +1027,112 @@ def _spawn_detached_worker(idle_exit: float = 90.0,
         return False
 
 
+def _spawn_detached_serve(idle_exit: float = 1800.0) -> bool:
+    """拉起 detached 的向量库服务（数据唯一所有者）。
+
+    与 worker 分开拉：serve 必须长驻单例，worker 天然短命——0.9.9 把两者塞进
+    同一个进程，消费者退出就顺手把数据所有者带走了（见 PRD F2/F5）。
+
+    失败只 stderr 留痕、返回 False：调用方（ensure_endpoint）会继续轮询，
+    也许已有别的进程把它拉起来了。
+    """
+    import install_ops
+
+    argv = install_ops.target_command() + ["serve", "--idle-exit", str(idle_exit)]
+    try:
+        if os.name == "nt":
+            flags = 0x08000000  # CREATE_NO_WINDOW：不闪黑框
+            try:
+                logs = store.data_dir() / "logs"
+                logs.mkdir(parents=True, exist_ok=True)
+                err_f: object = open(logs / "serve.err", "ab")
+            except OSError:
+                err_f = subprocess.DEVNULL
+            subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=err_f, creationflags=flags, close_fds=True,
+            )
+        else:
+            err_f = None
+            try:
+                logs = store.data_dir() / "logs"
+                logs.mkdir(parents=True, exist_ok=True)
+                err_f = open(logs / "serve.err", "ab")
+            except OSError:
+                err_f = None
+            subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=err_f or subprocess.DEVNULL, start_new_session=True,
+            )
+        return True
+    except OSError:
+        return False
+
+
+def cmd_serve(args) -> int:
+    """向量库服务：数据唯一所有者（长驻、单例、独占向量库目录）。
+
+    chroma embedded 不支持跨进程共享（0.9.8 的召回池空窗就是这么来的），
+    所以向量库必须由一个进程独占，其余进程经 HttpClient 访问。这个进程就是
+    serve——它不做消费、不做业务，只把数据端开起来并登记端口。
+
+    幂等：已有活着的 serve 时本进程立即退出（`already: true`），方便脚本
+    "确保有服务"。空闲退出：--idle-exit 秒内没有任何 HTTP 请求就自行收摊，
+    退出时只删自己登记的端口文件（owner 校验，见 vdb_endpoint）。
+    """
+    info = vdb_endpoint.read_port_info()
+    if info and vdb_endpoint.pid_alive(info["pid"]) and vdb_endpoint.heartbeat_ok(info["port"]):
+        payload = {"ok": True, "already": True, "port": info["port"], "pid": info["pid"]}
+        return ok(payload, args.json,
+                  f"向量库服务已在运行（pid {info['pid']}, :{info['port']}），本进程无需启动")
+
+    persist = vdb_endpoint.sdk_persist_dir()
+    t0 = time.time()
+    port, handle = vdb_endpoint.start_server_thread(persist)
+
+    # 登记要在锁里做：两个 serve 同时启动时，只让先登记的活下来，另一个
+    # 立即收摊——同一数据目录绝不允许两个所有者。
+    with store.WriteLock():
+        other = vdb_endpoint.read_port_info()
+        if (other and other["pid"] != os.getpid()
+                and vdb_endpoint.pid_alive(other["pid"])
+                and vdb_endpoint.heartbeat_ok(other["port"])):
+            handle.stop(2.0)
+            payload = {"ok": True, "already": True, "port": other["port"], "pid": other["pid"]}
+            return ok(payload, args.json,
+                      f"向量库服务已在运行（pid {other['pid']}, :{other['port']}），本进程退出")
+        vdb_endpoint.write_port_file(port)
+
+    if not args.json:
+        print(f"hy-mem: 向量库服务就绪 :{port}（数据 {persist}）", file=sys.stderr)
+
+    idle = float(getattr(args, "idle_exit", 0) or 0)
+    timeout = float(getattr(args, "timeout", 0) or 0)
+    reason = "stopped"
+    try:
+        while True:
+            if not handle.alive:
+                reason = "crashed"
+                break
+            now = time.time()
+            if timeout and now - t0 >= timeout:
+                reason = "timeout"
+                break
+            if idle and now - vdb_endpoint.last_activity() >= idle:
+                reason = "idle"
+                break
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        reason = "interrupted"
+    finally:
+        vdb_endpoint.stop_server_thread(handle, port)
+
+    payload = {"ok": True, "already": False, "port": port, "pid": os.getpid(),
+               "reason": reason, "uptime_s": round(time.time() - t0, 1)}
+    return ok(payload, args.json,
+              f"向量库服务退出（{reason}，运行 {time.time() - t0:.0f}s）")
+
+
 def cmd_add(args) -> int:
     rc = require_ready("写入记忆")
     if rc is not None:
@@ -1071,31 +1202,44 @@ def cmd_add(args) -> int:
     client = make_client(args.mode)
     try:
         parts = _split_lines(text) if args.split else [text]
-        before = _snapshot_ids(client, identity(args)) if tags else set()
+        ident = identity(args)
+        before = _snapshot_ids(client, ident) if tags else set()
         all_ids: list[str] = []
         tagged: list[str] = []
         last: dict = {}
+        raw_ids: list[str] = []
         for p in parts:
             # 写锁：SDK 内部无锁，reconcile 是读改写，多进程并发会丢更新
             with store.WriteLock():
-                last = client.add(p, source=args.source, **extra, **identity(args))
+                last = client.add(p, source=args.source, **extra, **ident)
+            rid = last.get("memory_id")
+            if rid:
+                raw_ids.append(str(rid))
             ids = _ids_of(last)
             all_ids.extend(ids)
             if tags:
-                fresh = _new_ids_only(ids, before)
-                _bind_tags(fresh, tags, "user")
+                fresh, before = _bind_tags_to_new(client, ident, before, ids, tags)
                 tagged.extend(fresh)
-                before.update(ids)
         if len(parts) > 1:
-            payload = {"ok": True, "count": len(all_ids), "memory_ids": all_ids, "tagged_ids": tagged, "tags": tags}
+            payload = {"ok": True, "count": len(all_ids), "memory_ids": all_ids,
+                       "tagged_ids": tagged, "tags": tags,
+                       "raw_memory_ids": raw_ids}
             return ok(payload, args.json, f"已写入 {len(all_ids)} 条：{', '.join(i[:8] for i in all_ids)}")
         payload = dict(last)
         payload["memory_ids"] = all_ids
+        # memory_id 一律指向**可检索节点**（0.9.10 / PRD F8）。SDK 的
+        # result.memory_id 在抽取路径上是 l1_raw（status=shadow），拿它去
+        # get/delete 只会看到影子内容；可检索/可删除的是 memory_ids[0]。
+        # 原始 id 保留在 raw_memory_id，排查链路时还能对得上。
+        if all_ids:
+            if raw_ids and raw_ids[0] != all_ids[0]:
+                payload["raw_memory_id"] = raw_ids[0]
+            payload["memory_id"] = all_ids[0]
         if tags:
             payload["tagged_ids"] = tagged
             payload["tags"] = tags
         suffix = f"，标签 {','.join(tags)}" if tags else ""
-        return ok(payload, args.json, f"已写入 memory_id={(all_ids[0] if all_ids else '?')}{suffix}")
+        return ok(payload, args.json, f"已写入 memory_id={(all_ids[0] if all_ids else payload.get('memory_id') or '?')}{suffix}")
     finally:
         client.close()
 
@@ -1331,7 +1475,14 @@ def cmd_get(args) -> int:
         r = client.get(args.memory_id)
         if r is None:
             return fail(f"未找到 {args.memory_id}")
-        return ok(r, args.json, json.dumps(r, ensure_ascii=False, indent=2, default=str))
+        human = json.dumps(r, ensure_ascii=False, indent=2, default=str)
+        if str(r.get("layer") or "") == "l1_raw" or str(r.get("status") or "") == "shadow":
+            # 影子节点不是「记忆」：抽取没产出可检索事实时它才会被留下。
+            # 不写清楚，用户会拿 add 的旧 id 来 get，然后以为记忆坏了。
+            human += ("\n\n提示：这是 l1_raw 影子节点（抽取未产出可检索事实），"
+                      "检索不到它属正常。可检索节点用 search / list 查，"
+                      "或看 add 返回的 memory_ids。")
+        return ok(r, args.json, human)
     finally:
         client.close()
 
@@ -1711,7 +1862,7 @@ def _worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
-def _execute_job(conn, row, get_client) -> tuple[dict, list[str]]:
+def _execute_job(conn, row, get_client) -> tuple[dict, list[str], str | None]:
     payload = json.loads(row["payload"])
     client = get_client(row["mode"])
     kind = row["kind"]
@@ -1724,7 +1875,7 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str]]:
                 agent_id=payload.get("agent_id") or "default_agent",
                 session_id=payload.get("session_id") or "default_session",
             )
-        return result, []
+        return result, [], None
 
     tags = [t for t in (payload.get("tags") or []) if str(t).strip()]
     # add 透传参数：metadata 原样；memory_at 是 ISO 字符串要转回 datetime；
@@ -1765,11 +1916,21 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str]]:
         # 时会回滚 L1 并返回 ok+[]。这里必须视为失败进重试，否则静默丢数据；
         # 重试预算用尽进死信，可 queue --status dead 排查。
         raise RuntimeError(f"SDK add 返回空 memory_ids（疑似抽取失败被吞）：{str(result)[:200]}")
+
+    # 只落了 l1_raw 影子节点（PRD F9）：抽取没报错，但没产出可检索节点，
+    # 记忆实际"写进去了却永远搜不到"。不做静默成功——打 stderr 告警，并把
+    # shadow_only 写进任务行，queue --status done 可见、retry --shadow 可一键重做。
+    note = None
+    if not result.get("memory_ids"):
+        note = ("shadow_only: 抽取未产出可检索节点（只落 l1_raw 影子），本条检索不到；"
+                "内容确有可抽取的事实时可 `hy-mem retry --shadow` 重做")
+        print(f"hy-mem: job {row['id']} 只落影子节点，检索不到（见 retry --shadow）",
+              file=sys.stderr)
+
+    tagged: list[str] = []
     if tags:
-        fresh = _new_ids_only(ids, before)
-        store.bind_tags(conn, fresh, [str(t) for t in tags], "user")
-        return result, fresh
-    return result, ids
+        tagged, _ = _bind_tags_to_new(client, ident, before, ids, [str(t) for t in tags])
+    return result, (tagged or ids), note
 
 
 class _LaneState:
@@ -1844,15 +2005,10 @@ def cmd_worker(args) -> int:
     hb_conn = store.connect()
     store.worker_purge_stale(hb_conn)  # 清理硬杀残留的注册行
 
-    # 数据唯一所有者（2026-10-28 事故收敛）：本 worker 内嵌 chroma server
-    # 线程，其余进程经 HttpClient 连它。自己的 SDK 调用也走 HttpClient
-    #（env 注入），避免同进程内再开一份嵌入式实例互踩。
-    served = vdb_endpoint.start_for_worker()
-    server_handle = served[1] if served else None
-    if served:
-        os.environ["MEMORY_VECTOR_HOST"] = "127.0.0.1"
-        os.environ["MEMORY_VECTOR_PORT"] = str(served[0])
-        print(f"hy-mem: chroma server 就绪（:{served[0]}）", file=sys.stderr)
+    # 本进程只是消费者，**永不起 chroma server**（0.9.10 角色分离）。
+    # 需要端点时 make_client → ensure_endpoint 会去拉起/复用 serve；端点可用
+    # 时它注入 env，SDK 自动走 HttpClient。0.9.9 让 worker 顺手当宿主，短命
+    # 消费者退出就把数据所有者带走，端口文件被误删（PRD F2/F5）。
 
     clients: dict[str, object] = {}
     clients_lock = threading.Lock()
@@ -1914,13 +2070,16 @@ def cmd_worker(args) -> int:
                 st.claim_started()
                 t0 = time.time()
                 try:
-                    result, ids = _execute_job(conn, row, get_client)
-                    store.mark_done(conn, job_id, ids)
+                    result, ids, note = _execute_job(conn, row, get_client)
+                    store.mark_done(conn, job_id, ids,
+                                    extra={"note": note} if note else None)
                     st.done_one(True)
                     ms = int((time.time() - t0) * 1000)
-                    print(f"[lane{lane_id}][{job_id}] {kind} ok {ms}ms ids={len(ids)}", file=sys.stderr)
+                    print(f"[lane{lane_id}][{job_id}] {kind} ok {ms}ms ids={len(ids)}"
+                          + (" shadow_only" if note else ""), file=sys.stderr)
                     if args.json:
-                        emit({"ok": True, "job": job_id, "kind": kind, "ms": ms, "memory_ids": ids}, True)
+                        emit({"ok": True, "job": job_id, "kind": kind, "ms": ms,
+                              "memory_ids": ids, "note": note}, True)
                 except KeyboardInterrupt:
                     store.mark_failed(conn, job_id, "interrupted", retry=True)
                     raise
@@ -1975,8 +2134,6 @@ def cmd_worker(args) -> int:
         store.worker_leave(hb_conn, wid)  # 注销注册行，立即腾出拉起名额
     except Exception:  # noqa: BLE001
         pass
-    if server_handle is not None:
-        vdb_endpoint.stop_server_thread(server_handle, 0)  # 清端口文件 + 停线程
     for c in clients.values():
         try:
             c.close()
@@ -2025,6 +2182,9 @@ def cmd_queue(args) -> int:
         f"待处理 {stats['pending']} | 运行中 {stats['running']} | 完成 {stats['done']} | 死信 {stats['dead']}"
         f" | 总计 {stats['total']}"
     )
+    if stats.get("shadow_only"):
+        head += (f"\n其中 {stats['shadow_only']} 个完成任务只落了影子节点（检索不到）："
+                 "hy-mem retry --shadow 可重做")
     if stats.get("oldest_pending_age_s"):
         head += f"\n最老待处理已等待 {stats['oldest_pending_age_s']}s"
     if recovered:
@@ -2045,6 +2205,13 @@ def cmd_retry(args) -> int:
     """把死信/失败任务放回待处理，重置重试计数。"""
     conn = store.connect()
     try:
+        if getattr(args, "shadow", False):
+            n = store.requeue_shadow(conn)
+            stats = store.queue_stats(conn)
+            return ok(
+                {"ok": True, "requeued": n, "queue": stats}, args.json,
+                f"已重投 {n} 个「只落影子节点」的任务，待处理 {stats['pending']} 个",
+            )
         if args.job_id == "dead" or args.all_dead:
             cur = conn.execute(
                 "UPDATE jobs SET status='pending', attempts=0, error=NULL, started_at=NULL, worker=NULL, "
@@ -2442,7 +2609,11 @@ def cmd_setup(args) -> int:
 def cmd_menu(args) -> int:
     import menu
 
-    return menu.run_menu(lambda argv: main(argv))
+    # 子进程派发（0.9.10）：交互进程只画界面，不承载任何后台角色。
+    # 0.9.9 用 `lambda argv: main(argv)` 在本进程内跑 worker，worker 起的
+    # chroma server 端口被写回本进程 env，退出后 env 指向死端口 → 整个会话
+    # 全命令报 "Could not connect to a Chroma server"（PRD F1）。
+    return menu.run_menu(menu.subprocess_dispatch)
 
 
 def cmd_config(args) -> int:
@@ -2855,6 +3026,12 @@ def build_parser() -> argparse.ArgumentParser:
     ps.set_defaults(func=cmd_stats)
 
     # ---- 异步队列 ----
+    ps = sub.add_parser("serve", help="向量库服务（数据唯一所有者；长驻单例，空闲自退）")
+    ps.add_argument("--idle-exit", type=float, default=1800.0,
+                    help="空闲超过 N 秒后退出（0=常驻；默认 1800）")
+    ps.add_argument("--timeout", type=float, default=0, help="总运行时长上限秒（0=不限）")
+    ps.set_defaults(func=cmd_serve)
+
     ps = sub.add_parser("worker", help="消费异步任务（单进程 supervisor + 多消费线程）")
     ps.add_argument("--once", action="store_true", help="只消费当前队列，清空即退出（延迟重试任务留待下次）")
     ps.add_argument("--max", type=int, default=0, help="最多处理 N 个任务后退出（0=不限）")
@@ -2881,9 +3058,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--poll", type=float, default=1.0)
     ps.set_defaults(func=cmd_drain)
 
-    ps = sub.add_parser("retry", help="重投死信任务（job_id 或 dead）")
-    ps.add_argument("job_id", help="任务 id；填 dead 表示全部死信")
+    ps = sub.add_parser("retry", help="重投死信任务（job_id / dead / --shadow）")
+    ps.add_argument("job_id", nargs="?", default="", help="任务 id；填 dead 表示全部死信；留空配合 --shadow")
     ps.add_argument("--all-dead", action="store_true", help="等价于 job_id=dead")
+    ps.add_argument("--shadow", action="store_true",
+                    help="重投「只落了影子节点、检索不到」的完成任务（PRD F9 自愈）")
     ps.set_defaults(func=cmd_retry)
 
     # ---- 标签 ----
@@ -3081,7 +3260,7 @@ def main(argv=None) -> int:
                     tui.warn("已跳过：配置可能不完整，随时可用「设置」补齐")
             import menu
 
-            return menu.run_menu(lambda a: main(a))
+            return menu.run_menu(menu.subprocess_dispatch)
         except (KeyboardInterrupt, tui.Aborted):
             print()
             return EXIT_OK

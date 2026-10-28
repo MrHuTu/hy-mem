@@ -271,10 +271,32 @@ def claim_next(conn, worker_id: str, kinds: tuple[str, ...] = ("add", "finalize"
 
 
 def mark_done(conn, job_id: int, memory_ids: list[str], extra: dict | None = None) -> None:
+    """任务成功落账。extra 里的 note 写进 error 列当告警留痕。
+
+    为什么把 note 塞进 error 列（0.9.10 / PRD F9）：jobs 表没有独立备注列，
+    迁移一个新列不划算，而 error 在 done 行上本来就是空的。留痕的价值是
+    「写进去了但检索不到」不再静默——`queue --status done` 能看见
+    shadow_only，也能用 `retry --shadow` 一键重做。
+    """
+    note = (extra or {}).get("note")
     conn.execute(
-        "UPDATE jobs SET status='done', finished_at=?, memory_ids=?, error=NULL WHERE id=?",
-        (time.time(), json.dumps(memory_ids, ensure_ascii=False), job_id),
+        "UPDATE jobs SET status='done', finished_at=?, memory_ids=?, error=? WHERE id=?",
+        (time.time(), json.dumps(memory_ids, ensure_ascii=False),
+         (str(note)[:500] if note else None), job_id),
     )
+
+
+def requeue_shadow(conn) -> int:
+    """把「只落了 l1_raw 影子节点」的完成任务重投（PRD F9 的自愈入口）。
+
+    这些任务当时算成功（抽取没报错，只是没产出可检索节点），但记忆实际
+    搜不到。重投会再跑一次抽取，让用户可以一键补救，而不是手工 re-add。
+    """
+    cur = conn.execute(
+        "UPDATE jobs SET status='pending', attempts=0, error=NULL, started_at=NULL, "
+        "worker=NULL, not_before=NULL WHERE status='done' AND error LIKE 'shadow_only%'"
+    )
+    return cur.rowcount
 
 
 def mark_failed(conn, job_id: int, error: str, retry: bool) -> str:
@@ -320,6 +342,9 @@ def queue_stats(conn) -> dict:
     delayed = conn.execute(
         "SELECT COUNT(*) n FROM jobs WHERE status='pending' AND not_before > ?", (time.time(),)
     ).fetchone()
+    shadow = conn.execute(
+        "SELECT COUNT(*) n FROM jobs WHERE status='done' AND error LIKE 'shadow_only%'"
+    ).fetchone()
     return {
         "total": sum(stats.values()),
         "pending": stats.get("pending", 0),
@@ -327,6 +352,7 @@ def queue_stats(conn) -> dict:
         "done": stats.get("done", 0),
         "dead": stats.get("dead", 0),
         "delayed": int(delayed["n"] or 0),
+        "shadow_only": int(shadow["n"] or 0),
         "oldest_pending_age_s": round(time.time() - oldest["t"], 1) if oldest and oldest["t"] else None,
     }
 
@@ -388,10 +414,16 @@ def claim_worker_slot(conn, cap: int, fresh: float = 15.0) -> bool:
     清理过期行 → 数存活 worker → 未达 cap 则写一行 '_spawn_intent' 占位。
     占位行 15s 后自然过期（真实 worker 首次心跳 ~2s 就会顶上自己的行），
     即使 Popen 失败也只占 15s 名额，不会永久卡死拉起。
+
+    额外清理「pid 已经不存在的登记行」（0.9.10 / PRD F10）：被 SIGKILL 的
+    worker 不再心跳，但它的行要等到 fresh 秒后才过期，这段时间里所有拉起
+    请求都被闸门挡掉，检索只能干等端点超时。按 pid 探活可以立即腾出名额。
+    只对 ts 已超过 3s 的行做探活——给刚启动、还没来得及记心跳的进程留余量。
     """
     try:
         cutoff = time.time() - fresh
         conn.execute("DELETE FROM worker_reg WHERE ts < ?", (cutoff,))
+        _purge_dead_pids(conn, older_than=3.0)
         n = conn.execute(
             "SELECT COUNT(*) AS n FROM worker_reg WHERE ts > ?", (cutoff,)
         ).fetchone()
@@ -405,6 +437,55 @@ def claim_worker_slot(conn, cap: int, fresh: float = 15.0) -> bool:
         return True
     except sqlite3.OperationalError:  # noqa: BLE001  闸门自身故障宁可多拉
         return True
+
+
+def pid_alive(pid) -> bool:
+    """进程是否还在。与 vdb_endpoint.pid_alive 同样的实现，但放在 store 里
+    避免「闸门 → 端点模块 → store」的循环导入。"""
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ACCESS_DENIED = 进程存在
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _purge_dead_pids(conn, older_than: float = 3.0) -> int:
+    """删掉「pid 已死」的注册行，返回删除条数。"""
+    try:
+        rows = conn.execute(
+            "SELECT id, pid, ts FROM worker_reg WHERE pid IS NOT NULL AND ts < ?",
+            (time.time() - older_than,),
+        ).fetchall()
+    except sqlite3.OperationalError:  # noqa: BLE001
+        return 0
+    dead = [r["id"] for r in rows if not pid_alive(r["pid"])]
+    for wid in dead:
+        try:
+            conn.execute("DELETE FROM worker_reg WHERE id = ?", (wid,))
+        except sqlite3.OperationalError:  # noqa: BLE001
+            pass
+    return len(dead)
 
 
 def _job_row(r) -> dict:

@@ -205,14 +205,39 @@ def _fill_from_env(cfg: dict) -> None:
 
 
 def load() -> dict:
-    """返回与默认值深合并后的完整配置。"""
+    """返回与默认值深合并后的完整配置。
+
+    环境变量优先级（0.9.10 / PRD F6）：只有**没有配置文件**时才从 env 回填
+    是老实现，导致「设了 MEMORY_DATA_DIR=<沙箱> 却仍写进安装目录」——测试
+    会污染真实记忆库，多实例也无法隔离。现在两个目录类变量无条件覆盖配置：
+
+      MEMORY_DATA_DIR   队列库 + 端口文件所在目录（store.data_dir 读它）
+      HY_MEM_DATA_DIR   默认数据目录（仅当 storage.dataDir 为空时生效）
+
+    其余变量（密钥、模型、模式）仍只在无配置文件时回填，避免 shell 里的
+    临时变量悄悄改掉用户保存的设置。
+    """
     cfg = _deep_merge(DEFAULTS, load_raw())
     if not exists():
         _fill_from_env(cfg)
+    env_dd = os.getenv("MEMORY_DATA_DIR", "").strip()
+    if env_dd:
+        cfg["storage"]["dataDir"] = os.path.expandvars(os.path.expanduser(env_dd))
     # storage.dataDir 留空表示「用安装根下的 data」，避免默认值写死机器路径
     if not cfg["storage"].get("dataDir"):
         cfg["storage"]["dataDir"] = str(default_data_dir())
     return cfg
+
+
+def data_dir_source() -> str:
+    """当前 storage.dataDir 来自哪里：env / config / default（doctor 用）。"""
+    if os.getenv("MEMORY_DATA_DIR", "").strip():
+        return "env:MEMORY_DATA_DIR"
+    if str((load_raw().get("storage") or {}).get("dataDir") or "").strip():
+        return "config"
+    if os.getenv("HY_MEM_DATA_DIR", "").strip():
+        return "env:HY_MEM_DATA_DIR"
+    return "default"
 
 
 def identity_defaults(cfg: dict | None = None) -> str:

@@ -34,7 +34,7 @@ ENV.pop("MEMORY_VECTOR_HOST", None)
 ENV.pop("MEMORY_VECTOR_PORT", None)
 
 results: list[dict] = []
-_worker: subprocess.Popen | None = None
+_serve: subprocess.Popen | None = None
 
 
 def data_dir() -> Path:
@@ -46,39 +46,40 @@ def port_file() -> Path:
     return data_dir() / "server.port"
 
 
-def start_host_worker() -> None:
-    """自己持有一个 worker 子进程当「端点宿主」。
+def start_host_serve() -> None:
+    """自己持有 serve 子进程当数据所有者（0.9.10：worker 不再承担该角色）。
 
     为什么必须由脚本托管：Bash 工具在命令结束后会收割整棵进程树，
-    CLI 自己 detached 拉起的 worker 活不过一次命令，导致 HTTP 路径根本
+    CLI 自己 detached 拉起的 serve 活不过一次命令，导致 HTTP 路径根本
     测不到（2026-10-28 实测：port 文件反复消失其实是宿主被外部杀掉）。
     """
-    global _worker
-    err = open(data_dir() / "logs" / "worker_sweep.err", "wb")
-    _worker = subprocess.Popen(
-        [str(EXE), "worker", "--no-fast-exit", "--idle-exit", "1800",
-         "--poll", "1.0", "--lanes", "1"],
+    global _serve
+    logs = data_dir() / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    err = open(logs / "serve_sweep.err", "wb")
+    _serve = subprocess.Popen(
+        [str(EXE), "serve", "--idle-exit", "3600"],
         env=ENV, cwd=str(EXE.parent),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
     )
-    deadline = time.time() + 40
+    deadline = time.time() + 60
     while time.time() < deadline:
         if port_file().exists():
-            print(f"        宿主 worker pid={_worker.pid} 端口文件就绪：{port_file().read_text(encoding='utf-8')}")
+            print(f"        serve pid={_serve.pid} 端口文件就绪：{port_file().read_text(encoding='utf-8')}")
             return
         time.sleep(0.3)
-    print("        !! 宿主 worker 40s 未写出端口文件")
+    print("        !! serve 60s 未写出端口文件")
 
 
-def stop_host_worker() -> None:
-    global _worker
-    if _worker and _worker.poll() is None:
-        _worker.terminate()
+def stop_host_serve() -> None:
+    global _serve
+    if _serve and _serve.poll() is None:
+        _serve.terminate()
         try:
-            _worker.wait(timeout=10)
+            _serve.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            _worker.kill()
-    _worker = None
+            _serve.kill()
+    _serve = None
 
 
 def run(name: str, argv: list[str], timeout: float = 180.0,
@@ -131,8 +132,8 @@ def wait_jobs(timeout: float = 300.0) -> dict:
     return st
 
 
-print("\n== 起一个宿主 worker（脚本托管，避免沙箱收割）==")
-start_host_worker()
+print("\n== 起 serve（数据所有者，脚本托管避免沙箱收割）==")
+start_host_serve()
 
 # ---------------------------------------------------------------- 只读类
 run("version --json", ["version", "--json"])
@@ -147,6 +148,18 @@ run("tags --json", ["tags", "--json"])
 run("queue --json", ["queue", "--json"])
 run("skill", ["skill"])
 
+# serve 幂等（数据唯一所有者）：已有 serve 时必须立即返回 already，而不是起第二个
+rc, out, _e, _dt = run("serve 幂等（已有 serve 时应 already）", ["serve", "--json"])
+results[-1]["ok"] = rc == 0 and bool(jload(out).get("already"))
+
+# 数据目录来源（PRD F6）：环境变量必须压过配置文件，否则沙箱测试会污染真实库
+rc, out, _e, _dt = run("version --json（数据目录隔离）", ["version", "--json"])
+_vd = jload(out)
+_same = Path(str(_vd.get("dataDir") or "")).resolve() == data_dir().resolve() if _vd.get("dataDir") else False
+print(f"        dataDir={_vd.get('dataDir')} 期望={data_dir()}")
+results[-1]["ok"] = rc == 0 and _same
+print(f"        -> MEMORY_DATA_DIR 生效 {'PASS' if results[-1]['ok'] else 'FAIL'}")
+
 rc, out, _err, _dt = run("search 冷启动 --json", ["search", "胡超是谁", "-n", "3", "--json"])
 hits = jload(out).get("results") or []
 seed_id = hits[0].get("memory_id") if hits else None
@@ -157,36 +170,43 @@ if seed_id:
     run("history --json", ["history", seed_id, "--json"])
 
 # ---------------------------------------------------------------- 写入链路
-run("add --async --json", ["add", "--async", "冒烟巡检：hy-mem 回归测试写入的一条记忆，可安全删除。",
+run("add --async --json", ["add", "--async",
+                           "冒烟巡检标记：hy-mem 的默认消费线程数为 3，队列库是 SQLite。",
                            "--tag", TAG, "--json"])
 rc, out, _e, _dt = run("queue 待处理 --json", ["queue", "--json"])
-pend = jload(out).get("stats", {}).get("pending")
-print(f"        队列 pending={pend}")
-results[-1]["ok"] = results[-1]["ok"] and bool(pend)
+_qs = jload(out).get("stats") or {}
+pend, running = _qs.get("pending"), _qs.get("running")
+print(f"        队列 pending={pend} running={running}")
+# 入场时可能已有别的 worker 在跑（上一个测试留下的），它会在毫秒级领走任务，
+# 所以 pending 可能立刻变 0 —— 只要 pending+running 有值就是「确实进队列了」。
+results[-1]["ok"] = results[-1]["ok"] and bool((pend or 0) + (running or 0))
 print(f"        -> 入队后确有待处理 {'PASS' if results[-1]['ok'] else 'FAIL'}")
 
 st = wait_jobs(300)
 print(f"        等待落库结束：pending={st.get('pending')} running={st.get('running')} done={st.get('done')}")
 run("worker --once --json", ["worker", "--once", "--json"], timeout=420)
 
-rc, out, _e, _dt = run("search 新记忆 --json", ["search", "冒烟巡检", "-n", "5", "--json"])
+# 检索用「抽取后的事实」问，不要用标签名——标签是本地索引，不参与向量检索
+rc, out, _e, _dt = run("search 新记忆 --json", ["search", "hy-mem 默认消费线程数", "-n", "5", "--json"])
 new_hits = jload(out).get("results") or []
-new_id = None
-for h in new_hits:
-    if TAG in (h.get("tags") or []):
-        new_id = h.get("memory_id")
-        break
-if not new_id and new_hits:
-    new_id = new_hits[0].get("memory_id")
+new_id = new_hits[0].get("memory_id") if new_hits else None
 print(f"        命中 {len(new_hits)} 条，new_id={new_id}")
 results[-1]["ok"] = results[-1]["ok"] and bool(new_hits)
 print(f"        -> 新记忆可检索 {'PASS' if results[-1]['ok'] else 'FAIL'}")
 
+# 用户标签必须落在可检索节点上（PRD F7）：异步路径过去会绑到 l1_raw 影子 id，
+# 现象是 add --tag 成功但 list --tag 查不到。
+rc, out, _e, _dt = run("list --tag（用户标签落在新节点）", ["list", "-n", "10", "--tag", TAG, "--json"])
+_tagged_ids = [it.get("memory_id") for it in (jload(out).get("memories") or [])]
+print(f"        list --tag {TAG} → {[i[:8] for i in _tagged_ids]}，期望包含 {str(new_id)[:8]}")
+results[-1]["ok"] = rc == 0 and bool(new_id) and new_id in _tagged_ids
+print(f"        -> 标签绑到可检索节点 {'PASS' if results[-1]['ok'] else 'FAIL'}")
+
 if new_id:
-    run("tag 绑定", ["tag", new_id, "巡检二级"])
+    # 标签只在写入时挂（没有独立 tag 命令）；untag 既能按 id 也能按 --tag 全局
     run("get 看标签", ["get", new_id, "--json"])
-    run("untag 解绑", ["untag", new_id, "巡检二级"])
-    run("update --yes --json", ["update", new_id, "冒烟巡检：内容已更新（回归测试）。", "--yes", "--json"],
+    run("untag 解绑（不存在的标签，应无副作用）", ["untag", new_id, "--tag", "巡检二级"])
+    run("update --json", ["update", new_id, "冒烟巡检：内容已更新（回归测试）。", "--json"],
         timeout=300)
     run("search 更新后 --json", ["search", "内容已更新", "-n", "5", "--json"])
 
@@ -194,8 +214,8 @@ if new_id:
 rc, out, _e, _dt = run("search 二次（新进程）", ["search", "胡超是谁", "-n", "3", "--json"])
 print(f"        端口文件存在={port_file().exists()} 内容={port_file().read_text(encoding='utf-8') if port_file().exists() else '-'}")
 
-print("\n== 杀掉宿主 worker，模拟空闲早退/崩溃 ==")
-stop_host_worker()
+print("\n== 杀掉 serve，模拟空闲早退/崩溃 ==")
+stop_host_serve()
 time.sleep(1)
 print(f"        端口文件残留={port_file().exists()}")
 rc, out, err, dt = run("search 宿主死后（应自愈）", ["search", "胡超是谁", "-n", "3", "--json"], timeout=120)
@@ -206,9 +226,10 @@ print(f"        -> 自愈判定 {'PASS' if results[-1]['ok'] else 'FAIL'}")
 
 # ---------------------------------------------------------------- 清理
 if new_id:
-    run("delete --yes --json", ["delete", new_id, "--yes", "--json"])
-    run("get 已删（应失败）", ["get", new_id, "--json"], expect_rc=1)
-run("drain --json", ["drain", "--timeout", "5", "--json"])
+    run("delete --json", ["delete", new_id, "--json"])
+    # 未找到走 EXIT_RUNTIME(2)，不是 1 —— 这里断言的是「非零」的确定值
+    run("get 已删（应失败）", ["get", new_id, "--json"], expect_rc=2)
+run("drain --json", ["drain", "--timeout", "180", "--json"], timeout=240)
 run("retry dead --json", ["retry", "dead", "--json"])
 
 OUT.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")

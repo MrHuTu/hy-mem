@@ -5,7 +5,11 @@
 以及模型/存储这类需要「改一项就验证一项」的设置。
 
 实现上刻意不 import hy_mem_cli（会循环依赖），改用 dispatch 回调：
-菜单只负责收参数，执行仍走同一个 main()，保证菜单与命令行的行为完全一致。
+菜单只负责收参数，执行走**子进程**调用同一套命令，保证菜单与命令行的行为
+完全一致。为什么必须是子进程（0.9.10）：0.9.9 在本进程内跑 worker，worker
+起的 chroma server 端口会写回本进程 env，退出后 env 指向死端口，整个会话
+所有命令都报 "Could not connect to a Chroma server"（PRD F1）。子进程哪怕
+把 env 改坏也只影响它自己。
 
 导航约定（与 tui.select 一致）：↑↓ 移动、Enter 选中、Esc 回上一层；
 在主界面按 Esc 直接退出。子页里 Esc 只退出当前页，不退出程序。
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 
 import config as cfgmod
 import presets
@@ -110,20 +115,50 @@ def _show_failure(raw: str, code: int) -> None:
         tui.err(text)
 
 
+def subprocess_dispatch(argv: list[str], stdin_text: str | None = None) -> tuple[int, str, str]:
+    """跑一条子命令（**子进程**），返回 (退出码, stdout, stderr)。
+
+    为什么不用 `main(argv)` 同进程调用：子命令可能拉起 worker / serve 这类
+    后台角色，它们会改本进程的 env（MEMORY_VECTOR_PORT）。同进程跑过一次之后，
+    本进程 env 就永久指向一个可能已经死掉的端口，之后所有命令都连不上
+    （0.9.9 的 F1）。子进程把 env 改动留在自己肚子里，界面进程永远干净。
+    """
+    import install_ops
+
+    cmd = install_ops.target_command() + list(argv)
+    try:
+        p = subprocess.run(
+            cmd, input=stdin_text, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", env=dict(os.environ), timeout=1800,
+        )
+    except FileNotFoundError as e:
+        return 127, "", f"无法启动子进程：{e}"
+    except subprocess.TimeoutExpired:
+        return 124, "", "子命令 30 分钟未结束，已放弃等待"
+    except OSError as e:
+        return 126, "", f"子进程启动失败：{type(e).__name__}: {e}"
+    return p.returncode or 0, p.stdout or "", p.stderr or ""
+
+
 def _capture(dispatch, argv: list[str]) -> tuple[int, object, str]:
     """跑一条子命令，把 stdout 抓回来解析 JSON。
 
     菜单要靠结构化结果做表格；直接让子命令往终端打印会打乱菜单版面。
     """
-    import contextlib
-    import io
+    # --json 必须前置：argparse 的全局选项放在子命令之后会解析失败
+    code, out, err = dispatch(["--json"] + argv)
+    return code, _parse_json(out), (out or err)
 
-    buf = io.StringIO()
-    code = 0
-    with contextlib.redirect_stdout(buf):
-        # --json 必须前置：argparse 的全局选项放在子命令之后会解析失败
-        code = dispatch(["--json"] + argv)
-    return code, _parse_json(buf.getvalue()), buf.getvalue()
+
+def _run_and_show(dispatch, argv: list[str]) -> None:
+    """跑子命令并把结果摆到屏幕上（子进程的 stdout 不再自动可见）。"""
+    code, out, err = dispatch(argv)
+    text = (out or err or "").strip()
+    if code == 0:
+        if text:
+            print(text)
+    else:
+        _show_failure(text, code)
 
 
 # --------------------------------------------------------------------------
@@ -167,20 +202,8 @@ def page_add(dispatch, cfg: dict) -> None:
     # 内容走 stdin，避免 cmd.exe 把多行参数压平
     print()
     tui.spinner_line("写入中…")
-    import contextlib
-    import io
-    import sys
-
-    buf = io.StringIO()
-    old_stdin = sys.stdin
-    try:
-        sys.stdin = io.StringIO(text)
-        with contextlib.redirect_stdout(buf):
-            code = dispatch(argv)
-    finally:
-        sys.stdin = old_stdin
-
-    raw = buf.getvalue().strip()
+    code, out, err = dispatch(argv, stdin_text=text)
+    raw = (out or err or "").strip()
     if code == 0:
         tui.ok(raw.splitlines()[-1] if raw else "已提交")
         if use_async:
@@ -189,15 +212,13 @@ def page_add(dispatch, cfg: dict) -> None:
             # 得到 0 条就以为记忆丢了。
             tui.note("已入队，但还没进库 —— 此刻检索不到它是正常的。")
             if tui.confirm("现在就跑一次 worker 落库？（pro 模式每条约 10~50s）", default=True):
-                buf2 = io.StringIO()
                 tui.spinner_line("落库中…")
-                with contextlib.redirect_stdout(buf2):
-                    code2 = dispatch(["worker", "--once"])
-                out2 = buf2.getvalue().strip()
+                code2, out2, err2 = dispatch(["worker", "--once"])
+                text2 = (out2 or err2 or "").strip()
                 if code2 == 0:
-                    tui.ok(out2.splitlines()[-1] if out2 else "已落库")
+                    tui.ok(text2.splitlines()[-1] if text2 else "已落库")
                 else:
-                    _show_failure(out2, code2)
+                    _show_failure(text2, code2)
     else:
         _show_failure(raw, code)
 
@@ -342,12 +363,14 @@ def page_queue(dispatch, cfg: dict) -> None:
     )
     if action == 0:
         tui.note("开始消费；Ctrl+C 可中断（已入队的任务不会丢）")
-        dispatch(["worker", "--idle-exit", "5"])
+        tui.spinner_line("消费中…")
+        _run_and_show(dispatch, ["worker", "--idle-exit", "5"])
     elif action == 1:
-        dispatch(["worker", "--once", "--max", "1"])
+        tui.spinner_line("处理一条…")
+        _run_and_show(dispatch, ["worker", "--once", "--max", "1"])
     elif action == 2:
         if tui.confirm("把状态为 dead 的任务全部重投？", default=False):
-            dispatch(["retry", "dead"])
+            _run_and_show(dispatch, ["retry", "dead"])
 
 
 _LEVEL_STYLE = {"OK": ("ok", "green"), "WARN": ("warn", "yellow"), "CRIT": ("err", "red")}
@@ -621,7 +644,7 @@ def page_settings(dispatch, cfg: dict) -> None:
 
 def page_doctor(dispatch, cfg: dict) -> None:
     print(tui.title("环境自检"))
-    dispatch(["doctor"])
+    _run_and_show(dispatch, ["doctor"])
 
 
 def page_config(dispatch, cfg: dict) -> None:
@@ -652,7 +675,7 @@ def page_config(dispatch, cfg: dict) -> None:
 def page_help(dispatch, cfg: dict) -> None:
     """把命令清单直接摆在界面上 —— 不然没人知道有 help，也不知道 agent 该读哪份规格。"""
     print(tui.title("帮助 / 命令清单"))
-    dispatch(["help"])
+    _run_and_show(dispatch, ["help"])
     print()
     tui.note("机器可读规格：hy-mem help --json （参数类型 / 默认值 / 返回字段 / 示例）")
     tui.note("身份切换：hy-mem user set <名字> —— 不设就是「通用」，多个智能体共享同一份记忆")

@@ -45,6 +45,14 @@ def classify_error(e: BaseException) -> tuple[int, str, str]:
         )
     if name in _INTERNAL_TYPES:
         return EXIT_INTERNAL, "E_INTERNAL", "这多半是程序缺陷：加 --verbose 复跑可拿到堆栈"
+    if name == "EndpointUnavailable":
+        # 向量库服务活着却连不上：明确失败，绝不静默回落嵌入式读旧索引
+        return (
+            EXIT_RUNTIME,
+            "E_ENDPOINT",
+            "向量库服务异常：先 `hy-mem serve` 看它的报错，或 `hy-mem doctor` 自检；"
+            "确认无误后可以 `hy-mem queue` 观察后台任务是否卡住",
+        )
     if name in _RUNTIME_TYPES:
         return EXIT_RUNTIME, "E_RUNTIME", "先跑 `hy-mem doctor`；嵌入密钥无效用 `hy-mem setup --step embedding`"
     return EXIT_RUNTIME, "E_RUNTIME", "加 --verbose 复跑可看到详细堆栈"
