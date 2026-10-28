@@ -110,7 +110,13 @@ def main() -> int:
     setup_wizard.run_setup(scope="search")
     after = cfgmod.load_raw()
     check("minScore 改为 0.45", after["search"]["minScore"] == 0.45, str(after["search"]))
-    check("其它字段未变（embedding）", after["embedding"] == before["embedding"])
+    # 比 key 集合而不是整段相等：embedding 段新增了 keyEnv（密钥只记变量名），
+    # 旧快照里没有这个字段，整段比较会把「新增默认字段」误判成「改了配置」。
+    _emb_keys = ("baseUrl", "model", "apiKey", "dims")
+    check("其它字段未变（embedding）",
+          {k: after["embedding"].get(k) for k in _emb_keys}
+          == {k: before["embedding"].get(k) for k in _emb_keys},
+          str(after["embedding"]))
     check("其它字段未变（llm）", after["llm"] == before["llm"])
 
     # ---- 4. lite 模式跳过 LLM ----

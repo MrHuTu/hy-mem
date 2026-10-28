@@ -69,6 +69,8 @@ DEFAULTS: dict[str, Any] = {
         "baseUrl": "https://cn-beijing.maas.qianwenaiapi.com/compatible-mode/v1",
         "model": "qwen3.7-text-embedding-flash",
         "apiKey": "",
+        # 密钥只放环境变量；这里记的是变量名，轮换 key 不用改配置
+        "keyEnv": "MEMORY_EMBEDDER_API_KEY",
         "dims": 1024,
     },
     "llm": {
@@ -363,6 +365,20 @@ def resolve_llm_key(cfg: dict) -> str:
     return ""
 
 
+def resolve_embed_key(cfg: dict) -> str:
+    """向量模型密钥：配置里的明文 > keyEnv 指定的环境变量 > 约定变量名。
+
+    第三个来源是历史行为（配置里 key 留空、靠 MEMORY_EMBEDDER_API_KEY 跑），
+    保留它是为了让升级前就配好环境变量的机器继续能用；换 key 时只动环境变量，
+    配置文件里只留 `keyEnv` 这个变量名，永远不会再出现明文。
+    """
+    emb = cfg.get("embedding") or {}
+    if emb.get("apiKey"):
+        return str(emb["apiKey"])
+    env_name = emb.get("keyEnv") or "MEMORY_EMBEDDER_API_KEY"
+    return os.getenv(env_name, "") or os.getenv("MEMORY_EMBEDDER_API_KEY", "")
+
+
 # 从聊天窗口/文档粘密钥时最容易带进来的不可见字符
 _INVISIBLE = {
     "\ufeff": "BOM 标记",
@@ -423,7 +439,7 @@ def to_env(cfg: dict) -> dict[str, str]:
     else:
         env["MEMORY_EMBEDDER_BASE_URL"] = str(emb.get("baseUrl") or "")
         env["MEMORY_EMBEDDER_MODEL"] = str(emb.get("model") or "")
-        env["MEMORY_EMBEDDER_API_KEY"] = str(emb.get("apiKey") or "")
+        env["MEMORY_EMBEDDER_API_KEY"] = resolve_embed_key(cfg)
 
     env["MEMORY_LLM_BASE_URL"] = str(llm.get("baseUrl") or "")
     env["MEMORY_LLM_MODEL"] = str(llm.get("model") or "")
@@ -462,7 +478,9 @@ def validate(cfg: dict) -> list[tuple[str, bool, str]]:
     if provider == "openai":
         out.append(("embedding.baseUrl", bool(emb.get("baseUrl")), str(emb.get("baseUrl") or "未设置")))
         out.append(("embedding.model", bool(emb.get("model")), str(emb.get("model") or "未设置")))
-        out.append(("embedding.apiKey", bool(emb.get("apiKey")), "已设置" if emb.get("apiKey") else "未设置"))
+        emb_key = resolve_embed_key(cfg)
+        emb_src = "config.json" if emb.get("apiKey") else (emb.get("keyEnv") or "MEMORY_EMBEDDER_API_KEY")
+        out.append(("embedding.apiKey", bool(emb_key), f"来自 {emb_src}" if emb_key else f"{emb_src} 为空"))
 
     if mode in ("pro", "ultra"):
         out.append(("llm.baseUrl", bool(llm.get("baseUrl")), str(llm.get("baseUrl") or "未设置")))

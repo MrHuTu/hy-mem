@@ -44,6 +44,11 @@ def run(
     env["NO_COLOR"] = "1"
     env.setdefault("HY_MEM_CONFIG", str(ROOT / "config.json"))
     env.setdefault("HY_MEM_HOME", str(ROOT))
+    # 配置闸门要「密钥齐备」才会放行到参数校验。以前靠 config.json 里存着真 key
+    # 来满足这个前提，现在密钥只在环境变量里（仓库里不许有明文），所以这里给一对
+    # 明显是假的占位值——本套件不发起任何真实模型调用，真值没有意义。
+    env.setdefault("MEMORY_EMBEDDER_API_KEY", "sk-test-cli-placeholder")
+    env.setdefault("MEMORY_LLM_API_KEY", "sk-test-cli-placeholder")
     env.pop("HY_MEM_USER_ID", None)
     if env_extra:
         env.update({k: v for k, v in env_extra.items() if v is not None})

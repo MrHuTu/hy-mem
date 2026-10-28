@@ -306,7 +306,7 @@ def readiness(cfg: dict | None = None) -> dict:
             add("embedding.baseUrl", "向量模型入口（baseUrl）为空", "hy-mem setup --step embedding")
         if not str(emb.get("model") or "").strip():
             add("embedding.model", "向量模型名为空", "hy-mem setup --step embedding")
-        if not (emb.get("apiKey") or os.getenv("MEMORY_EMBEDDER_API_KEY")):
+        if not cfgmod.resolve_embed_key(cfg):
             add(
                 "embedding.apiKey",
                 "向量模型密钥未设置",
@@ -339,7 +339,7 @@ def readiness(cfg: dict | None = None) -> dict:
     charset(
         "embedding.apiKey",
         "向量模型密钥",
-        emb.get("apiKey") or os.getenv("MEMORY_EMBEDDER_API_KEY"),
+        cfgmod.resolve_embed_key(cfg),
         "hy-mem setup --step embedding",
     )
     if mode in ("pro", "ultra"):
