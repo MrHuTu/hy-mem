@@ -26,9 +26,9 @@
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **34 个 py，15878 行**（`cli/` 20 个 12170 行 + `scripts/` 14 个 3708 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
+| 源码规模 | **35 个 py，16900 行**（`cli/` 20 个 12634 行 + `scripts/` 15 个 4266 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **452**（CLI 84 / UI 95 / setup 133 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 29 / encoding 10） | 见 §8 |
+| 测试用例 | **587**（CLI 84 / UI 110 / setup 139 / vdb 36 / MCP 22 / queue 18 / oplog 25 / i18n 31 / encoding 10 / menu 112） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 33 MB）；对外分发 `dist/hy-mem-0.9.13-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **160 s**（含压缩包 24 s） | 构建日志末行 |
@@ -53,16 +53,16 @@ D:\tools_open\agent-bridge\
 │
 ├── cli\                       ← 全部业务代码（全部可改，改完必须跑测试）
 │   ├── _pyi_entry.py          ← 打包入口。只做两件事：冻结进程强制 UTF-8、转发 main
-│   ├── hy_mem_cli.py   (3481) ← 大脑：31 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类 + stdin 解码链
+│   ├── hy_mem_cli.py   (3480) ← 大脑：31 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类 + stdin 解码链
 │   ├── helptext.py      (672) ← 命令规格单一真源（`help` / `help --json` 的数据源）
-│   ├── config.py        (499) ← config.json 读写 + env 映射 + 校验 + 身份默认值（`MEMORY_DATA_DIR` 优先于配置文件）
+│   ├── config.py        (523) ← config.json 读写 + env 映射 + 校验 + 身份默认值（`MEMORY_DATA_DIR` 优先于配置文件）
 │   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0；get_json(direct=True) 供回环探活
 │   ├── vdb_endpoint.py  (484) ← chroma server 端点层（0.9.10）：`serve` 独占数据 + owner 化的 server.port；客户端 ensure_endpoint 注入/复验 MEMORY_VECTOR_HOST/PORT，端点该在却连不上就抛 EndpointUnavailable（不静默降级）；0.9.11 起用进程创建时间识破 pid 复用
-│   ├── setup_wizard.py  (654) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
-│   ├── menu.py          (907) ← 交互主界面 + 设置中心 + 13 个页面（子命令一律子进程派发；写记忆支持连续写入）
-│   ├── i18n.py          (434) ← 中英切换：中文原文当 key，`tr()` 缺译回落中文，语言来源 HY_MEM_LANG > config.lang > zh
+│   ├── setup_wizard.py  (795) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
+│   ├── menu.py         (1110) ← 交互控制台（命令式 shell：命令表 / 历史 / Tab 补全 / Ctrl+R；子命令一律子进程派发）
+│   ├── i18n.py          (529) ← 中英切换：中文原文当 key，`tr()` 缺译回落中文，语言来源 HY_MEM_LANG > config.lang > zh
 │   ├── oplog.py         (243) ← 操作日志：`<dataDir>/ops.log`，只留最近 50 条，正文/查询词不落盘，密钥打码
-│   ├── tui.py          (1367) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪 / 折行（wrap）
+│   ├── tui.py          (1556) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪 / 折行（wrap）
 │   ├── runtime_check.py (323) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
 │   ├── store.py         (511) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
 │   ├── storage_ops.py   (197) ← 数据目录运维：用量 / 剩余空间 / 迁移 / 备份 / 重建
@@ -137,7 +137,7 @@ D:\tools_open\agent-bridge\
 | 6 | 身份回填 `args.user` | 未传 `-u` 时填 `config.identity.userId` → `HY_MEM_USER_ID` → `default`。**这一步修的是真实报错**：`search` 用复数形参，`[None]` 会被 SDK 抛 `user_ids is required and cannot be empty` |
 | 7 | `--help-json` 短路 → `cmd_help` | 智能体最省事的一条路，不必进子命令 |
 | 8 | `logging.disable(ERROR)` | SDK 的 logger 自带 handler 且 `propagate=False`，只能全局压；不压的话 reconcile 会把 `BM25_ALL_ZERO` 这类正常统计打成 ERROR 混进 stdout，agent 解析失败。交互模式（menu/setup）和 `--verbose` 除外 |
-| 9 | 无子命令分流 | TTY → 首次设置向导 + 交互主界面；**非 TTY（被 agent / 管道调用）→ 只打简短帮助并 exit 0**，绝不阻塞等输入 |
+| 9 | 无子命令分流 | TTY → 首次设置向导 + 控制台（shell）；**非 TTY（被 agent / 管道调用）→ 只打简短帮助并 exit 0**，绝不阻塞等输入。要脚本化驱动控制台用 `hy-mem menu`（管道可用） |
 | 10 | `args.func(args)` + 异常兜底 | `KeyboardInterrupt`→130；`Aborted`（UI 取消）→0；其余→`classify_error()` 映射 2/3，`--json` 下额外在 stdout 给结构化错误 |
 
 ### 3.1 错误与退出码
@@ -179,7 +179,7 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 其他要点：
 
 - 端口文件 `data/server.port` 带 `{port, pid, owner, started_at}`，写入走临时文件 + `replace`（读方不会看到半截 JSON）；删除必须给 `expect_pid`——**只删自己的登记**（0.9.9 的 F2 就是无差别删除）。
-- 交互界面（`menu.py`）的子命令一律**子进程**派发（`menu.subprocess_dispatch`）：同进程跑 worker 会把后台角色写进本进程 env。
+- 控制台（`menu.py`）的子命令一律**子进程**派发（`menu.subprocess_dispatch`）：同进程跑 worker 会把后台角色写进本进程 env。
 - 拉起闸门 `claim_worker_slot` 会先清「pid 已不存在」的注册行（`store._purge_dead_pids`，只对 3s 以上的行探活），否则被 SIGKILL 的 worker 要占满 15s 名额，期间检索只能干等（F10）。
 - serve 主体是 `vdb_endpoint.start_server_thread`（uvicorn 线程 + `_patch_api_embeddings`），外加 ASGI 包装记录最后请求时间供空闲退出。
 - 注入时同步补 `NO_PROXY=127.0.0.1,localhost`——chroma 的 httpx 吃代理环境变量与 Windows 系统代理，回环被代理劫持即 502（实测）。
@@ -197,7 +197,7 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 |---|---|
 | `tui.wrap(text, width)` | 按东亚字宽折行；保留原有换行；拉丁词整体不拆（时间戳/URL 不劈开）；标点悬挂；续行沿用缩进 |
 | `tui.table()` | 单元格支持 `\n` 多行，同行各列顶部对齐（调用方自己算列宽再 wrap 传进来） |
-| 交互页（`menu.py`） | 内容/说明列宽 = `term_width()` − 固定列 − 分隔符，`max(24, …)` 兜底；检索页底部给 `看全文：hy-mem get <id>` |
+| 控制台（`menu.py`） | 内容/说明列宽 = `term_width()` − 固定列 − 分隔符，`max(24, …)` 兜底；检索结果底部给 `看全文：get <id>` |
 | 非交互（`cmd_search` / `cmd_list` / `cmd_history`） | 多行正文按原始缩进对齐展开（`pad = len(head)`），不再压平、不再按字符截断 |
 
 判定标准：管道或窄终端下逐行宽度 ≤ `term_width()`，且**任何一条记忆的 History 都能完整看到**（`scripts/test_ui.py` 的宽度裁剪用例守着这条）。
@@ -226,7 +226,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | 机制 | 口径 |
 |---|---|
 | 操作日志 | `cli/oplog.py`：`<dataDir>/ops.log`，**只留最近 50 条**（超限截尾 + 原子替换）；在 `main()` 统一计时记退出码，CLI 与 TUI（子进程调 CLI）一次覆盖；`add/update/search` 的**正文与查询词不落盘**，密钥类参数打码 `***`；写失败静默（`--verbose` 才吭声），绝不影响命令。查看 `hy-mem log` 或设置页「操作日志」 |
-| 界面语言 | `cli/i18n.py`：中文原文当 key，`tr()` 缺译**回落中文**；优先级 `HY_MEM_LANG` > `config.lang` > `zh`；`hy-mem config set lang=en` 立即生效。覆盖交互界面全部页面 + 错误提示 + 常用命令摘要；命令行正文输出仍为中文（测试断言了大量中文字面量，默认 zh 必须逐字不变） |
+| 界面语言 | `cli/i18n.py`：中文原文当 key，`tr()` 缺译**回落中文**；优先级 `HY_MEM_LANG` > `config.lang` > `zh`；`hy-mem config set lang=en` 立即生效。覆盖控制台全部命令文案 + 向导 + 错误提示 + 常用命令摘要；命令行正文输出仍为中文（测试断言了大量中文字面量，默认 zh 必须逐字不变） |
 
 新增界面文案时：`menu.py` 用 `tr("中文")` 包一层并在 `i18n.EN` 补一行；忘记补只是回落中文，不会报错。
 
@@ -353,8 +353,8 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 
 | 套件 | 用例 | 覆盖 | 跑法 |
 |---|---|---|---|
-| `scripts/test_ui.py` | **95** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、热键、宽度裁剪、不折行、菜单导航、**写记忆连续写入的循环语义** | `.venv/Scripts/python.exe scripts/test_ui.py` |
-| `scripts/test_setup.py` | **133** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）** | `.venv/Scripts/python.exe scripts/test_setup.py` |
+| `scripts/test_ui.py` | **110** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、**历史翻找 / Tab 补全 / Ctrl+R 反查 / Ctrl+D / Ctrl+K**、宽度裁剪、不折行、菜单导航、控制台连写连查 | `.venv/Scripts/python.exe scripts/test_ui.py` |
+| `scripts/test_setup.py` | **139** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）** | `.venv/Scripts/python.exe scripts/test_setup.py` |
 | `scripts/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
 | `scripts/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe scripts/test_queue.py` |
 | `scripts/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe scripts/test_concurrency.py [exe]` |
@@ -362,7 +362,8 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | `scripts/test_vdb_endpoint.py` | **36** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe scripts/test_vdb_endpoint.py` |
 | `scripts/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe scripts/test_encoding.py` |
 | `scripts/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe scripts/test_oplog.py` |
-| `scripts/test_i18n.py` | **29** | 中英切换：默认 zh 逐字不变、`HY_MEM_LANG=en` 生效、缺译回落中文、`config set lang=en` 读到 en | `.venv/Scripts/python.exe scripts/test_i18n.py` |
+| `scripts/test_menu.py` | **112** | 控制台全覆盖：18 条命令逐个跑通、旧菜单 18 项逐一映射到命令、别名/补全/切词、未知命令给建议、真 `run_menu` 管道循环（命令后仍回到提示符、不「按任意键」、EOF 干净退出）、历史落盘与去重 | `.venv/Scripts/python.exe scripts/test_menu.py` |
+| `scripts/test_i18n.py` | **31** | 中英切换：默认 zh 逐字不变、`HY_MEM_LANG=en` 生效、缺译回落中文、`config set lang=en` 读到 en | `.venv/Scripts/python.exe scripts/test_i18n.py` |
 
 ```bash
 # 源码模式
@@ -374,7 +375,7 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe scripts/test_cli
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：九套全绿（cli 84 / ui 95 / setup 133 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 29 / encoding 10 = **452**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：十套全绿（cli 84 / ui 110 / setup 139 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 31 / encoding 10 / menu 112 = **587**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
 
 ### 8.1 怎么测 CLI —— 四条铁律（2026-10-28 补，源自 401 事故）
 
@@ -769,7 +770,7 @@ ls -1 dist/ | grep -E "hy-mem|zip"
 
 | 文件 | 作用 |
 |---|---|
-| `skill/hy-dev/SKILL.md` | 主规范：分道表（L0 文档 / L1 修复 / L2 功能 / L3 发版）、六阶段流水线、契约与分片文档规则、测试放置与九套回归命令、提交纪律、打包五坑 |
+| `skill/hy-dev/SKILL.md` | 主规范：分道表（L0 文档 / L1 修复 / L2 功能 / L3 发版）、六阶段流水线、契约与分片文档规则、测试放置与十套回归命令、提交纪律、打包五坑 |
 | `skill/hy-dev/references/contract-template.md` | 父级契约文档模板（`docs/specs/<日期>-<slug>/00-contract.md`） |
 | `skill/hy-dev/references/slice-template.md` | 子级分片文档模板（`S<n>-*.md` / `R<n>-*.md`） |
 
@@ -802,7 +803,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 | 阶段 | 位置 | 入库 |
 |---|---|---|
 | 开发期红 → 绿 | `.local-test/repro_<slug>.py` / `case_<slug>.py` | ❌（整目录被忽略） |
-| 稳定后**转正** | `scripts/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 452** | ✅ |
+| 稳定后**转正** | `scripts/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 587** | ✅ |
 
 判据：这条用例是发版必跑的门禁吗？是 → 转正；只是一次性复现 → 留 `.local-test/`。
 
@@ -815,7 +816,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 .venv/Scripts/python.exe cli/hy_mem_cli.py <cmd>          # 或 hy-mem <cmd>（PATH 上指向源码）
 
 # 交互界面 / 设置
-hy-mem                                                    # TTY 下进主界面
+hy-mem                                                    # TTY 下进控制台（shell）
 hy-mem setup                                              # 四步向导
 hy-mem --help-json | python -m json.tool                  # 机器可读规格
 
