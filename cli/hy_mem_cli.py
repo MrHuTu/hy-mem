@@ -25,6 +25,7 @@ from pathlib import Path
 
 import netprobe
 import store
+import vdb_endpoint
 from mcp_server import _in_range, _item_ts, _parse_time as _parse_when
 
 
@@ -432,6 +433,11 @@ def build_embedding_service():
 def make_client(mode: str | None):
     from hy_memory import HyMemoryClient  # 延迟导入，doctor 失败时也能跑
 
+    # 端点注入（2026-10-28 事故收敛）：有 worker 承载的 chroma server 就走
+    # HttpClient（SDK 按 MEMORY_VECTOR_HOST/PORT 自动切换），没有则拉起
+    # worker 等就绪。客户端进程从此不再自开嵌入式实例——chroma embedded
+    # 不支持多进程共享，长驻进程会读到过期/空的向量索引。
+    vdb_endpoint.ensure_endpoint()
     svc = build_embedding_service()
     kwargs = {}
     if mode:
@@ -933,7 +939,8 @@ def _worker_cap() -> int:
         return 3
 
 
-def _spawn_detached_worker(idle_exit: float = 90.0) -> bool:
+def _spawn_detached_worker(idle_exit: float = 90.0,
+                           extra_args: list[str] | None = None) -> bool:
     """拉起一个脱管的后台消费 supervisor（空闲自退出），成功返回 True。
 
     为什么不常驻：智能体场景下「临时拉起 + 空闲自杀」最干净 —— add --async
@@ -965,7 +972,7 @@ def _spawn_detached_worker(idle_exit: float = 90.0) -> bool:
         "--idle-exit", str(idle_exit),
         "--poll", "1.0",
         "--lanes", str(_worker_cap()),
-    ]
+    ] + (extra_args or [])
     try:
         if os.name == "nt":
             flags = 0x08000000  # CREATE_NO_WINDOW：不闪黑框
@@ -1820,6 +1827,16 @@ def cmd_worker(args) -> int:
     hb_conn = store.connect()
     store.worker_purge_stale(hb_conn)  # 清理硬杀残留的注册行
 
+    # 数据唯一所有者（2026-10-28 事故收敛）：本 worker 内嵌 chroma server
+    # 线程，其余进程经 HttpClient 连它。自己的 SDK 调用也走 HttpClient
+    #（env 注入），避免同进程内再开一份嵌入式实例互踩。
+    served = vdb_endpoint.start_for_worker()
+    server_handle = served[1] if served else None
+    if served:
+        os.environ["MEMORY_VECTOR_HOST"] = "127.0.0.1"
+        os.environ["MEMORY_VECTOR_PORT"] = str(served[0])
+        print(f"hy-mem: chroma server 就绪（:{served[0]}）", file=sys.stderr)
+
     clients: dict[str, object] = {}
     clients_lock = threading.Lock()
 
@@ -1852,7 +1869,8 @@ def cmd_worker(args) -> int:
                         stop.set()
                         break
                     if (
-                        not st.claimed_any
+                        not getattr(args, "no_fast_exit", False)
+                        and not st.claimed_any
                         and time.time() - started >= 30
                         and qs["pending"] == 0
                     ):
@@ -1940,6 +1958,8 @@ def cmd_worker(args) -> int:
         store.worker_leave(hb_conn, wid)  # 注销注册行，立即腾出拉起名额
     except Exception:  # noqa: BLE001
         pass
+    if server_handle is not None:
+        vdb_endpoint.stop_server_thread(server_handle, 0)  # 清端口文件 + 停线程
     for c in clients.values():
         try:
             c.close()
@@ -2826,6 +2846,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--timeout", type=float, default=0, help="总运行时长上限秒（0=不限）")
     ps.add_argument("--lanes", type=int, default=0, help="消费线程数（0=取 HY_MEM_MAX_WORKERS，默认 3）")
     ps.add_argument("--no-recover", action="store_true", help="不回收僵死的 running 任务")
+    ps.add_argument("--no-fast-exit", action="store_true",
+                    help="禁用「30s 没抢到任务且队列空」的早退（端点拉起的 server-host worker 用）")
     ps.set_defaults(func=cmd_worker)
 
     ps = sub.add_parser("queue", help="查看队列")

@@ -369,7 +369,10 @@ def main() -> int:
     # 真正会「没发出」的另一类：主机不可达。文案要指向网络原因，不是 HTTP。
     _rd = netprobe.post_json("https://no-such-host-hymem.invalid/v1/embeddings", {"model": "m"}, "sk-ok", 2)
     check("不可达主机 → 未发出", isinstance(_rd, netprobe.NotSent), type(_rd).__name__)
-    check("不可达主机不出现 HTTP", "HTTP" not in _rd.reason, _rd.reason)
+    # 精确断言「不出现 HTTP 状态码」：提示文案里的「HTTPS_PROXY」变量名
+    # 含字母 HTTP，曾被误伤（2026-10-28，DNS 分支必现）。
+    import re as _re  # noqa: E402  与下方守卫段同风格：局部导入
+    check("不可达主机不出现 HTTP", _re.search(r"HTTP \d{3}", _rd.reason) is None, _rd.reason)
 
     # 各网络分支的文案单测 —— 不依赖本机 DNS/代理行为（有的网络会把不存在的
     # 域名劫持成一个假 IP，于是表现为超时而非解析失败）。
