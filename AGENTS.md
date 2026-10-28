@@ -44,7 +44,7 @@
 ```
 D:\tools_open\agent-bridge\
 ├── AGENTS.md                  ← 本文件（开发者交接说明）
-├── config.json                ← 源码环境的设置（含密钥，权限 600）。存在时强覆盖 .env
+├── config.json                ← 源码环境的设置（**不含密钥**，只记 keyEnv 变量名）。存在时强覆盖 .env
 ├── .env                       ← 源码环境的杂项/密钥兜底（不入库，别提交）
 ├── .env.example               ← 模板，说明每个变量的含义
 ├── hy-mem.cmd                 ← 源码模式启动器（cmd 壳，调 .venv 的 python）
@@ -230,18 +230,21 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 ### 5.1 优先级
 
 ```
-命令行参数  >  config.json  >  .env  >  进程真实环境变量（仅密钥例外）
+命令行参数  >  config.json  >  .env  >  进程真实环境变量
+密钥相反：环境变量  >  config.json（配置文件里根本不存明文）
 ```
 
 `config.json` 一旦存在就是**唯一真源**，会覆盖 `.env` 同名项（因为它是用户在向导里的显式选择）。改了 `.env` 不生效，先看 `config show`。
+
+**密钥是唯一例外**，方向也相反：`embedding.keyEnv` / `llm.keyEnv` 只记**变量名**，真实值从环境变量取（`MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`）。这样仓库可以公开、换 key 只动环境变量、`config.json` 备份随手贴出去也不泄漏。解析入口是 `config.resolve_embed_key()` / `config.resolve_llm_key()`，`doctor` 会显示「来自 MEMORY_EMBEDDER_API_KEY」还是「来自 config.json」。
 
 ### 5.2 config.json 关键字段
 
 | 字段 | 说明 |
 |---|---|
 | `mode` | `lite` 纯向量（快，无 LLM）/ `pro` 加 LLM 抽取（默认）/ `ultra` 再加 Schema 归纳 |
-| `embedding.{provider,baseUrl,model,apiKey,dims}` | 四项必须**原子一起改**，否则 `EmbeddingDimensionMismatchError` |
-| `llm.{baseUrl,model,apiKey,keyEnv,insecureTls}` | `apiKey` 默认留空，从 `keyEnv`（本项目 `YSJX_API_KEY`）继承，避免密钥副本 |
+| `embedding.{provider,baseUrl,model,apiKey,keyEnv,dims}` | baseUrl/model/dims 必须**原子一起改**，否则 `EmbeddingDimensionMismatchError`；`apiKey` 留空，从 `keyEnv`（默认 `MEMORY_EMBEDDER_API_KEY`）取 |
+| `llm.{baseUrl,model,apiKey,keyEnv,insecureTls}` | `apiKey` 留空，从 `keyEnv`（默认 `MEMORY_LLM_API_KEY`）取，避免密钥副本 |
 | `storage.dataDir` | 留空 = 安装根下的 `data`（**只写回非默认值**，防止把机器绝对路径固化） |
 | `identity.userId` | 空 = 通用（`default`，多智能体共享）；有值 = 隔离 |
 | `search.minScore` | 0.35 |

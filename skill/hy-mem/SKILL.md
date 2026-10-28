@@ -320,6 +320,12 @@ hy-mem untag --tag infra --yes    # 全局解绑某标签（需 --yes）
 
 `config.json`（默认在安装根，`D:\tools_open\agent-bridge\config.json`）是设置的**单一真源**，优先级 **命令行 > config.json > .env**。向导里改过的值会覆盖 .env 同名项。
 
+**密钥是唯一例外，且方向相反：只从环境变量取。** `config.json` 里 `embedding.apiKey` / `llm.apiKey` 恒为空，只留 `keyEnv` 记变量名（默认 `MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`）。所以：
+
+- 换 key 只改环境变量，**不要**动 config.json，更不要写进脚本或代码；
+- `hy-mem doctor` 会显示密钥「来自 MEMORY_EMBEDDER_API_KEY」还是「来自 config.json」，据此判断优先级走的是哪条；
+- 需要跑会真调模型的测试/探针前，先确认这两个变量已配（Windows `setx` 一次即可，重开终端生效）；缺了会显式跳过并说明原因。
+
 ```bash
 hy-mem                 # 无参数：首次进设置向导，之后进交互主界面
 hy-mem setup           # 完整四步向导（向量模型 / 运行模式 / LLM / 存储目录）
