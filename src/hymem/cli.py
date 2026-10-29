@@ -1831,6 +1831,86 @@ def _worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+def _batch_compat(row) -> bool:
+    """批次约束（spec §1 合批约束）：显式字段/request 级参数不入批。"""
+    import json as _json
+
+    try:
+        payload = _json.loads(row["payload"])
+    except Exception:  # noqa: BLE001
+        return False
+    if str(row["kind"] or "") != "add":
+        return False
+    if str(row["mode"] or "").strip().lower() == "lite":
+        return False
+    for k in ("memory_at", "metadata", "request_id"):
+        if payload.get(k):
+            return False
+    return True
+
+
+def _execute_batch(conn, rows, get_client) -> list[tuple[int, dict, list[str], str | None, Exception | None]]:
+    """S3 批次执行：逐 job 锁外 extract+prepare → 一次 batch_commit（锁内）。
+
+    返回逐 job 五元组 (job_id, result, ids, note, exc)：
+    exc 为 None 即成功（ids/note 取自 result）；extract/prepare 单 job
+    失败只标记该 job（exc 非 None，落账走 mark_failed），其余照常进批；
+    batch_commit 抛 CommitFailed 时整批全部标失败（exc 带上下文）。
+    """
+    from hymem.core.two_phase import CommitFailed as _CF
+    from hymem.core.two_phase import batch_commit, extract_phase, prepare_commit
+
+    if not rows:
+        return []
+    client = get_client(rows[0]["mode"])
+    jobs: list[dict] = []
+    per: dict[int, dict] = {}
+    for row in rows:
+        payload = json.loads(row["payload"])
+        ident = payload.get("identity") or {}
+        try:
+            ar = extract_phase(client, payload["text"],
+                               source=payload.get("source") or "cli", **ident)
+            prepared = prepare_commit(client, payload["text"], ar,
+                                      source=payload.get("source") or "cli", **ident)
+        except Exception as e:  # noqa: BLE001  单 job 失败不连坐（P4）
+            per[row["id"]] = {"exc": e}
+            continue
+        job = {"text": payload["text"], "agent_result": ar, "prepared": prepared}
+        jobs.append(job)
+        per[row["id"]] = {"job": job}
+    results: list[dict] = []
+    if jobs:
+        try:
+            with store.WriteLock():
+                results = batch_commit(client, jobs)
+        except _CF as e:
+            err = RuntimeError(f"批次提交失败：{e}")
+            return [(r["id"], {}, [], None, err) for r in rows]
+        except Exception as e:  # noqa: BLE001
+            return [(r["id"], {}, [], None, e) for r in rows]
+    # 对齐回逐 job（jobs 顺序 == rows 中成功 extract 的顺序）
+    out: list[tuple[int, dict, list[str], str | None, Exception | None]] = []
+    ri = 0
+    for row in rows:
+        p = per[row["id"]]
+        if "exc" in p:
+            out.append((row["id"], {}, [], None, p["exc"]))
+            continue
+        r = results[ri]
+        ri += 1
+        ids = _ids_of(r)
+        note = None
+        ln = (r.get("batch") or {}).get("lineage_note") or ""
+        if ln:
+            note = f"{ln}（挂链缺失但记忆可检索）"
+        elif not ids:
+            note = ("shadow_only: 抽取未产出可检索节点（只落 l1_raw 影子），本条检索不到；"
+                    "内容确有可抽取的事实时可 `hy-mem retry --shadow` 重做")
+        out.append((row["id"], r, ids, note, None))
+    return out
+
+
 def _execute_job(conn, row, get_client) -> tuple[dict, list[str], str | None]:
     payload = json.loads(row["payload"])
     client = get_client(row["mode"])
@@ -2026,7 +2106,76 @@ def cmd_worker(args) -> int:
                 if args.max and st.processed() >= args.max:
                     stop.set()
                     break
-                row = store.claim_next(conn, wid)
+                # S3 合批消费（2026-10-30 batch-commit）：队列有货且批次约束
+                # 满足时一次领多条同 user+agent 的 add；HY_MEM_BATCH_MAX=0 关闭。
+                # 判定 LLM 次数 N→1；单条路径完全保留（首条约束不满足即走原路）。
+                batch_max = 0
+                try:
+                    batch_max = max(0, int(os.getenv("HY_MEM_BATCH_MAX") or 4))
+                except ValueError:
+                    batch_max = 4
+                rows_batch: list = []
+                if batch_max > 1:
+                    peek = store.queue_stats(conn).get("pending") or 0
+                    if peek > 1:
+                        rows_batch = store.claim_next_batch(
+                            conn, wid, limit=batch_max, compat_check=_batch_compat,
+                        )
+                if len(rows_batch) >= 2:
+                    st.claim_started()
+                    t0 = time.time()
+                    job_ids = [r["id"] for r in rows_batch]
+                    try:
+                        outcomes = _execute_batch(conn, rows_batch, get_client)
+                        for job_id, result, ids, note, exc in outcomes:
+                            if exc is None:
+                                store.mark_done(conn, job_id, ids,
+                                                extra={"note": note} if note else None)
+                                st.done_one(True)
+                                ln = (result.get("batch") or {}).get("lineage_note") or ""
+                                print(f"[lane{lane_id}][batch][{job_id}] add ok "
+                                      f"ids={len(ids)}" + (" shadow_only" if note and not ln else ""),
+                                      file=sys.stderr)
+                                if args.json:
+                                    emit({"ok": True, "job": job_id, "kind": "add",
+                                          "batch": result.get("batch"),
+                                          "memory_ids": ids, "note": note}, True)
+                            else:
+                                st.done_one(False)
+                                state = store.mark_failed(
+                                    conn, job_id, f"{type(exc).__name__}: {exc}", retry=True)
+                                print(f"[lane{lane_id}][batch][{job_id}] FAILED -> {state}: "
+                                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                                if args.json:
+                                    emit({"ok": False, "job": job_id, "state": state,
+                                          "error": str(exc)}, True)
+                        ms = int((time.time() - t0) * 1000)
+                        print(f"[lane{lane_id}][batch] {len(rows_batch)} jobs "
+                              f"judge_llm=1 in {ms}ms", file=sys.stderr)
+                    except KeyboardInterrupt:
+                        for jid in job_ids:
+                            store.mark_failed(conn, jid, "interrupted", retry=True)
+                        raise
+                    except Exception as e:  # noqa: BLE001  批路径兜底：绝不留 running 僵尸
+                        import traceback
+
+                        traceback.print_exc()
+                        for jid in job_ids:
+                            st.done_one(False)
+                            state = store.mark_failed(
+                                conn, jid, f"batch aborted: {type(e).__name__}: {e}",
+                                retry=True)
+                            if args.json:
+                                emit({"ok": False, "job": jid, "state": state,
+                                      "error": str(e)}, True)
+                    finally:
+                        st.claim_ended()
+                    continue
+                if rows_batch:
+                    # 只领到 1 条（约束/异 user 止批）：退回单条路径语义
+                    row = rows_batch[0]
+                else:
+                    row = store.claim_next(conn, wid)
                 if row is None:
                     qs = store.queue_stats(conn)
                     if args.once and st.active == 0:

@@ -512,7 +512,9 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
     # ③ 一次判定（空 root；RECONCILE_ENABLED=false 走 _direct_store 同样空 root）
     stored_ids: list[str] = []
     recon_error = None
-    if all_texts:
+    ops_counts: dict = {}
+    recon_tokens: dict = {}   # 先初始化：all_texts 为空（全批无可提取事实）时
+    if all_texts:              # 不进判定，⑤ 结果段仍要引用——曾致 UnboundLocalError
         base_wr = jobs[0]["prepared"]["wr"]
         req_id = jobs[0]["prepared"]["request_id"]
         if writer_mod._RECONCILE_ENABLED:
@@ -546,6 +548,7 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
 
     # ④ lineage 修复：ADD 节点按 content→job 精确回填正确的根
     lineage_note = ""
+    id_to_node: dict = {}
     if stored_ids:
         by_id = run(vs.get_by_ids(stored_ids)) if hasattr(vs, "get_by_ids") else []
         id_to_node = {n.node_id: n for n in (by_id or [])}

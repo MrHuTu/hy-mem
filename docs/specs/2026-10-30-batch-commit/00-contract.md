@@ -115,4 +115,32 @@ batch_commit（新增，一次 WriteLock 内）：
 
 ## §2 执行记录
 
-（未开始；每分片完成后回写 commit 与证据）
+- **S1 完成（commit 677103b）**：`store.claim_next_batch`——同 (user_id, agent_id)
+  批量原子领取、异 user 止批、compat_check 约束注入、首条恒领。
+  验收：repro_batch_claim 6/6（含双 worker 并发零重复）；test_queue 21/21。
+- **S2 完成（commit 9e9c6ac）**：`two_phase.batch_commit`——批级 dedup →
+  逐 job L1 存档 → 一次判定（空 root）→ lineage 修复段 → 逐 job 结果。
+  验收：repro_batch_commit 7/7。修 UnboundLocalError（all_texts 空时
+  ops_counts/id_to_node 未初始化——"无可提取事实"是正常路径必须扛住）。
+- **S3 完成（本次 commit）**：worker lane 接线——`_batch_compat` 约束 +
+  `_execute_batch`（单 job extract 失败不连坐）+ lane 批分支
+  （peek>1 才批领、1 条退单条路径、批兜底绝不留 running 僵尸）。
+  `HY_MEM_BATCH_MAX`（默认 4，0=关闭）。调试教训：dbg 脚本先误判
+  "worker 2.2s 卡死"——真相是 add --async 自动拉起的 detached worker
+  先领走了任务（running），前台 --once 正常空跑；E2E 改为轮询等
+  detached worker 完成。
+- **S4 完成（本次 commit）**：
+  - test_concurrency 异步段 4 条：**103.2s → 66.7s**（目标 ≤80s 达标，
+    基线 103.2s；判定 LLM 4→1）
+  - E2E 拓扑（e2e_batch_lineage.py）：L1 根 3 个全 shadow、L2 3 条
+    **挂链 3/3 正确**、检索命中
+  - 回归：test_queue 21/21、test_cli 97/97、repro_two_phase 7/7、
+    repro_batch_claim 6/6、repro_batch_commit 7/7
+  - HY_MEM_BATCH_MAX=0 关闭开关走原单条路径（test_queue/test_cli 全绿佐证）
+
+### 遗留（后续 spec）
+
+- 判定 LLM 空响应（EMPTY_RESPONSE / finish_reason=length）在批路径同样
+  存在：_execute_batch 的单 job extract 失败走 mark_failed 退避，重试
+  后重新评估合批——行为正确但可观测性待加（统计 batch_success 计数）
+- 上游若开放 per-fact root 的批量 API，删除 lineage 修复段整体替换
