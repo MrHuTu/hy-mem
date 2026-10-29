@@ -27,3 +27,4 @@ config.json
 # 目录由程序自建（config.default_data_dir()），新克隆不依赖它存在。
 # 用 /data/ 锚定仓库根：不要误伤别处同名的 data 目录
 /data/
+cli/data/
