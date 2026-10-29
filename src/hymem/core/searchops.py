@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess  # 2026-10-29 修：S3-1 平移时漏带，_spawn_detached_worker 的 Popen 路径才触发
 from datetime import datetime
 
 from hymem.core import config as cfgmod

@@ -63,6 +63,8 @@ def make_client(mode: str | None):
     #   - chroma WAL -shm 重建窗口 → code 8 readonly database
     # 实测并发风暴命中率约 1/4——指数退避重试，让先到者完成初始化。
     last: Exception | None = None
+    import time as _time  # 2026-10-29 修：此处 time 未定义（并发 init 竞态重试路径才触发，NameError 曾被风暴暴露）
+
     for i in range(5):
         try:
             return HyMemoryClient(**kwargs)
@@ -72,7 +74,7 @@ def make_client(mode: str | None):
                     or "readonly" in s or "locked" in s or "busy" in s):
                 raise
             last = e
-            time.sleep(0.2 * (i + 1))
+            _time.sleep(0.2 * (i + 1))
     raise last  # type: ignore[misc]
 
 

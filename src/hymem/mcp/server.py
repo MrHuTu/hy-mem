@@ -177,6 +177,7 @@ def _tool_add_memory(args: dict) -> str:
             ExtractFailed,
             commit_extracted_with_retry,
             extract_phase,
+            prepare_commit,
         )
 
         # R4 锁探测前置：锁被占时不白烧 LLM 抽取，立即 lock_timeout。
@@ -214,10 +215,13 @@ def _tool_add_memory(args: dict) -> str:
                 },
                 ensure_ascii=False,
             )
+        # R4.7 预计算出锁：L1 向量 + 本批 dedup 在抢锁前算好
+        prepared = prepare_commit(client, text, agent_result, source="mcp", **add_kw, **_identity())
         try:
             with store.WriteLock(timeout=lock_timeout):
                 last = commit_extracted_with_retry(
-                    client, text, agent_result, source="mcp", **add_kw, **_identity()
+                    client, text, agent_result, prepared=prepared,
+                    source="mcp", **add_kw, **_identity(),
                 )
         except TimeoutError:
             return json.dumps(

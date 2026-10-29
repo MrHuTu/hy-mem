@@ -513,9 +513,15 @@ def extract_phase(client: object, text: str, **kw):
     return _f(client, text, **kw)
 
 
-def commit_extracted_with_retry(client: object, text: str, agent_result, *, attempts: int = 4, **kw):
+# R4.7（2026-10-29）：预计算出锁 —— L1 向量 + 本批 dedup 抢锁前算好
+def prepare_commit(client: object, text: str, agent_result, **kw):
+    from hymem.core.two_phase import prepare_commit as _f
+    return _f(client, text, agent_result, **kw)
+
+
+def commit_extracted_with_retry(client: object, text: str, agent_result, *, prepared: dict | None = None, attempts: int = 4, **kw):
     from hymem.core.two_phase import commit_extracted_with_retry as _f
-    return _f(client, text, agent_result, attempts=attempts, **kw)
+    return _f(client, text, agent_result, prepared=prepared, attempts=attempts, **kw)
 
 
 from hymem.core.two_phase import CommitFailed, ExtractFailed  # noqa: E402  供 except 引用
@@ -1153,10 +1159,13 @@ def cmd_add(args) -> int:
                          "反复失败跑 hy-mem doctor 检查 LLM 配置",
                     err_code="E_EXTRACT",
                 )
+            # R4.7 预计算出锁：L1 向量 + 本批 dedup 在抢锁前算好
+            prepared = prepare_commit(client, p, agent_result, source=args.source, **extra, **ident)
             try:
                 with store.WriteLock(timeout=lock_timeout):
                     last = commit_extracted_with_retry(
-                        client, p, agent_result, source=args.source, **extra, **ident
+                        client, p, agent_result, prepared=prepared,
+                        source=args.source, **extra, **ident,
                     )
             except TimeoutError:
                 mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
@@ -1869,9 +1878,14 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str], str | None]:
             client, payload["text"], source=payload.get("source") or "cli",
             **add_kw, **ident,
         )
+        # R4.7 预计算出锁：3 lane 在锁外并行算 L1 向量 + 本批 dedup
+        prepared = prepare_commit(
+            client, payload["text"], agent_result,
+            source=payload.get("source") or "cli", **add_kw, **ident,
+        )
         with store.WriteLock():
             result = commit_extracted_with_retry(
-                client, payload["text"], agent_result,
+                client, payload["text"], agent_result, prepared=prepared,
                 source=payload.get("source") or "cli", **add_kw, **ident,
             )
         # 两段式的失败都走异常（ExtractFailed/CommitFailed → 上层 mark_failed

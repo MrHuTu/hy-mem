@@ -11,6 +11,11 @@ hy-mem 的跨进程 WriteLock 此前覆盖整个 client.add（含 LLM 抽取 8~4
       mem_agent.process_add(mode=EXTRACT_ONLY) —— 纯 LLM 网络调用，
       无共享状态。tags 预取（只读）也在这里。
 
+  Phase 1.5 prepare_commit（锁外，R4.7 追加）：
+      L1 原文 embed + facts 收集 + 本批 dedup（含各 fact 向量）+
+      WriteRequest 构造。纯函数段不读不写库状态（dedup 是本批内互相
+      判重，writer.py:452 实读确认不查库）——此前在锁内属「陪绑」。
+
   Phase 2 commit_extracted（锁内，调用方持 WriteLock 后调用）：
       逐行对齐 MemoryWriter.write() 的提交段（SDK 设计规范，
       writer.py 模块注释「原始内容始终存为 L1_RAW → 提取高层信息
@@ -130,19 +135,20 @@ def extract_phase(client: object, text: str, **kw):
 
 
 # ---------------------------------------------------------------------------
-# Phase 2：提交（锁内，SDK 标准提交段）
+# Phase 1.5：提交预计算（锁外）——纯函数段，不读不写库状态
 # ---------------------------------------------------------------------------
 
 
-def commit_extracted(client: object, text: str, agent_result: Any, **kw) -> dict:
-    """SDK 标准提交段：L1 存档 → L2 reconcile（挂根）→ L1→SHADOW。
+def prepare_commit(client: object, text: str, agent_result: Any, **kw) -> dict:
+    """锁外预计算 commit 所需的一切：L1 向量、facts 收集/dedup、WriteRequest。
 
-    调用方必须已持有 hy-mem WriteLock。返回与 client.add 同形态的 dict。
+    这些步骤不依赖库当前状态（dedup 是本批内互相判重，深读 writer.py:452
+    确认不查库），放锁内是「陪绑」——白占锁时间。extract 后、抢锁前调用；
+    结果 dict 整体传给 commit_extracted(prepared=...)。
+    失败语义：embed/dedup 失败不致命（SDK 同款 non-fatal 降级——commit 内
+    会按需重算），此处只把可算的算好。
     """
-    from hy_memory.models.memory import MemoryLayer, MemoryNode, MemoryStatus, SourceType
     from hy_memory.pipelines.base import WriteRequest
-    from hy_memory.pipelines import writer as writer_mod
-    from hy_memory.agent.tools.basic_profile import upsert_basic_profile
 
     writer = _writer_of(client)
     run = lambda coro: _run(client, coro)  # noqa: E731
@@ -152,7 +158,6 @@ def commit_extracted(client: object, text: str, agent_result: Any, **kw) -> dict
     session_id = str(kw.get("session_id") or "default_session")
     source = str(kw.get("source") or "default")
     request_id = str(kw.get("request_id") or "") or str(uuid.uuid4())
-    memory_at = kw.get("memory_at")
 
     wr = WriteRequest(
         content=text,
@@ -162,15 +167,79 @@ def commit_extracted(client: object, text: str, agent_result: Any, **kw) -> dict
         session_id=session_id,
         content_type="text",
         extra={"agent_mode": "full", "mode": getattr(client, "_mode", "pro")},
-        memory_at=memory_at,
+        memory_at=kw.get("memory_at"),
         request_id=request_id,
         client_meta=kw.get("meta"),
     )
 
+    # L1 原文向量（纯函数：文本 → 向量）
+    l1_embedding = None
+    try:
+        l1_embedding, _ = run(writer.embed_service.embed_queued_with_meta(text))
+    except Exception:  # noqa: BLE001
+        l1_embedding = None  # commit 内兜底重算
+
+    # facts 收集 + 本批 dedup（纯本批计算，不查库）
+    info = dict(getattr(agent_result, "extracted_info", None) or {})
+    basic_info = info.pop("basic_info", None)  # commit 内走 L0 演化链
+    new_texts, new_metas = writer._collect_new_memories(info)
+    precomputed: dict = {}
+    if len(new_texts) >= 2:
+        try:
+            new_texts, new_metas, precomputed = run(
+                writer._dedup_extracted(new_texts, new_metas, wr, request_id)
+            )
+        except Exception:  # noqa: BLE001
+            precomputed = {}
+
+    return {
+        "wr": wr,
+        "request_id": request_id,
+        "l1_embedding": l1_embedding,
+        "basic_info": basic_info,
+        "info": info,
+        "new_texts": new_texts,
+        "new_metas": new_metas,
+        "precomputed": precomputed,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2：提交（锁内，SDK 标准提交段）
+# ---------------------------------------------------------------------------
+
+
+def commit_extracted(client: object, text: str, agent_result: Any, *, prepared: dict | None = None, **kw) -> dict:
+    """SDK 标准提交段：L1 存档 → L2 reconcile（挂根）→ L1→SHADOW。
+
+    调用方必须已持有 hy-mem WriteLock。返回与 client.add 同形态的 dict。
+    prepared：prepare_commit 的预计算结果（锁外算好的向量/dedup/请求对象）；
+    缺省时锁内现算（向后兼容旧调用）。
+    """
+    from hy_memory.models.memory import MemoryLayer, MemoryNode, MemoryStatus, SourceType
+    from hy_memory.pipelines import writer as writer_mod
+    from hy_memory.agent.tools.basic_profile import upsert_basic_profile
+
+    writer = _writer_of(client)
+    run = lambda coro: _run(client, coro)  # noqa: E731
+
+    if prepared is None:
+        prepared = prepare_commit(client, text, agent_result, **kw)
+    wr = prepared["wr"]
+    request_id = prepared["request_id"]
+    user_id = wr.user_id
+    agent_id = wr.agent_id or "default_agent"
+    session_id = wr.session_id or "default_session"
+    source = wr.source
+    memory_at = wr.memory_at
+
     vs = run(writer._get_vector_store())
 
-    # 1. embed + L1 存档（writer.write() 同款：L1_RAW / ACTIVE / EXPLICIT）
-    embedding, _embed_meta = run(writer.embed_service.embed_queued_with_meta(text))
+    # 1. L1 存档（writer.write() 同款：L1_RAW / ACTIVE / EXPLICIT）。
+    #    向量已锁外算好（prepared.l1_embedding），锁内只在缺失时兜底重算。
+    embedding = prepared["l1_embedding"]
+    if embedding is None:
+        embedding, _ = run(writer.embed_service.embed_queued_with_meta(text))
     mem_node = MemoryNode(
         user_id=user_id,
         agent_id=agent_id or "default_agent",
@@ -187,10 +256,10 @@ def commit_extracted(client: object, text: str, agent_result: Any, **kw) -> dict
     )
     memory_id = run(vs.upsert(mem_node))
 
-    info = dict(getattr(agent_result, "extracted_info", None) or {})
+    info = dict(prepared["info"])
+    basic_info = prepared["basic_info"]
 
     # 2. basic_info → L0 演化链（best-effort，SDK 同款 non-fatal）
-    basic_info = info.pop("basic_info", None)
     if isinstance(basic_info, dict) and basic_info:
         try:
             run(
@@ -207,16 +276,11 @@ def commit_extracted(client: object, text: str, agent_result: Any, **kw) -> dict
         except Exception:  # noqa: BLE001
             pass
 
-    # 3+4. facts → L2（reconcile 判重/合并/演化，source_raw_memory_id 挂 L1 根）
-    new_texts, new_metas = writer._collect_new_memories(info)
-    precomputed: dict = {}
-    if len(new_texts) >= 2:
-        try:
-            new_texts, new_metas, precomputed = run(
-                writer._dedup_extracted(new_texts, new_metas, wr, request_id)
-            )
-        except Exception:  # noqa: BLE001  SDK 同款 non-fatal
-            precomputed = {}
+    # 3+4. facts → L2（reconcile 判重/合并/演化，source_raw_memory_id 挂 L1 根）。
+    #      dedup 与向量已锁外算好（prepared），锁内只剩判定 LLM + 落库。
+    new_texts = prepared["new_texts"]
+    new_metas = prepared["new_metas"]
+    precomputed = prepared["precomputed"]
     recon_error = None
     stored_ids: list = []
     ops_counts: dict = {}
@@ -316,11 +380,12 @@ def commit_extracted(client: object, text: str, agent_result: Any, **kw) -> dict
 
 
 def commit_extracted_with_retry(
-    client: object, text: str, agent_result: Any, *, attempts: int = 4, **kw
+    client: object, text: str, agent_result: Any, *, prepared: dict | None = None, attempts: int = 4, **kw
 ) -> dict:
     """commit_extracted 包瞬态重试（readonly/locked 换次重跑），口径同
     clientops.add_sync_with_retry：部分写入后的重试可能产生重复条目，
-    reconcile 判重/合并会在后续写入时吸收。"""
+    reconcile 判重/合并会在后续写入时吸收。prepared 可跨重试复用（预计算
+    不受瞬态占用影响）。"""
     import time as _time
 
     from hymem.core.clientops import is_transient_db_error
@@ -328,7 +393,7 @@ def commit_extracted_with_retry(
     last: Exception | None = None
     for i in range(max(1, attempts)):
         try:
-            return commit_extracted(client, text, agent_result, **kw)
+            return commit_extracted(client, text, agent_result, prepared=prepared, **kw)
         except CommitFailed:
             raise  # reconcile 决策失败不是瞬态占用，重试无益
         except Exception as e:  # noqa: BLE001
