@@ -205,6 +205,12 @@ add_extracted 落 L2 断掉挂根链接，不合规。
 - R4.5 ✓ 检索对齐：E2E 实测「agent-bridge 项目在哪」事实查询召回第 1 名
   （l2_fact, score 0.72）；L1 shadow 不进召回（SDK 规范原意：原文层本来就不在
   _VDB_RECALL_LAYERS）
+- R4.6 ✓（21:57 追加，worker 侧）`_execute_job` 的 add 分支同构接两段式：
+  extract 锁外（3 lane 线程真并行过 LLM）+ 锁内 commit_extracted_with_retry；
+  lite 模式（无 LLM 抽取）保持旧整段路径。动机：风暴解剖（probe_storm_anatomy）
+  发现 worker 旧写法「锁内整段 client.add」把 3 车道退化成串行 × 全程 ~45s/条
+  ——test_concurrency 异步段 187s 的真因。验收：test_queue 21/21 +
+  test_concurrency 异步段耗时对比（改造前 187s 基线）
 
 ### 执行记录（2026-10-29 20:51–21:40）
 
