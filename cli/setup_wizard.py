@@ -225,13 +225,35 @@ def _confirm_credentials(new: dict, *, kind: str) -> dict:
         )
         if not complete:
             tui.warn("信息还不完整（baseUrl / 模型 / 密钥至少缺一项），先补齐再测连通性")
-        if complete and tui.confirm("就用这套信息测试连通性？", default=True):
+        # key 决定显式化（2026-10-29 用户反馈）：换全新模型时用户常要换新 key，
+        # 「一路回车继承」会把这个入口藏没。这里给三选一，继承是默认快路，
+        # 「换一把 key」是显式入口，取消兜底。
+        if complete:
+            choice = tui.select(
+                "密钥怎么用？",
+                [
+                    ("就用上面这把（回车直接测）", "key 没换过、属于这个端点", "k"),
+                    ("换一把 key", "换了全新模型 / key 已轮换；粘贴新 key 后再测", "n"),
+                    ("取消本次设置", "不改配置", "x"),
+                ],
+                default=0,
+            )
+            if choice == 2:
+                raise tui.Aborted()
+            if choice == 1:
+                new_key = tui.ask_secret(
+                    "新 API Key", hint="逐字粘贴，前后别带空格"
+                ).strip()
+                if not new_key:
+                    # 填了空 key：不许静默回落旧 key（401 家族），回到选择
+                    tui.warn("key 为空，未改动；重新选择或取消")
+                    continue
+                new["apiKey"] = new_key
+                new["keyEnv"] = fallback_env
             return new
-        # 只换 key：baseUrl / 模型在上面各自问过，要改它们应选「自定义」或换预设。
-        # 填了空 key 且新端点变量也为空 → 视为放弃（防非交互场景死循环；
-        # ask_secret 无 default 时已拒绝空回车，这里是被驱动场景的兜底）。
+        # 信息不完整：只能补 key（baseUrl / 模型在上面各自问过）
         new_key = tui.ask_secret(
-            "API Key", hint="换一把 key；逐字粘贴，前后别带空格"
+            "API Key", hint="信息不完整，先补 key；逐字粘贴，前后别带空格"
         ).strip()
         if not new_key and not (eff_env and os.getenv(eff_env, "")):
             raise tui.Aborted()

@@ -83,11 +83,12 @@ def main() -> int:
     tui.ask_secret = fake_secret
 
     # 步骤内 select 顺序：向量模型(0=qwen-flash) → 模式(1=pro) → LLM(0=ysjx)
-    seq["select"] = [0, 1, 0]
+    # select 消耗序列（2026-10-29 起 _confirm_credentials 里的「密钥怎么用？」三选一
+    # 也吃一次 select，默认 0=就用这把）：向量(0=GPT) → 三选一(0) → 模式(1=pro)
+    # → LLM(0) → 三选一(0) → 存储(0)
+    seq["select"] = [0, 0, 1, 0, 0, 0]
     seq["secret"] = ["sk-test-embed"]
     seq["ask"] = []
-    # step_storage 的 select 选 0=保持当前目录
-    seq["select"].append(0)
     data_dir = str(TMP / "data")
     # 先造一个「有数据的旧目录」，避免走迁移分支
     (TMP / "data").mkdir(exist_ok=True)

@@ -68,6 +68,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 # 假 OpenAI 兼容端点：每台只认自己的一套 key，别家 key 一律 401
 # ---------------------------------------------------------------------------
 EMB_KEY1 = "sk-emb-key-s1-111"   # 只被假端点1 接受
+EMB_ROT = "sk-emb-key-s1-rot9"   # S1 的轮换新 key（同端点升级场景用）
 EMB_KEY2 = "sk-emb-key-s2-222"   # 只被假端点2 接受 —— 跨端点必须换 key 的判据
 LLM_KEY1 = "sk-llm-key-s1-111"
 LLM_KEY2 = "sk-llm-key-s2-222"
@@ -98,8 +99,10 @@ def make_handler(emb_key: str, llm_key: str, tag: str):
             except Exception:  # noqa: BLE001
                 payload = {}
             want = emb_key if "/embeddings" in self.path else llm_key
+            if isinstance(want, str):
+                want = {want}
             rec = {"tag": tag, "path": self.path, "key": key,
-                   "model": str(payload.get("model") or ""), "auth_ok": key == want}
+                   "model": str(payload.get("model") or ""), "auth_ok": key in want}
             SEEN.append(rec)
             if not rec["auth_ok"]:
                 self._reply(401, {"error": {"message": "Token is invalid."}})
@@ -185,10 +188,10 @@ def scenario_first_use(base: str) -> None:
     m = len(SEEN)
     # config 不存在时向导会先 _fill_from_env 预填（qwen-flash+env key），所以：
     # 4=自定义 → baseUrl → 模型 → 追问 key（预填被 _pick_key 判定不可继承）→ KEY1
-    # → 三件套确认(y) → 探针 200 → 覆盖预填配置(y) → 维度变了选「先不重建」(2)
+    # → 三选一(回车=就用这把) → 探针 200 → 覆盖预填配置(y) → 维度变了选「先不重建」(2)
     # → 写入(y)
     rc, out, cfg = drive("embedding",
-                         f"4\n{base}\ntest-emb-a\n{EMB_KEY1}\ny\ny\n2\ny\n", sb,
+                         f"4\n{base}\ntest-emb-a\n{EMB_KEY1}\n\ny\n2\ny\n", sb,
                          {"MEMORY_EMBEDDER_API_KEY": EMB_KEY1})
     req = SEEN[m:]
     # 自检可能对预填 LLM 缺 key 报 WARN（rc=1），只要配置写入就算走通
@@ -204,7 +207,7 @@ def scenario_first_use(base: str) -> None:
     check("A4 探针发出且带环境变量 key", any(r["auth_ok"] and r["path"].endswith("/embeddings") for r in req),
           json.dumps(req, ensure_ascii=False))
     check("A5 预填旧值被手填覆盖时弹「覆盖旧配置」", "覆盖旧配置" in out, out[-300:])
-    check("A6 三件套确认环节出现", "就用这套信息测试连通性" in out, out[-800:])
+    check("A6 三选一密钥环节出现", "密钥怎么用" in out, out[-800:])
 
 
 def scenario_second_same(base: str) -> None:
@@ -213,13 +216,14 @@ def scenario_second_same(base: str) -> None:
     sb = Path(tempfile.mkdtemp(prefix="hymem-uiB-"))
     mkcfg(sb, base)
     m = len(SEEN)
-    # 回车=自定义 → baseUrl 回车保留 → 模型回车保留 → 确认(y) → 探针 200 → 无 diff 不问覆盖 → 写入(y)
-    rc, out, cfg = drive("embedding", "\n\n\ny\ny\n", sb,
+    # 回车=自定义 → baseUrl 回车保留 → 模型回车保留 → 三选一(回车=继承) → 探针 200
+    # → 无 diff 不问覆盖 → 写入(y)
+    rc, out, cfg = drive("embedding", "\n\n\n\ny\n", sb,
                          {"MEMORY_EMBEDDER_API_KEY": EMB_KEY1})
     req = SEEN[m:]
     check("B1 干净退出(rc=0)", rc == 0, f"rc={rc}")
     check("B2 三件套确认出现且明示环境变量来源",
-          ("就用这套信息测试连通性" in out) and ("$MEMORY_EMBEDDER_API_KEY" in out or "环境变量" in out),
+          ("密钥怎么用" in out) and ("$MEMORY_EMBEDDER_API_KEY" in out or "环境变量" in out),
           out[-800:])
     check("B3 探针用继承的 key 命中", any(r["auth_ok"] and r["path"].endswith("/embeddings") for r in req),
           json.dumps(req, ensure_ascii=False))
@@ -235,8 +239,8 @@ def scenario_custom_cross(base1: str, base2: str) -> None:
     mkcfg(sb, base1)  # 旧端点 = 假端点1
     m = len(SEEN)
     # 4=自定义 → 新 baseUrl=假端点2 → 模型名回车保留 → 追问新 key（跨端点）→ KEY2
-    # → 三件套确认(y) → 探针 200 → 覆盖旧配置(y) → 写入(y)
-    rc, out, cfg = drive("embedding", f"4\n{base2}\n\n{EMB_KEY2}\ny\ny\ny\n", sb,
+    # → 三选一(回车=就用这把) → 探针 200 → 覆盖旧配置(y) → 写入(y)
+    rc, out, cfg = drive("embedding", f"4\n{base2}\n\n{EMB_KEY2}\n\ny\ny\n", sb,
                          {"MEMORY_EMBEDDER_API_KEY": EMB_KEY1})
     req = SEEN[m:]
     check("C1 旧端点未收到任何请求", not any(r["tag"] == "S1" for r in req),
@@ -276,9 +280,9 @@ def scenario_llm(base: str) -> None:
     sb = Path(tempfile.mkdtemp(prefix="hymem-uiE-"))
     mkcfg(sb, base, llm_base=base, mode="pro")
     m = len(SEEN)
-    rc, out, cfg = drive("llm", "\n\n\ny\ny\n", sb, {"MEMORY_LLM_API_KEY": LLM_KEY2})
+    rc, out, cfg = drive("llm", "\n\n\n\ny\n", sb, {"MEMORY_LLM_API_KEY": LLM_KEY2})
     req = SEEN[m:]
-    check("E1 LLM 三件套确认出现", "就用这套信息测试连通性" in out, out[-600:])
+    check("E1 LLM 三选一密钥环节出现", "密钥怎么用" in out, out[-600:])
     check("E2 LLM 探针用环境变量 key 命中",
           any(r["auth_ok"] and r["path"].endswith("/chat/completions") for r in req),
           json.dumps(req, ensure_ascii=False))
@@ -286,7 +290,7 @@ def scenario_llm(base: str) -> None:
     sb2 = Path(tempfile.mkdtemp(prefix="hymem-uiE2-"))
     mkcfg(sb2, "https://old-llm.example.com/v1", llm_base="https://old-llm.example.com/v1", mode="pro")
     m2 = len(SEEN)
-    rc2, out2, cfg2 = drive("llm", f"4\n{base}\n\n{LLM_KEY2}\ny\ny\ny\n", sb2,
+    rc2, out2, cfg2 = drive("llm", f"4\n{base}\n\n{LLM_KEY2}\n\ny\ny\n", sb2,
                             {"MEMORY_LLM_API_KEY": LLM_KEY1})
     req2 = SEEN[m2:]
     check("E3 LLM 旧 key（KEY1）从未打到新端点",
@@ -298,9 +302,29 @@ def scenario_llm(base: str) -> None:
           repr(cfg2.get("llm", {}).get("apiKey")))
 
 
+def scenario_key_rotate(base: str) -> None:
+    """F. 同端点换新 key（用户 2026-10-29 反馈原点）：三选一显式选「换一把 key」。"""
+    print("\nF. 同端点 · 三选一显式换 key（key 轮换）")
+    sb = Path(tempfile.mkdtemp(prefix="hymem-uiF-"))
+    mkcfg(sb, base)  # 当前 keyEnv=MEMORY_EMBEDDER_API_KEY，环境里是旧 KEY1
+    m = len(SEEN)
+    # 回车=自定义 → baseUrl/模型回车保留 → 三选一选 2（换一把 key）→ 填轮换 key
+    # → 回到三选一(回车=就用新填的) → 探针 200 → apiKey 变了有 diff 问覆盖(y) → 写入(y)
+    rc, out, cfg = drive("embedding", f"\n\n\n2\n{EMB_ROT}\n\ny\ny\n", sb,
+                         {"MEMORY_EMBEDDER_API_KEY": EMB_KEY1})
+    req = SEEN[m:]
+    check("F1 三选一菜单出现", "密钥怎么用" in out, out[-600:])
+    check("F2 换 key 后探针用新 key", any(r["key"] == EMB_ROT and r["auth_ok"] for r in req),
+          json.dumps(req, ensure_ascii=False))
+    check("F3 旧 key 没被发出去", not any(r["key"] == EMB_KEY1 for r in req),
+          json.dumps(req, ensure_ascii=False))
+    check("F4 新 key 落 apiKey", cfg.get("embedding", {}).get("apiKey") == EMB_ROT,
+          repr(cfg.get("embedding", {}).get("apiKey")))
+
+
 def main() -> int:
     print("假端点启动中…")
-    srv1, base1 = start_fake(EMB_KEY1, LLM_KEY1, "S1")
+    srv1, base1 = start_fake({EMB_KEY1, EMB_ROT}, LLM_KEY1, "S1")
     srv2, base2 = start_fake(EMB_KEY2, LLM_KEY2, "S2")
     print(f"假端点1: {base1}")
     print(f"假端点2: {base2}")
@@ -310,6 +334,7 @@ def main() -> int:
         scenario_custom_cross(base1, base2)
         scenario_switch_preset_abort(base1)
         scenario_llm(base2)
+        scenario_key_rotate(base1)
     finally:
         srv1.shutdown(); srv1.server_close()
         srv2.shutdown(); srv2.server_close()
