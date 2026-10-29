@@ -78,28 +78,28 @@ python -m cli.hy_mem_cli menu
 
 ```
 hy-mem/
-├── cli/                    # CLI 核心模块
+├── cli/                    # CLI 包（三层分层，scripts/check_layering.py 守卫）
 │   ├── hy_mem_cli.py      # 主入口，命令解析与分发
-│   ├── config.py          # 配置加载与管理
-│   ├── store.py           # SQLite 数据库操作
-│   ├── local_embedder.py  # 本地嵌入服务
-│   ├── tui.py             # 终端交互组件
-│   ├── menu.py            # 交互式菜单
-│   ├── setup_wizard.py    # 设置向导
-│   └── ...
+│   ├── core/              # 核心域（无 UI 依赖，桌面/服务可复用）
+│   │   ├── store.py       #   SQLite 队列与记忆库操作
+│   │   ├── config.py      #   配置加载与密钥解析
+│   │   ├── netprobe.py    #   出站请求唯一出口
+│   │   └── ...            #   presets / oplog / vdb_endpoint / version 等
+│   ├── ui/                # 终端交互层
+│   │   ├── tui.py         #   终端组件（行编辑/菜单/确认）
+│   │   ├── menu.py        #   交互式控制台
+│   │   ├── setup_wizard.py#   设置向导与设置菜单
+│   │   └── ...            #   helptext / i18n / skill_ops
+│   └── mcp/
+│       └── server.py      # MCP stdio 服务（8 工具）
 ├── skill/                 # Skill 定义
-├── scripts/               # 业务脚本（构建 / 提交闸门 / 测试套件）
-│   ├── build_exe.py      # 打包脚本
-│   ├── check_secrets.py  # 提交前密钥扫描
-│   ├── test_cli.py       # CLI 测试
-│   └── ...
+├── scripts/               # 业务脚本（构建 / 闸门 / 12 套测试 / check_layering）
 ├── .local-test/           # 本地临时脚本（探针 / 实验 / bug 复现），整目录不入库
 ├── data/                  # 运行时数据（不入库，程序自建）
-│   ├── data/             # 记忆数据（SQLite + 向量库）
-│   ├── logs/             # 日志
-│   └── hy_mem_queue.db   # 异步任务队列
 └── AGENTS.md             # 项目交接文档
 ```
+
+分层铁律：core 不 import ui/mcp；ui 与 mcp 互不依赖；版本号真源在 core/version.py。
 
 ## 开发说明
 
