@@ -270,6 +270,59 @@ def claim_next(conn, worker_id: str, kinds: tuple[str, ...] = ("add", "finalize"
             return conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
 
 
+def claim_next_batch(conn, worker_id: str, limit: int, kinds: tuple[str, ...] = ("add",),
+                     compat_check=None) -> list:
+    """批量领取同一 (user_id, agent_id) 的待处理 add 任务（S1 · 2026-10-30 batch-commit）。
+
+    与 claim_next 同款原子性：逐条 UPDATE ... WHERE status='pending' 抢占，
+    rowcount 判定成功——多 worker 并发不会重复消费。批语义：
+      - 只领 kind='add'（finalize 永不合批）
+      - 首条 job 的 (user_id, agent_id) 锁定批的身份；后续 job 的
+        payload.identity 与首条不一致则止批（reconcile 按 user 圈候选）
+      - compat_check(row) 由调用方注入批次约束（S3 注入：显式
+        memory_at / metadata / request_id / lite mode 不入批）；
+        返回 False 的 job 不领、留在 pending（单条路径照常消费）
+    返回 list[row]（长度 1..limit，首条恒被领取）；队列无 pending add
+    时返回 []。事务性：每条独立原子抢占，批内不存在半领状态——
+    逐条循环而不是单条 SQL IN，保证任何两条 job 不会被两个 worker 领走。
+    """
+    rows: list = []
+    first_ident: tuple[str, str] | None = None
+    while len(rows) < max(1, limit):
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE status='pending' AND kind IN "
+            f"({','.join('?' * len(kinds))}) "
+            "AND (not_before IS NULL OR not_before <= ?) "
+            "ORDER BY id LIMIT 1",
+            (*kinds, time.time()),
+        ).fetchone()
+        if row is None:
+            break
+        if first_ident is None:
+            ident = (row["payload"] and json.loads(row["payload"]).get("identity") or {})
+            first_ident = (str(ident.get("user_id") or ""), str(ident.get("agent_id") or ""))
+        else:
+            ident = json.loads(row["payload"]).get("identity") or {}
+            if (str(ident.get("user_id") or ""), str(ident.get("agent_id") or "")) != first_ident:
+                break  # 不同 user/agent：止批，这条留给单条路径或下一批
+        if compat_check is not None:
+            try:
+                ok = compat_check(row)
+            except Exception:  # noqa: BLE001  约束检查异常按不入批处理，绝不吞任务
+                ok = False
+            if not ok:
+                break  # 约束不满足：止批（保持 FIFO，避免跳领造成饿死）
+        cur = conn.execute(
+            "UPDATE jobs SET status='running', worker=?, started_at=?, attempts=attempts+1 "
+            "WHERE id=? AND status='pending'",
+            (worker_id, time.time(), row["id"]),
+        )
+        if cur.rowcount == 1:
+            rows.append(conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone())
+        # rowcount=0：被并发 worker 抢走，循环继续尝试下一条
+    return rows
+
+
 def mark_done(conn, job_id: int, memory_ids: list[str], extra: dict | None = None) -> None:
     """任务成功落账。extra 里的 note 写进 error 列当告警留痕。
 
