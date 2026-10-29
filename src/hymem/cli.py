@@ -2963,7 +2963,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--recover", action="store_true", help="先把僵死任务放回待处理")
     ps.set_defaults(func=cmd_queue)
 
-    ps = sub.add_parser("mcp", help="MCP stdio 服务器（宿主拉起，勿手动运行）")
+    ps = sub.add_parser("mcp", help="MCP 服务器（默认 stdio；--transport http 起 HTTP 服务）")
+    ps.add_argument("--transport", choices=["stdio", "http"], default="stdio")
+    ps.add_argument("--port", type=int, default=18088, help="HTTP 模式监听端口（默认 18088）")
     ps.set_defaults(func=cmd_mcp)
 
     ps = sub.add_parser("drain", help="阻塞等待队列清空")
@@ -3058,6 +3060,10 @@ def cmd_mcp(args) -> int:
     不经过 ok()/print() 那套人类输出。
     """
     load_env()
+    if getattr(args, "transport", "stdio") == "http":
+        from hymem.mcp.transport_http import serve_http
+
+        return serve_http(getattr(args, "port", 18088))
     from hymem.mcp import server as mcp_server
 
     return mcp_server.serve()

@@ -259,6 +259,38 @@ def main() -> int:
     bad = [ln for ln in err_out.splitlines() if "Traceback" in ln]
     check("MCP stderr 无未捕获 Traceback", not bad, bad[0][:100] if bad else "")
 
+    # ---- 11. HTTP transport（S4）：单请求/批/坏 JSON ----
+    import threading, urllib.request, urllib.error
+    from http.server import ThreadingHTTPServer
+    sys.path.insert(0, str(REPO / "src"))
+    from hymem.mcp.transport_http import make_handler as _mk
+    _srv = ThreadingHTTPServer(("127.0.0.1", 0), _mk())
+    threading.Thread(target=_srv.serve_forever, daemon=True).start()
+    _port = _srv.server_address[1]
+
+    def _post(payload, raw=False):
+        data = payload if raw else json.dumps(payload).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{_port}/mcp", data=data,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())
+
+    _r = _post({"jsonrpc": "2.0", "id": 91, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                            "clientInfo": {"name": "t", "version": "0"}}})
+    check("HTTP initialize 握手", _r["result"]["serverInfo"]["name"] == "hy-mem",
+          str(_r)[:100])
+    _r2 = _post([{"jsonrpc": "2.0", "id": 92, "method": "tools/list"},
+                 {"jsonrpc": "2.0", "id": 93, "method": "tools/list"}])
+    check("HTTP 批请求聚合", isinstance(_r2, list) and len(_r2) == 2, str(_r2)[:80])
+    try:
+        _post(b"{bad", raw=True)
+        check("HTTP 坏 JSON 400", False, "未拒绝")
+    except urllib.error.HTTPError as e:
+        check("HTTP 坏 JSON 400", e.code == 400, str(e))
+    _srv.shutdown()
+
+
     n_pass = sum(results)
     print(f"\n{'全部通过' if n_pass == len(results) else '存在失败'}（{n_pass}/{len(results)}），总耗时 {time.time()-t0:.0f}s")
     import shutil
