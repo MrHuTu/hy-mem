@@ -120,6 +120,10 @@ python scripts/test_ui.py
 - 异步写入仅入队，**入队 ≠ 入库**，需通过 worker 消费队列
 - 密钥仅支持 ASCII 字符
 
+## 版本策略
+
+CLI 独立 semver，不与底层 hy-memory SDK 版本耦合（SDK 版本见 `hy-mem doctor`）。当前为 **1.0.0-rc.1**（Release Candidate）：功能面完整、测试矩阵全绿，进入发布候选；自用验证稳定后转正 1.0.0。
+
 ## 许可证
 
 请查看项目根目录下的许可证文件。
