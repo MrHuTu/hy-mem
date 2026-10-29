@@ -507,6 +507,20 @@ def add_sync_with_retry(client: object, text: str, *, attempts: int = 4, **kw):
     return _f(client, text, attempts=attempts, **kw)
 
 
+# R4（2026-10-29）：同步 add 两段式 —— 抽取锁外、SDK 标准提交段锁内
+def extract_phase(client: object, text: str, **kw):
+    from hymem.core.two_phase import extract_phase as _f
+    return _f(client, text, **kw)
+
+
+def commit_extracted_with_retry(client: object, text: str, agent_result, *, attempts: int = 4, **kw):
+    from hymem.core.two_phase import commit_extracted_with_retry as _f
+    return _f(client, text, agent_result, attempts=attempts, **kw)
+
+
+from hymem.core.two_phase import CommitFailed, ExtractFailed  # noqa: E402  供 except 引用
+
+
 def data_dir() -> Path:
     from hymem.core.procs import data_dir as _f
     return _f()
@@ -1111,13 +1125,16 @@ def cmd_add(args) -> int:
         last: dict = {}
         raw_ids: list[str] = []
         for p in parts:
-            # 写锁：reconcile 是读改写，多进程并发会丢更新。
-            # R3 fail-fast：sync add 抢不到锁立即失败（默认 5s），不让智能体
-            # 干等 180s 撞 TimeoutError；多条/并发的正路是 --async 入队。
+            # R4 两段式（2026-10-29）：抽取（LLM 网络调用）在锁外，可多进程并行；
+            # WriteLock 只包 SDK 标准提交段（L1 存档 → L2 reconcile → SHADOW），
+            # 口径对齐 SDK 内部 _reconcile_user_lock 的串行范围。失败零写入。
+            # R3 fail-fast：抢不到锁立即失败（默认 5s），多条/并发正路是 --async。
             lock_timeout = float(os.getenv("HY_MEM_ADD_LOCK_TIMEOUT") or 5)
+            # R4 锁探测前置：锁被占时不白烧 LLM 抽取，立即 E_LOCK fail-fast。
+            # （探测通过后 extract 期间锁可能被抢——那是少数竞态，正式抢锁段兜底。）
             try:
                 with store.WriteLock(timeout=lock_timeout):
-                    last = add_sync_with_retry(client, p, source=args.source, **extra, **ident)
+                    pass
             except TimeoutError:
                 mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
                 return fail(
@@ -1125,6 +1142,37 @@ def cmd_add(args) -> int:
                     hint="单条可稍后重试；多条/并发务必用 hy-mem add --async（入队即返回，3 车道消费）；"
                          "超时可用 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整",
                     err_code="E_LOCK",
+                )
+            try:
+                agent_result = extract_phase(client, p, source=args.source, **extra, **ident)
+            except ExtractFailed as e:
+                mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
+                return fail(
+                    f"LLM 抽取失败，本条未入库（零写入）{mid_note}：{e.message}",
+                    hint=f"SDK 错误码 {e.sdk_code or 'UNKNOWN'}；多为 LLM/网络瞬时故障，单条可直接重试；"
+                         "反复失败跑 hy-mem doctor 检查 LLM 配置",
+                    err_code="E_EXTRACT",
+                )
+            try:
+                with store.WriteLock(timeout=lock_timeout):
+                    last = commit_extracted_with_retry(
+                        client, p, agent_result, source=args.source, **extra, **ident
+                    )
+            except TimeoutError:
+                mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
+                return fail(
+                    f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）{mid_note}",
+                    hint="单条可稍后重试；多条/并发务必用 hy-mem add --async（入队即返回，3 车道消费）；"
+                         "超时可用 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整",
+                    err_code="E_LOCK",
+                )
+            except CommitFailed as e:
+                mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
+                return fail(
+                    f"落库提交失败{mid_note}：{e}",
+                    hint="原始对话已存档（L1），可检索的结论可能缺失；重跑本命令会把本条重新提交，"
+                         "reconcile 会吸收重复；反复失败跑 hy-mem doctor",
+                    err_code="E_COMMIT",
                 )
             rid = last.get("memory_id")
             if rid:

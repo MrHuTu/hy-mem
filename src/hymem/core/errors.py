@@ -80,6 +80,19 @@ def classify_error(e: BaseException) -> tuple[int, str, str]:
                 "重跑 hy-mem setup --step embedding 重新填一次"
             ),
         )
+    if name == "ExtractFailed":
+        # R4 两段式：Phase 1 LLM 抽取失败（零写入）。入口层已给专项文案，
+        # 这里兜统一分发的底：runtime 级、不指向密钥。
+        return EXIT_RUNTIME, "E_EXTRACT", _tr(
+            "LLM 抽取失败（本条零写入）：多为 LLM/网络瞬时故障，单条可直接重试；"
+            "反复失败跑 hy-mem doctor 检查 LLM 配置"
+        )
+    if name == "CommitFailed":
+        # R4 两段式：Phase 2 提交段失败（L1 原文已存档，结论可能缺失）
+        return EXIT_RUNTIME, "E_COMMIT", _tr(
+            "落库提交失败：原始对话已存档（L1），可检索的结论可能缺失；"
+            "重跑本命令即可，reconcile 会吸收重复"
+        )
     if name in _INTERNAL_TYPES:
         return EXIT_INTERNAL, "E_INTERNAL", _tr("这多半是程序缺陷：加 --verbose 复跑可拿到堆栈")
     # R2（2026-10-29）：sqlite 瞬态占用单列。WAL「最后一连接关闭→删 -wal/-shm→

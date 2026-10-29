@@ -165,26 +165,85 @@ def _tool_add_memory(args: dict) -> str:
             {"metadata": metadata, "memory_at": memory_at, "request_id": request_id}
         )
         add_kw = {k: v for k, v in add_kw.items() if v is not None}
-        # R3 fail-fast：同步分支抢不到锁立即返回结构化失败（默认 5s），
-        # 不让智能体干等 180s；多条/并发的正路是 async=true（默认）。
+        # R4 两段式（2026-10-29）：抽取（LLM 网络调用）在锁外，可多进程并行；
+        # WriteLock 只包 SDK 标准提交段（L1 存档 → L2 reconcile → SHADOW）。
+        # R3 fail-fast：抢不到锁立即返回结构化失败（默认 5s）；
+        # 多条/并发的正路是 async=true（默认）。
         import os as _os
 
         lock_timeout = float(_os.getenv("HY_MEM_ADD_LOCK_TIMEOUT") or 5)
-        try:
-            from hymem.core.clientops import add_sync_with_retry
+        from hymem.core.two_phase import (
+            CommitFailed,
+            ExtractFailed,
+            commit_extracted_with_retry,
+            extract_phase,
+        )
 
+        # R4 锁探测前置：锁被占时不白烧 LLM 抽取，立即 lock_timeout。
+        try:
             with store.WriteLock(timeout=lock_timeout):
-                last = add_sync_with_retry(client, text, source="mcp", **add_kw, **_identity())
+                pass
         except TimeoutError:
             return json.dumps(
                 {
                     "mode": "sync",
                     "ok": False,
                     "error": "lock_timeout",
+                    "lock_timeout": lock_timeout,
                     "guidance": (
                         f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）。"
                         "单条可稍后重试；多条/并发请保持 async=true（默认，入队即返回，3 车道消费）。"
                         "超时可用环境变量 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        try:
+            agent_result = extract_phase(client, text, source="mcp", **add_kw, **_identity())
+        except ExtractFailed as e:
+            return json.dumps(
+                {
+                    "mode": "sync",
+                    "ok": False,
+                    "error": "extract_failed",
+                    "sdk_code": str(e.sdk_code or "UNKNOWN"),
+                    "guidance": (
+                        f"LLM 抽取失败，本条未入库（零写入）：{e.message}。"
+                        "多为 LLM/网络瞬时故障，单条可直接重试；反复失败请检查 LLM 配置。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        try:
+            with store.WriteLock(timeout=lock_timeout):
+                last = commit_extracted_with_retry(
+                    client, text, agent_result, source="mcp", **add_kw, **_identity()
+                )
+        except TimeoutError:
+            return json.dumps(
+                {
+                    "mode": "sync",
+                    "ok": False,
+                    "error": "lock_timeout",
+                    "lock_timeout": lock_timeout,
+                    "guidance": (
+                        f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）。"
+                        "单条可稍后重试；多条/并发请保持 async=true（默认，入队即返回，3 车道消费）。"
+                        "超时可用环境变量 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        except CommitFailed as e:
+            return json.dumps(
+                {
+                    "mode": "sync",
+                    "ok": False,
+                    "error": "commit_failed",
+                    "message": str(e),
+                    "guidance": (
+                        "落库提交失败：原始对话已存档（L1），可检索的结论可能缺失；"
+                        "重试本条即可，reconcile 会吸收重复；反复失败跑 hy-mem doctor。"
                     ),
                 },
                 ensure_ascii=False,
@@ -611,7 +670,7 @@ TOOLS = [
             "properties": {
                 "text": {"type": "string", "description": "记忆正文，一条一个主题"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签"},
-                "async": {"type": "boolean", "description": "默认 true（入队即返回，3 车道消费）。false 时同步等待落库：单写者设计，实测 20~100s（LLM 抽取主导），抢不到写锁 5s 返回 lock_timeout（本条零写入，可重试或改用 async）；多条/并发务必用默认 true"},
+                "async": {"type": "boolean", "description": "默认 true（入队即返回，3 车道消费）。false 时同步等待落库：两段式设计——LLM 抽取在锁外可并行，锁内只做 SDK 标准提交段（约 3~15s，reconcile 判重主导），抢不到写锁 5s 返回 lock_timeout（本条零写入，可重试或改用 async）；多条/并发务必用默认 true"},
                 "metadata": {"type": "object", "description": "附加元数据对象，如 {\"project\": \"iisw\"}"},
                 "memory_at": {
                     "type": "string",

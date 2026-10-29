@@ -451,9 +451,10 @@ def main() -> int:
             else:
                 os.environ[k] = v
 
-    # R3.3 口径：help add 必须写明单写者 + 实测量级 + --async 正路
+    # R3.3 口径：help add 必须写明两段式锁范围 + E_LOCK 快速失败 + --async 正路
     p = run(["help", "add"])
-    check("R3 help add 单写者口径", "单写者" in p.stdout and "20~100s" in p.stdout, "")
+    check("R3 help add 两段式口径", "两段式" in p.stdout and "锁外" in p.stdout, "")
+    check("R3 help add E_LOCK 快速失败", "E_LOCK" in p.stdout and "零写入" in p.stdout, "")
     check("R3 help add 指向 --async", "--async" in p.stdout, "")
 
     bad = results.count(False)
