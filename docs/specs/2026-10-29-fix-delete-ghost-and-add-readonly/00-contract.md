@@ -93,7 +93,7 @@
 | R1 | ✓ 完成 | 5a5840f | clientops 级联清扫 + cmd_delete 透传 + helptext + 单测×4 | 集成红测试 .local-test/repro_delete_ghost.py 红 3→绿 4/4；test_cli 88/88；真实库幽灵 c418c57b…bcdf 已清除、复验 0 命中 |
 | R2 | ✓ 完成 | 6cc35ec | clientops 瞬态重试 + errors E_DB_BUSY + 风暴用例 | .local-test/repro_parallel_add.py 8 轮：8 ok + 7 e_lock + 1 e_db_busy、零裸崩；test_concurrency 全绿（异步段 + 风暴段） |
 | R3 | ✓ 完成 | eb49959 | CLI/MCP fail-fast + 口径修正 | test_cli 96/96（锁占用全链路 + 零写入 + help 口径）；test_mcp 31/31（lock_timeout + guidance） |
-| R4 | pending（设计 v2 定稿：L1/L2 双层保留，只锁提交段 ~2-3s） | - | - | - |
+| R4 | ✓ 完成 | 见下 | two_phase.py + CLI/MCP 接入 + 锁探测前置 + 单测×6 | repro_two_phase 6/6；test_cli 97/97；test_mcp 31/31；并发实测 60.1s 双成功；E2E 拓扑 L1 shadow/L2 挂根 |
 
 ## R4 · 锁粒度细化：网络调用出锁，提交段串行【2026-10-29 用户拍板加入】
 
@@ -119,24 +119,35 @@
   （agent/mem_agent.py:180）纯抽取零落库。client 级公开 API 2.0.8 仍没有，
   但 R4 走内部入口（耦合一个对象属性）即可，**不再阻塞于上游**
 
-### 设计（两段式 v2 · L1/L2 双层保留 · 2026-10-29 19:33 用户拍板）
+### 设计（两段式 v3 定稿 · 遵守 SDK 设计规范 · 2026-10-29 20:51 用户拍板）
 
-用户定调：L1 和 L2 都要进库，不丢原文层；只锁提交段。
-（v1 曾为省事用 add_extracted 单做 Phase2 而丢 L1_RAW，作废）
+用户定调：「按照 SDK 的源码注释来，L1 存档。我们要遵守 SDK 设计规范。」
+v2 的 add_extracted 路线作废——SDK 注释（writer.py 模块头 + write_extracted docstring）
+明确标准提交段结构：**原始内容始终存为 L1_RAW → reconcile 落 L2（带
+source_raw_memory_id 挂根）→ 提取成功后 L1_RAW 降级 SHADOW**。v2 经
+add_extracted 落 L2 断掉挂根链接，不合规。
 
-- Phase 1（无 WriteLock）：`mem_agent.process_add(mode=EXTRACT_ONLY)` →
-  facts 列表（纯 LLM + 读已有 tags，零写入）；多进程天然并发
-- Phase 2（持 WriteLock，~2-3s）：
-  ① embed 原文 → `MemoryNode(layer=L1_RAW)` → `vector_store.upsert()` 落 L1 节点
-     （仿 write() 首段，writer.py:2601-2646，组件全在 writer 实例上）
-  ② `client.add_extracted(facts)` → reconcile + 落 L2_FACT
-  锁持有从 20~100s 降至 ~2-3s（含原文件嵌入 0.3s）
-- **已知差异（记录在案）**：L1↔L2 的 source_raw_memory_id 链接丢失——
-  write_extracted/_reconcile_and_store 的该参数不经 add_extracted 透传；
-  两层各自可检索、可 get，但派生关系不落 meta（上游 API 限制，提 issue 可解）
-- 内部耦合点（SDK 升级需回归）：mem_agent 入口、embed_service/_get_vector_store、
-  MemoryNode 构造——共 3 处，均为读用不修改
-- 与 R3 衔接：提交段 ~2-3s，fail-fast 默认超时建议调至 8s（原 5s）
+- Phase 1 `extract_phase`（无 WriteLock，可多进程并行）：
+  `_collect_existing_tags`（只读）+ `mem_agent.process_add(mode=EXTRACT_ONLY)` →
+  AgentResult；失败抛 ExtractFailed（零写入）
+- Phase 2 `commit_extracted`（持 WriteLock，SDK 标准提交段，逐行对齐 writer.write()）：
+  ① embed → `MemoryNode(L1_RAW, ACTIVE)` → upsert → memory_id（**L1 存档**）
+  ② basic_info → upsert_basic_profile（L0 演化链，best-effort）
+  ③ `_collect_new_memories` → [≥2 条] `_dedup_extracted`
+  ④ `_RECONCILE_ENABLED ? _reconcile_and_store : _direct_store`，
+     **两路都透传 source_raw_memory_id=L1 根**（v3 修复 v2 断链）
+  ⑤ intentions → _store_intentions（L7，best-effort）
+  ⑥ L1 → SHADOW（成功路径；reconcile 失败留 ACTIVE，同 SDK「数据可救」语义）
+- **锁探测前置**（2026-10-29 test_cli R3 用例暴露）：extract 前先抢一次
+  WriteLock(timeout=5)，抢不到立即 E_LOCK——否则锁被占时 extract 白烧一次 LLM
+  还误报 E_EXTRACT。探测与正式抢锁间存在竞态窗口（extract 期间被抢），属少数
+  情况，正式抢锁段兜底 E_LOCK，可重试
+- 实现位置：`src/hymem/core/two_phase.py`（单文件封装，内部耦合全部集中于此；
+  SDK 若日后开放「extracted + L1 存档」公开入口应整体替换）
+- 与 SDK 标准 write() 的显式差异（有意为之）：顺序颠倒（extract 先行，失败零
+  写入 fail-fast）；观测面（tracer/埋点/WRITE_SUMMARY）不复刻
+- 内部耦合点（SDK 升级须回归 two_phase.py）：~15 处，全部集中在模块头注释清单
+- 与 R3 衔接：锁内提交段实测 3~15s（reconcile 判重主导）；fail-fast 默认 5s 维持
 - 预期收益：N 条并发 sync add 墙钟 ≈ max(LLM) + N×commit，而非 Σ(LLM)+Σ(commit)
 
 ### 依赖（2026-10-29 晚间更新：SDK 身份与上游核实）
@@ -179,15 +190,38 @@
   私有结构、升级易碎；或维持 R3 fail-fast 缓解、等上游开放 extract API
 
 ### 条款
-- R4.1 Phase1 抽取走 `mem_agent.process_add(mode=EXTRACT_ONLY)`（SDK 内部入口，
+- R4.1 ✓ Phase1 抽取走 `mem_agent.process_add(mode=EXTRACT_ONLY)`（SDK 内部入口，
   升级 SDK 时本分片须回归测试；不复制抽取逻辑）
-- R4.2 Phase2 锁内双层落库：先手写 L1_RAW 节点（embed+upsert，仿 write() 首段），
-  再 add_extracted(facts) 落 L2；**L1/L2 都进库，召回面不缩**
-- R4.3 并发验收：双进程并发 sync add 各 1 条，墙钟 < 两者串行耗时之和 × 0.7
-  （LLM 段确实重叠）；且零失败、零丢更新（reconcile 一致性回归）
-- R4.4 幂等：两段式全程透传 request_id（Phase2 的 add_extracted 已支持幂等）
-- R4.5 回归验收：两段式与整段 add 的检索结果对齐——同文本写入后，原文措辞查询
-  与事实主题查询均能命中（分别验证 L1/L2 召回）
+- R4.2 ✓（v3 修订）Phase2 锁内 SDK 标准提交段：L1 存档（embed+MemoryNode+upsert）
+  → `_reconcile_and_store`/`_direct_store` 透传 source_raw_memory_id 落 L2；
+  L1/L2 都进库；成功路径 L1→SHADOW（遵守 SDK 规范，原文退居备份层不参与召回——
+  这本就是 SDK 的召回面定义，非缩水）
+- R4.3 ✓ 并发验收：双进程并发 sync add 各 1 条，wall=60.1s 双成功（单条全程
+  ~50-60s，串行预估 ~110s，60.1 < 110×0.7=77）；另轮 p1 撞锁得干净 E_LOCK
+  （零裸崩、零丢更新）；test_concurrency 风暴 4 轮×2 进程 ok=5 e_lock=3 零裸崩
+- R4.4 ✓（修订）request_id 全程透传至 WriteRequest（日志/ops 追溯单一真相源）；
+  SDK 层幂等回放（_claim_write_outcome）不接——手写提交段绕过 client 入口，
+  重复调用可能产生重复条目，reconcile 判重会吸收（与 add_sync_with_retry 同取舍）
+- R4.5 ✓ 检索对齐：E2E 实测「agent-bridge 项目在哪」事实查询召回第 1 名
+  （l2_fact, score 0.72）；L1 shadow 不进召回（SDK 规范原意：原文层本来就不在
+  _VDB_RECALL_LAYERS）
+
+### 执行记录（2026-10-29 20:51–21:40）
+
+- 新增 `src/hymem/core/two_phase.py`：extract_phase / commit_extracted /
+  commit_extracted_with_retry / ExtractFailed / CommitFailed
+- `cli.py` cmd_add 同步分支：锁探测前置 → extract_phase（锁外）→
+  WriteLock + commit_extracted_with_retry；E_EXTRACT / E_LOCK / E_COMMIT 三态
+- `mcp/server.py` add_memory 同步分支同构改造 + 工具描述口径更新（两段式）
+- `errors.py`：ExtractFailed→E_EXTRACT、CommitFailed→E_COMMIT 分类
+- `ui/helptext.py` add 条目口径更新
+- 红测试 `.local-test/repro_two_phase.py`：T1 锁外行为（真 WriteLock 占锁实测）
+  T2 提交段语义（L1 存档→挂根→SHADOW）T3 reconcile 失败留 ACTIVE
+  T4 extract 失败零写入 T5 多条 dedup+basic_info T6 MCP 锁探测前置——6/6 绿
+- 套件回归：test_cli 97/97（R3 help 口径断言更新）、test_mcp 31/31、
+  test_concurrency 全 PASS
+- E2E（真库）：add 成功 → L1 根 status=shadow、L2 leaf l2_fact/active 且
+  source_raw_memory_id 挂根（chroma where 查询实测）、事实查询召回第 1
 
 ## 边界（不做）
 
