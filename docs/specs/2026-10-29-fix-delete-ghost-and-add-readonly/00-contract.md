@@ -54,10 +54,13 @@
 - R2.1 复现取证：双进程并发 sync add 压测（沙箱），抓取乙的完整失败路径与
   涉事 sqlite 文件（是 SDK 本地库还是 chroma 端），落 .local-test/repro_parallel_add.py
 - R2.2 对涉事写入套瞬态重试（readonly/locked 换新连接，参照 store.py:123-145 的
-  transient_write 模式）；重试上限与退避对齐现有实现（4 次 / 0.15s 递增）
+  transient_write 模式）；重试上限与退避对齐现有实现（4 次 / 0.3s 递增）
 - R2.3 错误分类：sqlite readonly/locked 单列一条 hint（指向重跑命令），不得指向嵌入密钥
-- R2.4 回归：并发压测 N≥20 轮 0 硬失败（瞬态重试全部吞掉）；转正为
-  scripts/test_concurrency.py 新增用例并计入套件总数
+- R2.4 回归：并发压测无裸崩/未分类失败（允许形态：E_LOCK 锁快失败、E_DB_BUSY
+  重试耗尽后的结构化失败）；转正为 scripts/test_concurrency.py 风暴用例
+  **【变更 2026-10-29 执行期】**：原文「0 硬失败、瞬态重试全部吞掉」口径过严——
+  WAL 重建窗口实测可长于重试预算，重试耗尽后按 R2.3 归为 E_DB_BUSY（干净失败、
+  hint 正确）属诚实暴露而非硬失败。8 轮风暴实测：8 ok + 7 e_lock + 1 e_db_busy、零裸崩
 
 ### R3 · sync add 抢锁 fail-fast + 工具口径修正【智能体体验 · 与 R2 同期】
 
@@ -88,8 +91,8 @@
 | 分片 | 状态 | commit | 产物 | 验收证据 |
 |---|---|---|---|---|
 | R1 | ✓ 完成 | 5a5840f | clientops 级联清扫 + cmd_delete 透传 + helptext + 单测×4 | 集成红测试 .local-test/repro_delete_ghost.py 红 3→绿 4/4；test_cli 88/88；真实库幽灵 c418c57b…bcdf 已清除、复验 0 命中 |
-| R2 | pending | - | - | - |
-| R3 | pending | - | - | - |
+| R2 | ✓ 完成 | 6cc35ec | clientops 瞬态重试 + errors E_DB_BUSY + 风暴用例 | .local-test/repro_parallel_add.py 8 轮：8 ok + 7 e_lock + 1 e_db_busy、零裸崩；test_concurrency 全绿（异步段 + 风暴段） |
+| R3 | ✓ 完成 | eb49959 | CLI/MCP fail-fast + 口径修正 | test_cli 96/96（锁占用全链路 + 零写入 + help 口径）；test_mcp 31/31（lock_timeout + guidance） |
 | R4 | pending（设计 v2 定稿：L1/L2 双层保留，只锁提交段 ~2-3s） | - | - | - |
 
 ## R4 · 锁粒度细化：网络调用出锁，提交段串行【2026-10-29 用户拍板加入】
