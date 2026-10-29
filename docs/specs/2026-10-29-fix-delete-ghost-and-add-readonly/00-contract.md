@@ -226,6 +226,13 @@ add_extracted 落 L2 断掉挂根链接，不合规。
   ② searchops.py _spawn_detached_worker 的 subprocess（S3-1 平移引入）。
   修复后风暴 4 轮×2 零 BAD。教训入记忆：平移/重构后必须跑 pyflakes 级
   静态扫，串行单测对概率路径零覆盖
+- R4.9 ✓（23:05 追加，EMPTY_RESPONSE 瞬态重试）R4.7 后风暴新形态：
+  并发负载下 LLM 网关偶发空响应（实测 1/8 概率）→ E_EXTRACT 干净失败。
+  本身零写入可重试（设计如此），但属网关瞬态——按 R2 哲学加换次重跑：
+  extract_phase 内 EMPTY_RESPONSE 最多重试 3 次（0.5s 递增退避），其余
+  错误码（配额/鉴权）不重试直接抛。风暴分类器（repro_parallel_add +
+  test_concurrency）同步收编 E_EXTRACT 为合法干净失败形态。
+  验收：风暴 4 轮×2 零 BAD（7 ok + 1 E_LOCK，重试后 EMPTY_RESPONSE 消失）
 
 ### 执行记录（2026-10-29 20:51–21:40）
 
