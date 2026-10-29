@@ -2,6 +2,18 @@
 
 本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 Tencent Hy-Memory SDK 2.0.5 构建，支持 Qwen3.7 云端嵌入（1024 维向量）。
 
+> A local long-term memory CLI for AI agents — write, fact-extract via LLM, semantic search, and tag archiving, with a built-in MCP stdio server (8 tools).
+
+## 下载安装
+
+| 平台 | 下载 |
+|------|------|
+| Windows x64 | [hy-mem-1.0.0-rc.1-win64.zip](https://github.com/MrHuTu/hy-mem/releases/download/v1.0.0-rc.1/hy-mem-1.0.0-rc.1-win64.zip)（免 Python，解压即用） |
+
+其他版本与历史发布见 [Releases](https://github.com/MrHuTu/hy-mem/releases)。
+
+**安装三步**：解压到任意目录 → 双击「安装到 PATH.cmd」（或直接运行 `hy-mem.exe`）→ 首次运行进设置向导，配好向量模型与密钥即可使用。
+
 ## 功能特性
 
 - **语义检索**：基于向量相似度的记忆搜索
