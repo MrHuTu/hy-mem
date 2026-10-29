@@ -439,6 +439,10 @@ def _tool_list_memories(args: dict) -> str:
             "memory_id": m.get("memory_id"),
             "content": (m.get("content") or "")[:200],
             "when": m.get("when") or m.get("created_at"),
+            # 标签分列（2026-10-29）：tags=自动标签（LLM 抽取）、manual_tags=
+            # 手工标签（add 时传入，SDK 存 _tags）。只看 tags 会误判手工标签丢失。
+            "tags": m.get("tags") or [],
+            "manual_tags": m.get("_tags") or [],
         }
         for m in rows
     ]
@@ -457,6 +461,19 @@ def _tool_get_memory(args: dict) -> str:
     r = client.get(mid)
     if r is None:
         return json.dumps({"found": False, "memory_id": mid}, ensure_ascii=False)
+    # 标签字段澄清（2026-10-29 实测误报）：SDK 返回里 tags 只含**自动标签**
+    # （LLM 抽取），add 时传入的手工标签（含 proj:/domain: 三件套）存在
+    # `_tags`。只看 tags 会误判「手工标签被 update 冲掉」。这里显式分列，
+    # 原字段不动（兼容既有消费方）。
+    if isinstance(r, dict):
+        auto_tags = r.get("tags") or []
+        manual_tags = r.get("_tags") or []
+        r["auto_tags"] = auto_tags
+        r["manual_tags"] = manual_tags
+        r["tags_note"] = (
+            "tags 字段只含自动标签；手工标签（add 时传入的）在 manual_tags/_tags。"
+            "检索用 list --tag <名> 可精确命中两者。"
+        )
     return json.dumps({"found": True, "memory": r}, ensure_ascii=False, default=str)
 
 

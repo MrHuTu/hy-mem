@@ -213,6 +213,11 @@ def main() -> int:
     res = tool("list_memories", {"limit": 10})
     items = res.get("memories") or []
     check("list_memories 非空", len(items) >= 1, f"count={res.get('count')}")
+    # 标签分列（2026-10-29 误报修复）：list 条目须同时带 tags（自动）与
+    # manual_tags（手工）——只看 tags 会误判手工标签被 update 冲掉
+    _first = items[0] if items else {}
+    check("list 条目带 tags 与 manual_tags 分列",
+          "tags" in _first and "manual_tags" in _first, str(_first)[:120])
     if items and mid is None:
         mid = str(items[0].get("memory_id") or items[0].get("id") or "")
 
