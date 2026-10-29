@@ -1851,13 +1851,32 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str], str | None]:
     if payload.get("request_id"):
         add_kw["request_id"] = str(payload["request_id"])
     before = _snapshot_ids(client, ident) if tags else set()
-    with store.WriteLock():
-        result = client.add(
-            payload["text"],
-            source=payload.get("source") or "cli",
-            **add_kw,
-            **ident,
+    # R4 两段式（worker 侧，2026-10-29）：3 lane 线程共享一把跨进程 WriteLock，
+    # 旧写法「锁内整段 client.add（含 LLM）」把 3 车道退化成串行 × 全程耗时。
+    # 改为 extract 锁外（3 lane 真·并行过 LLM）+ 锁内 SDK 标准提交段。
+    # lite 模式无 LLM 抽取（agent_mode=disabled），保持旧整段路径。
+    mode_str = str(row["mode"] or "").strip().lower()
+    if mode_str == "lite" or getattr(client, "_mode", "") == "lite":
+        with store.WriteLock():
+            result = client.add(
+                payload["text"],
+                source=payload.get("source") or "cli",
+                **add_kw,
+                **ident,
+            )
+    else:
+        agent_result = extract_phase(
+            client, payload["text"], source=payload.get("source") or "cli",
+            **add_kw, **ident,
         )
+        with store.WriteLock():
+            result = commit_extracted_with_retry(
+                client, payload["text"], agent_result,
+                source=payload.get("source") or "cli", **add_kw, **ident,
+            )
+        # 两段式的失败都走异常（ExtractFailed/CommitFailed → 上层 mark_failed
+        # 重试，与旧路径 success=False / agent_error_code 语义对齐）；
+        # extract 成功但 0 facts 是正常结论 → stored_ids 空 → shadow_only note。
     ids = _ids_of(result)
     # 静默失败防线（0.9.8）：L1 原始层写成功 ≠ 记忆可用。
     # SDK 在 L2 事实抽取失败时仍可能返回 success=True + 非空 ids（含 L1 id），
