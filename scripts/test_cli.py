@@ -358,6 +358,55 @@ def main() -> int:
     err = (obj or {}).get("error") or {} if ok else {}
     check("坏 since 报时间格式提示", "时间格式" in str(err.get("message", "")), str(err.get("message"))[:80])
 
+    # ── R1 级联清扫单测（直接 import，不起子进程、不发网络）────────
+    class FakeCol:
+        """模拟 chroma collection：where 查询按 source_raw_memory_id 匹配。"""
+
+        def __init__(self, rows):
+            self.rows = rows  # {id: {"source_raw_memory_id": ...}}
+
+        def get(self, ids=None, where=None, include=None):
+            if ids is not None:
+                hit = [i for i in ids if i in self.rows]
+            else:
+                key = (where or {}).get("source_raw_memory_id", {}).get("$eq")
+                hit = [i for i, r in self.rows.items() if r.get("source_raw_memory_id") == key]
+            return {"ids": hit, "metadatas": [self.rows[i] for i in hit]}
+
+    class FakeClient:
+        def __init__(self, rows):
+            self._vector_store = type("VS", (), {"_collection": FakeCol(rows)})()
+            self.deleted = []
+
+        def delete(self, nid):
+            self.deleted.append(nid)
+            self.rows = getattr(self, "rows", None)
+            return {"success": True, "deleted_count": 1}
+
+    from hymem.core.clientops import find_derived_nodes, sweep_derived_nodes  # noqa: E402
+
+    rows = {
+        "root": {"source_raw_memory_id": ""},
+        "ghost1": {"source_raw_memory_id": "root"},
+        "ghost2": {"source_raw_memory_id": "root"},
+        "other": {"source_raw_memory_id": "another"},
+    }
+    fc = FakeClient(rows)
+    got = find_derived_nodes(fc, "root")
+    check("R1 find_derived 定位派生节点", sorted(got) == ["ghost1", "ghost2"], str(got))
+
+    purged, note = sweep_derived_nodes(fc, "root")
+    check("R1 sweep 级联删除派生节点", sorted(purged) == ["ghost1", "ghost2"] and note == "", f"{purged}|{note}")
+    check("R1 sweep 走公开 client.delete", sorted(fc.deleted) == ["ghost1", "ghost2"], str(fc.deleted))
+
+    class BrokenVS:
+        _collection = None  # 模拟 SDK 内部结构变化
+
+    bc = FakeClient(rows)
+    bc._vector_store = BrokenVS()
+    purged, note = sweep_derived_nodes(bc, "root")
+    check("R1 内部不可达时降级且带 note", purged == [] and "可能残留" in note, f"{purged}|{note[:40]}")
+
     bad = results.count(False)
     print(f"\n{'全部通过' if bad == 0 else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")
     return 1 if bad else 0

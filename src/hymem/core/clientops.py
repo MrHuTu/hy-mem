@@ -74,3 +74,61 @@ def make_client(mode: str | None):
             last = e
             time.sleep(0.2 * (i + 1))
     raise last  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# R1（2026-10-29）：delete 级联清扫派生节点
+#
+# 上游 SDK 缺陷（docs/specs/2026-10-29-fix-delete-ghost-and-add-readonly §0.B1）：
+# client.delete(memory_id) 只删根节点本身；抽取产生的 l2_fact 派生节点带
+# source_raw_memory_id 指向根，delete 后残留且仍可被检索（幽灵节点）。
+# 且 ChromaVectorStore.delete 恒 return True，CLI 侧若不校验 found/success
+# 会双重假成功。本模块提供确定性的残留发现与级联删除（走公开 client.delete，
+# 保留 SDK 的演化链/标签索引簿记），SDK 升级修复级联后本助手自动变空转。
+# ---------------------------------------------------------------------------
+
+def _vector_collection(client: object):
+    """拿 SDK 内部 chroma collection；内部结构变化时返回 None（调用方降级）。"""
+    vs = getattr(client, "_vector_store", None)
+    return getattr(vs, "_collection", None)
+
+
+def find_derived_nodes(client: object, root_id: str) -> list[str]:
+    """发现 source_raw_memory_id 指向 root_id 的全部派生节点 id。
+
+    只读不删。内部结构不可达或查询失败时返回 []（调用方无法区分
+    「无残留」与「查不了」，需要区分时用 sweep_derived_nodes 的 note）。
+    """
+    col = _vector_collection(client)
+    if col is None:
+        return []
+    try:
+        res = col.get(where={"source_raw_memory_id": {"$eq": root_id}}, include=[])
+        return list((res or {}).get("ids") or [])
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def sweep_derived_nodes(client: object, root_id: str) -> tuple[list[str], str]:
+    """级联删除 root_id 的残留派生节点。返回 (purged_ids, note)。
+
+    note 非空表示「无法确认是否残留」（内部结构变化/查询失败），调用方
+    必须把它透传给用户——静默当成功会重新制造假绿。
+    """
+    col = _vector_collection(client)
+    if col is None:
+        return [], "SDK 内部结构变化，无法定位派生节点（可能残留且可检索）"
+    try:
+        res = col.get(where={"source_raw_memory_id": {"$eq": root_id}}, include=[])
+        ids = list((res or {}).get("ids") or [])
+    except Exception as e:  # noqa: BLE001
+        return [], f"派生节点查询失败（可能残留且可检索）：{e}"
+    purged: list[str] = []
+    for nid in ids:
+        try:
+            r = client.delete(nid)
+            if r and r.get("success"):
+                purged.append(nid)
+        except Exception:  # noqa: BLE001
+            pass
+    return purged, ""

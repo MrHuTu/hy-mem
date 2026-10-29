@@ -492,6 +492,16 @@ def make_client(mode: str | None):
     return _f(mode)
 
 
+def find_derived_nodes(client: object, root_id: str) -> list[str]:
+    from hymem.core.clientops import find_derived_nodes as _f
+    return _f(client, root_id)
+
+
+def sweep_derived_nodes(client: object, root_id: str) -> tuple[list[str], str]:
+    from hymem.core.clientops import sweep_derived_nodes as _f
+    return _f(client, root_id)
+
+
 def data_dir() -> Path:
     from hymem.core.procs import data_dir as _f
     return _f()
@@ -1347,11 +1357,46 @@ def cmd_delete(args) -> int:
             r = client.get(args.memory_id)
             if r is None:
                 return fail(f"未找到 {args.memory_id}（dry-run 未做任何改动）")
-            payload = {"ok": True, "dryRun": True, "wouldDelete": r}
-            return ok(payload, args.json, "[dry-run] 将删除：\n" + json.dumps(r, ensure_ascii=False, indent=2, default=str))
+            derived = find_derived_nodes(client, args.memory_id)
+            payload = {"ok": True, "dryRun": True, "wouldDelete": r, "derivedNodes": derived}
+            note = f"（含 {len(derived)} 个派生节点将级联清理）" if derived else ""
+            return ok(payload, args.json, "[dry-run] 将删除：\n" + json.dumps(r, ensure_ascii=False, indent=2, default=str) + note)
         with store.WriteLock():
             r = client.delete(args.memory_id)
-        return ok(r, args.json, f"已删除 {args.memory_id}")
+            # 上游 delete 不级联 l2_fact 派生节点（幽灵节点），锁内补扫。
+            # note 非空 = 无法确认是否残留，必须透传，不许静默当成功。
+            purged: list[str] = []
+            cascade_note = ""
+            if r.get("success"):
+                purged, cascade_note = sweep_derived_nodes(client, args.memory_id)
+        # SDK 公开返回没有 found 键（success=False 时区分「没这条」与「没删净」
+        # 靠 partial / error_code）；vdb_deleted 因上游恒 True 不可信，不作判据。
+        if r.get("success"):
+            payload = dict(r)
+            payload["derived_purged"] = purged
+            if cascade_note:
+                payload["cascade_note"] = cascade_note
+            human = f"已删除 {args.memory_id}"
+            if purged:
+                human += f"，级联清理派生节点 {len(purged)} 个"
+            if cascade_note:
+                human += f"；警告：{cascade_note}"
+            return ok(payload, args.json, human)
+        if r.get("partial") or r.get("error_code"):
+            return fail(
+                "删除未完成（部分存储未删净）",
+                extra={
+                    "partial": bool(r.get("partial")),
+                    "vdb_deleted": bool(r.get("vdb_deleted")),
+                    "deleted_count": r.get("deleted_count", 0),
+                    "error_code": r.get("error_code"),
+                },
+            )
+        return fail(
+            f"未找到 {args.memory_id}",
+            hint="可先 hy-mem search 关键词定位残留条目（命中即其自身 id），再 delete 该 id",
+            extra={"deleted_count": r.get("deleted_count", 0)},
+        )
     finally:
         client.close()
 

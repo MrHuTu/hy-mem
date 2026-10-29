@@ -341,13 +341,17 @@ CMD_META: dict[str, dict] = {
         "notes": ["id 不存在返回 exit 2。"],
     },
     "delete": {
-        "notes": ["不可恢复。拿不准先加 --dry-run 看一眼要删的东西。", "与 forget 的区别：delete 按 id 精确删一条，forget 按 user/agent/session 批量清。"],
+        "notes": [
+            "不可恢复。拿不准先加 --dry-run 看一眼要删的东西。",
+            "与 forget 的区别：delete 按 id 精确删一条，forget 按 user/agent/session 批量清。",
+            "会级联清理该记忆的 l2 派生节点（上游 SDK 不级联，hy-mem 侧补扫）。",
+            "单条删除不需要 --yes；批量删除用 forget（需要 --yes）。删前确认。",
+        ],
         "group": "写入",
         "when": "用户明确要求删掉某条记忆。",
         "mutates": True,
         "examples": ["hy-mem delete 3f9a2c1b"],
-        "output": {"resp": "{ok, removed, memory_id}"},
-        "notes": ["单条删除不需要 --yes；批量删除用 forget（需要 --yes）。不可恢复，删前确认。"],
+        "output": {"resp": "{success, deleted_count, derived_purged[], ...}"},
     },
     "forget": {
         "group": "写入",
