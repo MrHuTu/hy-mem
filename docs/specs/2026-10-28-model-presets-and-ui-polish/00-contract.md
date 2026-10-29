@@ -28,7 +28,7 @@
 | C9 | 命令名即子命令名 | 交互层不再自造一套菜单动作名。每条命令 `Command.name` 与 `hy-mem <name>` 子命令同名（`add` / `search` / `setup` …），别名只做输入便利（`a`、`s`、`ls`）。旧菜单 18 个功能项必须有明确承接，见 `S6-menu-sweep.md` 映射表 | `cli/menu.py::COMMANDS` |
 | C10 | 结果留在滚动区 | 一次操作结束即回到提示符，**不清屏、不「按任意键继续」、不重画表头**。只有 `clear` 命令自己清屏 | `cli/menu.py` |
 | C11 | 非 TTY 可管道驱动 | `hy-mem menu` 在 stdin 非 TTY 时逐行读命令、逐条执行，不降级成编号菜单；stdin EOF 等价 `Ctrl+D` 退出并打印「退出。」，**不得**在 EOF 上原地打转 | `cli/menu.py::run_menu`、`cli/tui.py::line(eof_is_exit=True)` |
-| C13 | 设置流程四段式（用户规范） | 设置模型（embedding / llm）必须按序：①等用户把 baseUrl / 模型 / key 补充完整——继承来的 key 也要明示来源（`_confirm_credentials` 三件套确认，可当场换 key，信息不齐不发探针）；②信息完整才测连通性；③不可用可重设（retry/save/abort 菜单）；④连通性通过后，**与旧配置有差异时**先摆出旧→新对比再问「覆盖旧配置？」（`_credential_diff`），无差异不问 | `cli/setup_wizard.py` |
+| C13 | 设置流程四段式（用户规范） | 设置模型（embedding / llm）必须按序：①等用户把 baseUrl / 模型 / key 补充完整——继承来的 key 也要明示来源（`_confirm_credentials` 三件套 + **三选一**：就用这把（默认）/ 换一把 key / 取消，换 key 是显式入口而非藏在 N 后面；信息不齐不发探针）；②信息完整才测连通性；③不可用可重设（retry/save/abort 菜单）；④连通性通过后，**与旧配置有差异时**先摆出旧→新对比再问「覆盖旧配置？」（`_credential_diff`），无差异不问 | `cli/setup_wizard.py` |
 | C12 | 行编辑对齐 bash | ↑/↓ 与 `Ctrl+P/N` 翻历史（落盘 `<dataDir>/shell-history`，上限 300 条、单条截 200 字符、连续重复不记）、`Tab` 补全命令名与已知参数词、`Ctrl+R` 反查、`Ctrl+A/E` 行首行尾、`Ctrl+U/W/K` 删、`Ctrl+L` 清屏、`Ctrl+D` 空行退出、`Ctrl+C`/`Esc` 只放弃本行不退出会话 | `cli/tui.py::_line_edit` |
 
 ## 2. 分片表（根因表）
@@ -51,6 +51,7 @@
 | 2026-10-28 | C1 定为「向量 GPT/GLM/百炼qwen + 自定义」 | 用户选择：保留 qwen 作为独立预设，避免当前配置重选时落到自定义要手填端点 | S1 | 是（已问） |
 | 2026-10-28 | LLM 默认档位定为轻量档 | 用户选择：gpt-4o-mini / glm-4-flash / deepseek-chat | S1 | 是（已问） |
 | 2026-10-28 | 新增 C9~C12，分片表扩到 S1~S6 | 用户补充"ui 界面交互很多地方反人类，仿照 pi / bash shell 重做，别偷懒" —— 原 S4（worker 确认）/ S5（菜单扫描）被合并进 S3 / S6，空出的编号给控制台与行编辑 | S3 / S4 / S5 / S6 | 否（用户已给方向） |
+| 2026-10-29 | C13 的 key 决定从「confirm 二态」改为三选一菜单（就用这把/换一把 key/取消），新增 F 场景验证同端点显式换 key；setup_ui 25→29 | 用户反馈：设置/重置模型时没有要求输入 key 的机会——换全新模型的用户被「一路回车继承」挡住 | S7 | 是（用户已给口径） |
 | 2026-10-28 | 新增 C13（设置四段式）与 S7（UI 级测试）；同时修掉 3 个「第二次配置」残留 bug：自定义分支 same_endpoint 写死 True、自定义配置默认光标落第 1 预设、ask_secret 空回车放行 | 用户给出明确交互规范（信息补齐→测连通→可重设→覆盖确认）；UI 级测试首跑红测抓到 | S2 / S7 | 是（用户已给规范） |
 | 2026-10-28 | C6 措辞从"第 2 次起不打标题"改为"任何一次都不打计数标题" | 控制台里没有"轮次"这个概念了，结果直接写进滚动区 | S3 / S4 | 否 |
 
