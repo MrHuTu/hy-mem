@@ -1,6 +1,6 @@
 # hy-mem
 
-本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 Tencent Hy-Memory SDK 2.0.5 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
+本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 [Tencent Hy-Memory SDK](https://github.com/Tencent-Hunyuan/Hy-Memory) 2.0.5 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
 
 > A local long-term memory CLI for AI agents — write, fact-extract via LLM, semantic search, and tag archiving, with a built-in MCP stdio server (8 tools).
 
@@ -135,6 +135,12 @@ python scripts/test_setup_ui.py   # 设置向导 UI 级（40 项）
 ## 版本策略
 
 CLI 独立 semver，不与底层 hy-memory SDK 版本耦合（SDK 版本见 `hy-mem doctor`）。当前为 **1.0.0-rc.1**（Release Candidate）：功能面完整、测试矩阵全绿，进入发布候选；自用验证稳定后转正 1.0.0。
+
+## 声明
+
+- **本项目完全由 AI 生成**（GLM + 人类需求方驱动开发模式），代码、测试与文档均由 AI 产出，人类负责需求定义、方案评审与验收。
+- 面向**个人使用**设计：单机单用户场景（SQLite + 本地向量库），未做多租户、鉴权与并发治理，不适合生产环境多用户部署。
+- 底层能力来自 Tencent [Hy-Memory SDK](https://github.com/Tencent-Hunyuan/Hy-Memory)（Apache 2.0），本项目仅在其上封装 CLI / MCP / TUI 交互层。
 
 ## 许可证
 
