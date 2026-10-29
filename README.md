@@ -1,6 +1,6 @@
 # hy-mem
 
-本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 Tencent Hy-Memory SDK 2.0.5 构建，支持 Qwen3.7 云端嵌入（1024 维向量）。
+本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 Tencent Hy-Memory SDK 2.0.5 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
 
 > A local long-term memory CLI for AI agents — write, fact-extract via LLM, semantic search, and tag archiving, with a built-in MCP stdio server (8 tools).
 
@@ -16,10 +16,11 @@
 
 ## 功能特性
 
-- **语义检索**：基于向量相似度的记忆搜索
-- **异步写入**：非阻塞式入队机制，支持队列消费
+- **MCP 服务**：内置 stdio MCP server（8 工具：add/search/get/update/delete/list + queue_status + get_version），任何支持 MCP 的客户端（WorkBuddy / Claude Desktop / Cursor 等）即插即用
+- **语义检索**：基于向量相似度的记忆搜索，写入时 LLM 自动抽取事实与标签
+- **异步写入**：非阻塞式入队，自动拉起后台 worker 消费；队列状态全程可查（pending / dead / shadow）
 - **标签管理**：灵活的标签系统，支持归档与分类
-- **交互式配置**：可视化设置向导与健康检查
+- **交互式配置**：设置菜单 + 首次安装向导，连通性实测通过才放行
 - **多身份支持**：通过 `user_id` 区分不同 Agent 的记忆空间
 
 ## 快速开始
@@ -50,30 +51,28 @@ python -m cli.hy_mem_cli menu
 |------|------|
 | `add` | 添加记忆（支持单条/多条/带标签） |
 | `search` | 语义检索记忆 |
-| `list` | 列出记忆 |
-| `get` | 获取单条记忆详情 |
-| `delete` | 删除记忆（逻辑删除） |
-| `forget` | 彻底删除记忆 |
-| `tags` | 列出所有标签 |
-| `untag` | 解绑标签 |
-| `archive` | 归档管理 |
-| `stats` | 统计与健康检查 |
-| `queue` | 查看异步队列 |
-| `worker` | 消费队列任务 |
+| `list` / `get` / `update` / `delete` | 列出 / 详情 / 修改 / 逻辑删除 |
+| `forget` / `finalize` | 彻底删除 / 清理逻辑删除残留 |
+| `tags` / `untag` / `archive` | 标签与归档管理 |
+| `stats` / `doctor` | 统计 / 19 项健康自检 |
+| `queue` / `worker` / `drain` / `retry` | 异步队列查看 / 消费 / 清空 / 重投 |
+| `mcp` / `serve` | 启动 MCP stdio 服务 / HTTP 服务 |
+| `setup` / `config` / `user` / `install` | 设置菜单 / 配置管理 / 身份切换 / 注册到 PATH |
+| `history` / `log` / `skill` / `migrate` / `version` | 操作历史 / 运行日志 / Skill 安装 / 数据迁移 / 版本 |
 
-完整命令列表可通过 `python -m cli.hy_mem_cli help` 查看。
+完整 31 个子命令说明见 `hy-mem help`。
 
 ## 配置说明
 
 配置文件位于 `config.json`，支持以下配置项：
 
-- **embedding**: 嵌入模型配置（provider、model、api_key）
+- **embedding**: 嵌入模型配置（provider、model、apiKey）
 - **llm**: 大语言模型配置
 - **storage**: 存储路径配置
 - **user_id**: 当前身份标识
 - **search**: 检索参数（min_score 等）
 
-也可通过环境变量覆盖配置，详见 `AGENTS.md`。
+**密钥存储**：默认直接固化在 `config.json` 的 `apiKey` 字段（`config.json` 恒被 `.gitignore` 保护，不会入库）；也兼容从环境变量读取（`MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`，老配置无需改动）。
 
 ## 项目结构
 
@@ -121,15 +120,16 @@ python scripts/build_exe.py
 ### 测试
 
 ```bash
-python scripts/test_cli.py
-python scripts/test_ui.py
+python scripts/test_cli.py        # CLI（84 项）
+python scripts/test_setup_ui.py   # 设置向导 UI 级（40 项）
+# 共 11 套 633 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog / i18n / encoding
 ```
 
 ## 注意事项
 
 - **exe 与源码是两套完全独立的环境**，修改代码后需重新打包
-- 写入记忆时建议**一条只放一个主题**，保持粒度清晰
-- 异步写入仅入队，**入队 ≠ 入库**，需通过 worker 消费队列
+- 写入记忆时建议**一条只放一个主题**，保持粒度清晰；事实型表述（而非寒暄/闲聊）才会被抽取成可检索记忆
+- 异步写入会自动拉起后台 worker，入队后可通过 `queue` 查看进度；**入队 ≠ 立即可检索**，pro 模式单条落库可达 2 分钟
 - 密钥仅支持 ASCII 字符
 
 ## 版本策略
@@ -138,4 +138,4 @@ CLI 独立 semver，不与底层 hy-memory SDK 版本耦合（SDK 版本见 `hy-
 
 ## 许可证
 
-请查看项目根目录下的许可证文件。
+Apache License 2.0，见 [LICENSE](LICENSE)。
