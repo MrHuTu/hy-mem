@@ -51,7 +51,7 @@ def _preflight(argv: list[str]) -> int | None:
     保证 `hy-mem search ...` 这类高频调用不被拖慢。
     """
     try:
-        import runtime_check
+        from cli.core import runtime_check
     except Exception:  # noqa: BLE001
         return None  # 自检模块本身有问题，不该连累主程序
     try:
@@ -77,7 +77,7 @@ def _crash(exc: BaseException) -> int:
     """未捕获异常的统一出口：写日志 + 人话提示 + 双击时停住窗口。"""
     tb = traceback.format_exc()
     try:
-        import runtime_check
+        from cli.core import runtime_check
 
         log = runtime_check.write_log(f"未捕获异常：{type(exc).__name__}\n{tb}")
         print()
@@ -103,7 +103,7 @@ def main() -> int:
         return rc
 
     try:
-        from hy_mem_cli import main as cli_main
+        from cli.hy_mem_cli import main as cli_main  # S1 分层：包全名
 
         return cli_main(argv)
     except KeyboardInterrupt:

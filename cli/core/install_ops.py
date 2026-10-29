@@ -20,7 +20,8 @@ def app_root() -> Path:
     """安装根：打包后是 exe 所在目录，源码模式是 cli/ 的上一级。"""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+    # S1 分层（2026-10-29）：本文件在 cli/<层>/ 下，安装根要多上一层
+    return Path(__file__).resolve().parent.parent.parent
 
 
 def target_command() -> list[str]:

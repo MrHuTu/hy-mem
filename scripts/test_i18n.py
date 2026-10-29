@@ -19,16 +19,16 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 CLI = REPO / "cli" / "hy_mem_cli.py"
-sys.path.insert(0, str(REPO / "cli"))
+sys.path.insert(0, str(REPO))
 
 _SANDBOX = Path(tempfile.mkdtemp(prefix="hymem-i18n-"))
 os.environ["MEMORY_DATA_DIR"] = str(_SANDBOX / "data")
 os.environ["HY_MEM_CONFIG"] = str(_SANDBOX / "config.json")
 os.environ.pop("HY_MEM_LANG", None)
 
-import errors  # noqa: E402
-import i18n  # noqa: E402
-import menu  # noqa: E402
+from cli.core import errors  # noqa: E402
+from cli.ui import i18n  # noqa: E402
+from cli.ui import menu  # noqa: E402
 
 results: list[bool] = []
 

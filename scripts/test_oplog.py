@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "cli"))
+sys.path.insert(0, str(REPO))
 
 # 必须在 import oplog/config 之前定好沙箱：oplog.path() 读的是 config.load()
 _SANDBOX = Path(tempfile.mkdtemp(prefix="hymem-oplog-"))
@@ -24,7 +24,7 @@ os.environ["MEMORY_DATA_DIR"] = str(_SANDBOX / "data")
 os.environ["HY_MEM_CONFIG"] = str(_SANDBOX / "config.json")
 os.environ.pop("HY_MEM_LANG", None)
 
-import oplog  # noqa: E402
+from cli.core import oplog  # noqa: E402
 
 results: list[bool] = []
 

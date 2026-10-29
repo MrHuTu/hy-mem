@@ -1,0 +1,6 @@
+2026-10-29 12:58:08  version     OK        0.0s  version
+2026-10-29 12:58:09  version     FAIL      0.0s  E_INTERNAL 这多半是程序缺陷：加 --verbose 复跑可拿到堆栈  version
+2026-10-29 12:58:30  version     OK        0.0s  version
+2026-10-29 12:58:31  menu        OK        0.1s  menu
+2026-10-29 13:23:58  worker      OK        1.1s  worker --idle-exit 10 --once
+2026-10-29 13:43:40  version     OK        0.0s  version

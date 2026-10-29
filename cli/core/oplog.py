@@ -46,7 +46,7 @@ _DUR_W = 7
 
 def path() -> Path:
     """日志文件路径：<storage.dataDir>/ops.log（目录不存在就建）。"""
-    import config as cfgmod
+    from cli.core import config as cfgmod
 
     raw = str((cfgmod.load().get("storage") or {}).get("dataDir") or "").strip()
     base = Path(os.path.expandvars(os.path.expanduser(raw))) if raw else cfgmod.default_data_dir()
@@ -136,7 +136,7 @@ def _error_text(error) -> str:
         return ""
     if isinstance(error, BaseException):
         try:
-            import errors
+            from cli.core import errors
 
             code, hint = errors.classify_error(error)[1:]
             return f"{code} {hint}".strip() if hint else code

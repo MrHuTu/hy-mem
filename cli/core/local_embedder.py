@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Tuple
 
 DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_DIMS = 512
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parent.parent.parent  # S1 分层：多上一层
 
 
 def _default_cache_dir() -> Path:

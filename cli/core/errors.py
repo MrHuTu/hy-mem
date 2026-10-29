@@ -16,18 +16,25 @@ EXIT_RUNTIME = 2
 EXIT_INTERNAL = 3
 
 
+# S1 分层（2026-10-29）：core 不 import ui —— 翻译经钩子注入（依赖倒置）。
+# UI 层（menu/hy_mem_cli 启动时）调用 register_tr 注入 tr；MCP 等纯服务
+# 进程不注入，错误恒中文。既守住分层铁律，又保住「英文用户看英文报错」。
+_TRANSLATOR = None
+
+
+def register_tr(func) -> None:
+    """UI 层注册翻译函数（签名：str -> str）。"""
+    global _TRANSLATOR
+    _TRANSLATOR = func
+
+
 def _tr(text: str) -> str:
-    """提示文案翻成当前界面语言。
-
-    刻意延迟 import：本模块被 MCP 与 CLI 共用，而 i18n 依赖 config，
-    顶层导入会在 MCP 那种「只加载最少模块」的进程里平白拉起配置层。
-    拿不到 i18n 就返回中文原文 —— 提示总得有，语言是次要的。
-    """
+    """提示文案翻成当前界面语言；未注册翻译器时返回中文原文。"""
+    if _TRANSLATOR is None:
+        return text
     try:
-        from i18n import tr
-
-        return tr(text)
-    except Exception:  # noqa: BLE001
+        return _TRANSLATOR(text)
+    except Exception:  # noqa: BLE001  翻译失败不能拦错误提示本身
         return text
 
 # 2 与 3 的分界线是「能不能靠改配置/换网络解决」：端点、密钥、维度、文件

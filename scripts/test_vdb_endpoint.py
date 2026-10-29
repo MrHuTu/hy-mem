@@ -27,14 +27,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "cli"))
+sys.path.insert(0, str(ROOT))
 
 TMP = Path(tempfile.mkdtemp(prefix="hy-mem-test-vdb-"))
 os.environ["MEMORY_DATA_DIR"] = str(TMP / "data")
 os.environ["HY_MEM_TUI"] = "0"
 (TMP / "data").mkdir(parents=True, exist_ok=True)
 
-import vdb_endpoint  # noqa: E402
+from cli.core import vdb_endpoint  # noqa: E402
 
 results: list[bool] = []
 

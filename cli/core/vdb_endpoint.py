@@ -35,8 +35,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-import netprobe
-import store
+from cli.core import netprobe
+from cli.core import store
 
 PORT_FILE_NAME = "server.port"
 OWNER_LABEL = "serve"          # 端口文件里的角色名，便于人工排查
@@ -392,7 +392,7 @@ def clear_injected_env() -> None:
 
 def _spawn_serve() -> bool:
     """拉起 detached serve（数据所有者）。懒导入防循环依赖。"""
-    from hy_mem_cli import _spawn_detached_serve
+    from cli.hy_mem_cli import _spawn_detached_serve  # S3 存量例外（契约记录）
     return _spawn_detached_serve()
 
 

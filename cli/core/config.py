@@ -42,7 +42,8 @@ def _root() -> Path:
 
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+    # S1 分层（2026-10-29）：本文件在 cli/<层>/ 下，安装根要多上一层
+    return Path(__file__).resolve().parent.parent.parent
 
 
 def config_path() -> Path:
@@ -279,12 +280,9 @@ def identity_label(uid: str) -> str:
     """
     if uid != GENERAL_USER_ID:
         return uid
-    try:
-        from i18n import tr
-
-        return tr("通用（{}）", uid)
-    except Exception:  # noqa: BLE001
-        return f"{GENERAL_LABEL}（{uid}）"
+    # S1 分层（2026-10-29）：core 不依赖 ui —— 报错/标签文案的 i18n 属于
+    # UI 层关注点，这里恒用中文（GENERAL_LABEL）。
+    return f"{GENERAL_LABEL}（{uid}）"
 
 
 def set_user_id(uid: str) -> tuple[Path, str]:

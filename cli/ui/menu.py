@@ -37,11 +37,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-import config as cfgmod
-import storage_ops
-import tui
-from i18n import label, lang, set_lang, tr
-from tui import c
+from cli.core import config as cfgmod
+from cli.core import storage_ops
+from cli.ui import tui
+from cli.ui.i18n import label, lang, set_lang, tr
+from cli.core import errors as _errors_core
+_errors_core.register_tr(tr)  # S1 分层：错误文案翻译经钩子注入（core 不 import ui）
+from cli.ui.tui import c
 
 HISTORY_NAME = "shell-history"
 HISTORY_MAX = 300
@@ -95,7 +97,7 @@ def subprocess_dispatch(argv: list[str], stdin_text: str | None = None) -> tuple
     本进程 env 就永久指向一个可能已经死掉的端口，之后所有命令都连不上
     （0.9.9 的 F1）。子进程把 env 改动留在自己肚子里，界面进程永远干净。
     """
-    import install_ops
+    from cli.core import install_ops
 
     cmd = install_ops.target_command() + list(argv)
     try:
@@ -634,7 +636,7 @@ def cmd_setup(sh: Shell, items: list[str]) -> int:
     scope = (items[0] if items else "all") or "all"
     if scope in ("model", "embed"):
         scope = "embedding"
-    import setup_wizard
+    from cli.ui import setup_wizard
 
     if scope != "all" and scope not in _SCOPES:
         tui.err(tr("未知的设置项 {}", scope))
@@ -836,7 +838,7 @@ def cmd_log(sh: Shell, items: list[str]) -> int:
     刻意不在这里跑任何子命令：日志页出问题时最不该依赖「再起一个子进程」——
     用户点进来往往正是因为别的操作刚刚失败。
     """
-    import oplog
+    from cli.core import oplog
 
     sub = items[0] if items else ""
     if sub == "clear":
@@ -913,7 +915,7 @@ def cmd_lang(sh: Shell, items: list[str]) -> int:
 
 
 def cmd_help(sh: Shell, items: list[str]) -> int:
-    import helptext
+    from cli.ui import helptext
 
     if items:
         cmd = find_command(items[0])
@@ -1023,7 +1025,7 @@ def header(cfg: dict) -> str:
     刻意不打印条数：那要起一次子进程查库，控制台启动就会慢半秒；
     真要看条数敲 `stats` 就行。
     """
-    import helptext
+    from cli.ui import helptext
 
     emb = cfg.get("embedding") or {}
     mode = str(cfg.get("mode") or "pro")

@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "cli"))
+sys.path.insert(0, str(ROOT))
 
 # 控制台相关的用例会构造 menu.Shell（它要读配置）。指到沙箱，
 # 免得跑测试时把真实安装目录的 config.json / 历史文件当工作区。
@@ -33,7 +33,7 @@ _SANDBOX = Path(tempfile.mkdtemp(prefix="hymem-ui-"))
 os.environ.setdefault("HY_MEM_CONFIG", str(_SANDBOX / "config.json"))
 os.environ.setdefault("MEMORY_DATA_DIR", str(_SANDBOX / "data"))
 
-import tui  # noqa: E402
+from cli.ui import tui  # noqa: E402
 
 
 class FakeReader(tui.KeyReader):
@@ -403,7 +403,7 @@ def main() -> int:
 
     # 连续写入：两条 add 之间不插菜单、不问「再写一条」、不等「按任意键」
     print("\n控制台：写记忆 / 检索 连续操作")
-    import menu
+    from cli.ui import menu
 
     # 只在这一段强制行输入：前面的用例靠 key_mode() 走 FakeReader，
     # 提前全局关掉会让它们直接退化成编号菜单、卡在 stdin 上等输入。

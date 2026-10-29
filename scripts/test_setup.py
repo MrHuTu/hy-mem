@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "cli"))
+sys.path.insert(0, str(ROOT))
 
 TMP = Path(tempfile.mkdtemp(prefix="hy-mem-test-"))
 os.environ["HY_MEM_HOME"] = str(TMP / "home")
@@ -29,12 +29,12 @@ os.environ["HY_MEM_CONFIG"] = str(TMP / "home" / "config.json")
 os.environ["HY_MEM_TUI"] = "0"
 (TMP / "home").mkdir(parents=True, exist_ok=True)
 
-import config as cfgmod  # noqa: E402
-import netprobe  # noqa: E402
-import setup_wizard  # noqa: E402
-import storage_ops  # noqa: E402
-import presets as presets_mod  # noqa: E402
-import tui  # noqa: E402
+from cli.core import config as cfgmod  # noqa: E402
+from cli.core import netprobe  # noqa: E402
+from cli.ui import setup_wizard  # noqa: E402
+from cli.core import storage_ops  # noqa: E402
+from cli.core import presets as presets_mod  # noqa: E402
+from cli.ui import tui  # noqa: E402
 
 # stub() 会把 probe_llm 换成桩，这里先留一份真身，供第 7 节的判定逻辑测试用。
 _REAL_PROBE_LLM = setup_wizard.probe_llm
@@ -222,8 +222,8 @@ def main() -> int:
     # 起因：异步写入只入队不落库，用户写完立刻检索 → 0 条，以为记忆丢了。
     # 现在 search/list 会带「队列里还有 N 条没落库」的线索，这里锁住计数函数。
     print("\n队列积压可见")
-    import hy_mem_cli  # noqa: E402
-    import store  # noqa: E402
+    from cli import hy_mem_cli  # noqa: E402
+    from cli.core import store  # noqa: E402
 
     _empty = hy_mem_cli._pending_jobs()
     check("空队列计为 0", _empty == 0, str(_empty))
@@ -242,7 +242,7 @@ def main() -> int:
 
     # ---- 10. 运行环境自检（专治「双击闪退」） ----
     print("\n运行环境自检")
-    import runtime_check as rc
+    from cli.core import runtime_check as rc
 
     items = rc.checks(full=True)
     names = [c["item"] for c in items]
@@ -300,7 +300,7 @@ def main() -> int:
 
     # ---- 13. 模型下载镜像（fastembed 默认拉 huggingface，国内会卡 40s） ----
     print("\n模型下载镜像")
-    import hy_mem_cli as _cli
+    from cli import hy_mem_cli as _cli
 
     _saved = os.environ.pop("HF_ENDPOINT", None)
     try:
@@ -343,7 +343,7 @@ def main() -> int:
         os.environ["MEMORY_DATA_DIR"] = _dd0
 
     # 本地嵌入的模型缓存应跟着数据目录走（换包不重下 92MB）
-    import local_embedder as _lemb
+    from cli.core import local_embedder as _lemb
 
     _dd = os.environ.get("MEMORY_DATA_DIR")
     os.environ["MEMORY_DATA_DIR"] = str(TMP / "cacheprobe")
@@ -455,7 +455,9 @@ def main() -> int:
     _net_import = _re.compile(
         r"^\s*(?:import|from)\s+(?:urllib\.request|requests|httpx)\b", _re.M
     )
-    for _p in sorted((ROOT / "cli").glob("*.py")):
+    # S1 分层后 cli/ 是三层包结构（core/ui/mcp），守卫范围同步递归
+    _all_py = sorted((ROOT / "cli").rglob("*.py"))
+    for _p in _all_py:
         if _p.name == "netprobe.py":
             continue
         _src = _p.read_text(encoding="utf-8")
@@ -466,7 +468,7 @@ def main() -> int:
     check("cli/ 下只有 netprobe 能发 HTTP", not _urlopen_offenders, str(_urlopen_offenders))
     check("cli/ 下不再有 status==0 的约定", not _zero_offenders, str(_zero_offenders))
 
-    _net = (ROOT / "cli" / "netprobe.py").read_text(encoding="utf-8")
+    _net = (ROOT / "cli" / "core" / "netprobe.py").read_text(encoding="utf-8")
     check("netprobe 拒绝 status<100", "self.status < 100" in _net)
     check("netprobe 发送前预检", "precheck(url, key" in _net or "precheck(" in _net)
 

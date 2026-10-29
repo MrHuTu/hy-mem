@@ -33,7 +33,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-import config as cfgmod
+from cli.core import config as cfgmod
 
 
 # --------------------------------------------------------------------------
