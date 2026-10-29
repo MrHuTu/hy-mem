@@ -161,6 +161,36 @@ def main() -> int:
           int(early.get("pending_writes") or 0) >= 1 and "queue_status" in str(early.get("pending_note") or ""),
           json.dumps({k: early.get(k) for k in ("pending_writes", "pending_note")}, ensure_ascii=False)[:140])
 
+    # ---- 3a. R3：add_memory 同步分支抢不到锁 → lock_timeout 结构化失败 ----
+    # 测试进程占住沙箱写锁再调 async=false；默认 5s 超时内必须返回 guidance，
+    # 不许干等 180s 撞 TimeoutError。worker 可能仍存活并间歇持锁，重试占锁；
+    # 拿不到就显式跳过（不造假绿）。注意不许在此前 drain 队列——会打断
+    # 下面「queue_status 跟踪到本条 job」的 in-flight 断言。
+    os.environ["MEMORY_DATA_DIR"] = str(sandbox / "data")
+    from hymem.core import store as _store  # noqa: E402
+
+    _lk = None
+    for _ in range(20):
+        try:
+            _lk = _store.WriteLock(timeout=1)
+            _lk.__enter__()
+            break
+        except TimeoutError:
+            _lk = None
+            time.sleep(1)
+    if _lk is None:
+        check("add_memory sync 锁占用返回 lock_timeout", False, "测试进程占锁失败（worker 长期持锁），显式跳过")
+    else:
+        try:
+            lock_res = tool("add_memory", {"text": "锁占用探针条目", "async": False}, timeout=90)
+            check("add_memory sync 锁占用返回 lock_timeout", lock_res.get("error") == "lock_timeout",
+                  json.dumps(lock_res, ensure_ascii=False)[:120])
+            check("add_memory sync guidance 三要素",
+                  "未入库" in str(lock_res.get("guidance") or "") and "async" in str(lock_res.get("guidance") or ""),
+                  str(lock_res.get("guidance"))[:100])
+        finally:
+            _lk.__exit__(None, None, None)
+
     # ---- 3b. queue_status：异步落库进度可查（0.9.9 新增的进度面）----
     prog = tool("queue_status", {"job_ids": res.get("job_ids") or []})
     pj = (prog.get("jobs") or [{}])[0]

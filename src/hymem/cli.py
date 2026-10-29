@@ -502,6 +502,11 @@ def sweep_derived_nodes(client: object, root_id: str) -> tuple[list[str], str]:
     return _f(client, root_id)
 
 
+def add_sync_with_retry(client: object, text: str, *, attempts: int = 4, **kw):
+    from hymem.core.clientops import add_sync_with_retry as _f
+    return _f(client, text, attempts=attempts, **kw)
+
+
 def data_dir() -> Path:
     from hymem.core.procs import data_dir as _f
     return _f()
@@ -1106,9 +1111,21 @@ def cmd_add(args) -> int:
         last: dict = {}
         raw_ids: list[str] = []
         for p in parts:
-            # 写锁：SDK 内部无锁，reconcile 是读改写，多进程并发会丢更新
-            with store.WriteLock():
-                last = client.add(p, source=args.source, **extra, **ident)
+            # 写锁：reconcile 是读改写，多进程并发会丢更新。
+            # R3 fail-fast：sync add 抢不到锁立即失败（默认 5s），不让智能体
+            # 干等 180s 撞 TimeoutError；多条/并发的正路是 --async 入队。
+            lock_timeout = float(os.getenv("HY_MEM_ADD_LOCK_TIMEOUT") or 5)
+            try:
+                with store.WriteLock(timeout=lock_timeout):
+                    last = add_sync_with_retry(client, p, source=args.source, **extra, **ident)
+            except TimeoutError:
+                mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
+                return fail(
+                    f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）{mid_note}",
+                    hint="单条可稍后重试；多条/并发务必用 hy-mem add --async（入队即返回，3 车道消费）；"
+                         "超时可用 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整",
+                    err_code="E_LOCK",
+                )
             rid = last.get("memory_id")
             if rid:
                 raw_ids.append(str(rid))

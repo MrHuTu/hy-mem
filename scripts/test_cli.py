@@ -407,6 +407,55 @@ def main() -> int:
     purged, note = sweep_derived_nodes(bc, "root")
     check("R1 内部不可达时降级且带 note", purged == [] and "可能残留" in note, f"{purged}|{note[:40]}")
 
+    # ── R3 fail-fast：抢不到写锁立即 E_LOCK，不干等 180s ────────────────
+    print("\nR3 sync add 抢锁 fail-fast")
+    sandbox2 = Path(tempfile.mkdtemp(prefix="hymem-lock-"))
+    (sandbox2 / "data").mkdir()
+    (sandbox2 / "config.json").write_text(
+        (ROOT / "config.json").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    sb_env = {"HY_MEM_CONFIG": str(sandbox2 / "config.json"), "MEMORY_DATA_DIR": str(sandbox2 / "data")}
+    saved_env = {k: os.environ.get(k) for k in sb_env}
+    os.environ.update(sb_env)  # 测试进程的 store 指向同一沙箱以占锁
+    try:
+        from hymem.core import store as _store  # noqa: E402
+
+        lk = _store.WriteLock(timeout=0.5)
+        lk.__enter__()
+        try:
+            import time as _time
+
+            t0 = _time.time()
+            p = run(["--json", "add", "锁占用时的失败路径"], env_extra=sb_env, timeout=60)
+            elapsed = _time.time() - t0
+            okj, obj = one_json_object(p.stdout)
+            err = (obj or {}).get("error") or {}
+            check("R3 锁占用 → 非零退出", p.returncode != 0, f"exit={p.returncode} elapsed={elapsed:.1f}s")
+            check("R3 报 E_LOCK", err.get("code") == "E_LOCK", str(err.get("code")))
+            msg = str(err.get("message", ""))
+            hint = str(err.get("hint", ""))
+            check("R3 三要素：本条未入库", "未入库" in msg, msg[:60])
+            check("R3 三要素：单条可重试 + 多条用 --async", "重试" in hint and "--async" in hint, hint[:60])
+            check("R3 快速失败（<30s，非 180s 等锁）", elapsed < 30, f"{elapsed:.1f}s")
+            # 零写入：库里没有这条
+            p = run(["--json", "list", "-n", "5"], env_extra=sb_env, timeout=60)
+            okj, obj = one_json_object(p.stdout)
+            mems = (obj or {}).get("memories") or [] if okj else []
+            check("R3 零写入（list 为空）", okj and len(mems) == 0, f"count={len(mems)}")
+        finally:
+            lk.__exit__(None, None, None)
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # R3.3 口径：help add 必须写明单写者 + 实测量级 + --async 正路
+    p = run(["help", "add"])
+    check("R3 help add 单写者口径", "单写者" in p.stdout and "20~100s" in p.stdout, "")
+    check("R3 help add 指向 --async", "--async" in p.stdout, "")
+
     bad = results.count(False)
     print(f"\n{'全部通过' if bad == 0 else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")
     return 1 if bad else 0

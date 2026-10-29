@@ -165,8 +165,30 @@ def _tool_add_memory(args: dict) -> str:
             {"metadata": metadata, "memory_at": memory_at, "request_id": request_id}
         )
         add_kw = {k: v for k, v in add_kw.items() if v is not None}
-        with store.WriteLock():
-            last = client.add(text, source="mcp", **add_kw, **_identity())
+        # R3 fail-fast：同步分支抢不到锁立即返回结构化失败（默认 5s），
+        # 不让智能体干等 180s；多条/并发的正路是 async=true（默认）。
+        import os as _os
+
+        lock_timeout = float(_os.getenv("HY_MEM_ADD_LOCK_TIMEOUT") or 5)
+        try:
+            from hymem.core.clientops import add_sync_with_retry
+
+            with store.WriteLock(timeout=lock_timeout):
+                last = add_sync_with_retry(client, text, source="mcp", **add_kw, **_identity())
+        except TimeoutError:
+            return json.dumps(
+                {
+                    "mode": "sync",
+                    "ok": False,
+                    "error": "lock_timeout",
+                    "guidance": (
+                        f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）。"
+                        "单条可稍后重试；多条/并发请保持 async=true（默认，入队即返回，3 车道消费）。"
+                        "超时可用环境变量 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
         ids = _ids_of(last)
         if tags:
             _bind_tags(_new_ids_only(ids, before), tags, "user")
@@ -589,7 +611,7 @@ TOOLS = [
             "properties": {
                 "text": {"type": "string", "description": "记忆正文，一条一个主题"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签"},
-                "async": {"type": "boolean", "description": "默认 true；false 时同步等待落库（8~40s）"},
+                "async": {"type": "boolean", "description": "默认 true（入队即返回，3 车道消费）。false 时同步等待落库：单写者设计，实测 20~100s（LLM 抽取主导），抢不到写锁 5s 返回 lock_timeout（本条零写入，可重试或改用 async）；多条/并发务必用默认 true"},
                 "metadata": {"type": "object", "description": "附加元数据对象，如 {\"project\": \"iisw\"}"},
                 "memory_at": {
                     "type": "string",
