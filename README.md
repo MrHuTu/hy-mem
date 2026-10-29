@@ -78,8 +78,8 @@ python -m cli.hy_mem_cli menu
 
 ```
 hy-mem/
-├── cli/                    # CLI 包（三层分层，scripts/check_layering.py 守卫）
-│   ├── hy_mem_cli.py      # 主入口，命令解析与分发
+├── src/hymem/              # 包根（pip install -e . 可装；python -m hymem 可跑）
+│   ├── cli.py             # 入口（命令分发）
 │   ├── core/              # 核心域（无 UI 依赖，桌面/服务可复用）
 │   │   ├── store.py       #   SQLite 队列与记忆库操作
 │   │   ├── config.py      #   配置加载与密钥解析
