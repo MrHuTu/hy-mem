@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """R4（2026-10-29）：同步 add 两段式 —— 遵守 SDK 设计规范的锁粒度收窄。
+S2（2026-10-30 batch-commit）：batch_commit 批量提交段。
+
 
 背景（docs/specs/2026-10-29-fix-delete-ghost-and-add-readonly §R4）：
 hy-mem 的跨进程 WriteLock 此前覆盖整个 client.add（含 LLM 抽取 8~40s），
@@ -412,3 +414,210 @@ def commit_extracted_with_retry(
             last = e
             _time.sleep(0.3 * (i + 1))
     raise last  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# S2（2026-10-30 batch-commit）：多条 job 合并提交段
+# docs/specs/2026-10-30-batch-commit —— P2 贴齐 SDK：只用原生批量入口
+# ---------------------------------------------------------------------------
+
+
+def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
+    """多条 job 的锁内合并提交：一次判定 LLM，逐 job 保 lineage。
+
+    jobs：[{text, prepared, add_kw...}, ...]（同 user+agent 已由
+    claim_next_batch 保证；prepared 为 prepare_commit 的结果）。
+    调用方必须已持有 WriteLock。返回与 jobs 等长的 result dict 列表
+    （与 commit_extracted 同形态，另带 batch 字段）。
+
+    流水线（spec §1 批次流水线）：
+      ① 批级 dedup：合并各 job 的 facts 互相判重（_dedup_extracted
+         原生批量入口，内容唯一化；content→job 映射随之收紧）
+      ② 逐 job：L1 根 upsert（各自原文/向量，SDK 规范不变）
+      ③ 一次 _reconcile_and_store(全部 facts, source_raw_memory_id="")
+         —— 空 root：SDK 批量入口只收单一根 id，传任何一个 job 的根
+         都会把整批挂错；UPDATE 路径空串不写（writer.py:1417 守卫），
+         历史挂链零扰动
+      ④ lineage 修复：按 content→job 精确映射（对齐 SDK
+         _inherit_exact_input_structure 的 no-fuzzy 原则），
+         update_payload 逐 ADD 节点回填正确的 source_raw_memory_id
+      ⑤ 逐 job：basic_info（各判各的）、L1→SHADOW、结果 dict
+
+    失败语义：reconcile 整批失败抛 CommitFailed（调用方对批内全部
+    mark_failed）；lineage 修复段失败不判失败——L2 已正确落库可检索，
+    note 落 batch 结果（lineage_partial），诚实降级不假绿（P4/P6）。
+    """
+    from hy_memory.models.memory import MemoryLayer, MemoryStatus
+    from hy_memory.pipelines import writer as writer_mod
+
+    writer = _writer_of(client)
+    run = lambda coro: _run(client, coro)  # noqa: E731
+    vs = run(writer._get_vector_store())
+    if not jobs:
+        return []
+
+    # ① 批级 dedup（跨 job 的重复 facts 收敛为一条；gmt 按序保首个）
+    all_texts: list[str] = []
+    all_metas: list[dict] = []
+    job_of_text: dict[str, int] = {}   # content → job 下标（精确映射）
+    per_job_texts: list[set[str]] = [set() for _ in jobs]
+    for ji, j in enumerate(jobs):
+        for t, m in zip(j["prepared"]["new_texts"], j["prepared"]["new_metas"]):
+            if t in job_of_text:
+                continue  # 跨 job 重复：保首个（FIFO 语义），后到的 job 不重复落
+            job_of_text[t] = ji
+            per_job_texts[ji].add(t)
+            all_texts.append(t)
+            all_metas.append(m)
+    precomputed: dict = {}
+    for j in jobs:
+        precomputed.update(j["prepared"]["precomputed"] or {})
+    if len(all_texts) >= 2:
+        try:
+            all_texts, all_metas, _pd = run(
+                writer._dedup_extracted(
+                    all_texts, all_metas, jobs[0]["prepared"]["wr"],
+                    jobs[0]["prepared"]["request_id"],
+                )
+            )
+            precomputed.update(_pd or {})
+            job_of_text = {t: job_of_text[t] for t in all_texts if t in job_of_text}
+        except Exception:  # noqa: BLE001  dedup 失败 non-fatal，未去重直接进判定
+            pass
+
+    # ② 逐 job L1 存档（各自原文/向量；SDK 规范：原始内容始终存 L1_RAW）
+    from hy_memory.models.memory import MemoryNode, SourceType
+    l1_ids: list[str] = []
+    l1_nodes: list = []
+    for j in jobs:
+        wr = j["prepared"]["wr"]
+        emb = j["prepared"]["l1_embedding"]
+        node = MemoryNode(
+            user_id=wr.user_id,
+            agent_id=wr.agent_id or "default_agent",
+            session_id=wr.session_id or "default_session",
+            source=wr.source,
+            layer=MemoryLayer.L1_RAW,
+            content=wr.content,
+            source_type=SourceType.EXPLICIT,
+            status=MemoryStatus.ACTIVE,
+            is_latest=True,
+            embedding=emb or run(writer.embed_service.embed_queued_with_meta(wr.content))[0],
+            memory_at=wr.memory_at,
+            custom={},
+        )
+        l1_ids.append(run(vs.upsert(node)))
+        l1_nodes.append(node)
+
+    # ③ 一次判定（空 root；RECONCILE_ENABLED=false 走 _direct_store 同样空 root）
+    stored_ids: list[str] = []
+    recon_error = None
+    if all_texts:
+        base_wr = jobs[0]["prepared"]["wr"]
+        req_id = jobs[0]["prepared"]["request_id"]
+        if writer_mod._RECONCILE_ENABLED:
+            stored_ids, recon_error, ops_counts, recon_tokens = run(
+                writer._reconcile_and_store(
+                    new_memory_texts=all_texts,
+                    new_memories_meta=all_metas,
+                    request=base_wr,
+                    vector_store=vs,
+                    req_id=req_id,
+                    source_raw_memory_id="",   # 空 root：见 docstring ③
+                    precomputed_embeddings=precomputed,
+                )
+            )
+        else:
+            stored_ids, recon_error, ops_counts, recon_tokens = run(
+                writer._direct_store(
+                    new_memories_meta=all_metas,
+                    request=base_wr,
+                    vector_store=vs,
+                    req_id=req_id,
+                    source_raw_memory_id="",
+                    precomputed_embeddings=precomputed,
+                )
+            )
+        if recon_error is not None:
+            raise CommitFailed(
+                f"RECONCILE_FAILED(batch): {recon_error}; "
+                f"l1_memory_ids={','.join(l1_ids)}"
+            )
+
+    # ④ lineage 修复：ADD 节点按 content→job 精确回填正确的根
+    lineage_note = ""
+    if stored_ids:
+        by_id = run(vs.get_by_ids(stored_ids)) if hasattr(vs, "get_by_ids") else []
+        id_to_node = {n.node_id: n for n in (by_id or [])}
+        fixed = 0
+        for nid in stored_ids:
+            node = id_to_node.get(nid)
+            content = getattr(node, "content", "") if node else ""
+            ji = job_of_text.get(content)
+            if ji is None:
+                continue
+            try:
+                run(vs.update_payload(nid, {"source_raw_memory_id": l1_ids[ji]}))
+                fixed += 1
+            except Exception as e:  # noqa: BLE001
+                lineage_note = f"lineage_partial: {fixed} 已回填，{e}"
+        if fixed < len(stored_ids) and not lineage_note:
+            lineage_note = f"lineage_partial: {fixed}/{len(stored_ids)} 映射命中"
+
+    # ⑤ 逐 job 结果（L1→SHADOW、basic_info、shadow_only 判定）
+    results: list[dict] = []
+    for ji, j in enumerate(jobs):
+        p = j["prepared"]
+        # basic_info 各判各的（best-effort；job 间的画像字段演化互不干扰，
+        # SDK upsert_basic_profile 本身是幂等演化链）
+        bi = p["basic_info"]
+        if isinstance(bi, dict) and bi:
+            try:
+                from hy_memory.agent.tools.basic_profile import upsert_basic_profile
+
+                run(
+                    upsert_basic_profile(
+                        user_id=p["wr"].user_id,
+                        kv=bi,
+                        vector_store=vs,
+                        embed_service=writer.embed_service,
+                        allowed_fields=list(
+                            writer.config.basic_profile.effective_fields().keys()
+                        ),
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        # L1 → SHADOW（成功路径守卫同 commit_extracted）
+        try:
+            l1_nodes[ji].status = MemoryStatus.SHADOW
+            run(vs.upsert(l1_nodes[ji]))
+        except Exception:  # noqa: BLE001
+            pass
+        mine_ids = [nid for nid in stored_ids
+                    if job_of_text.get(getattr(id_to_node.get(nid), "content", "")) == ji]
+        ar = j.get("agent_result")
+        try:
+            extract_tok = {
+                "prompt": getattr(ar, "extract_prompt_tokens", 0) or 0,
+                "completion": getattr(ar, "extract_completion_tokens", 0) or 0,
+                "total": getattr(ar, "extract_tokens_used", 0) or 0,
+            }
+        except Exception:  # noqa: BLE001
+            extract_tok = {"prompt": 0, "completion": 0, "total": 0}
+        results.append({
+            "success": True,
+            "scene": "chat",
+            "memory_id": l1_ids[ji],
+            "memory_ids": mine_ids,
+            "request_id": p["request_id"],
+            "elapsed_ms": 0.0,
+            "error_code": None,
+            "error_message": None,
+            "extract_tokens": extract_tok,
+            "reconcile_ops": ops_counts if ji == 0 else {},
+            "reconcile_tokens": recon_tokens if ji == 0 else {},
+            "two_phase": True,
+            "batch": {"size": len(jobs), "lineage_note": lineage_note},
+        })
+    return results
