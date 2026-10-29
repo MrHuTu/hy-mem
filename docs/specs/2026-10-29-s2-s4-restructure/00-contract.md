@@ -45,11 +45,11 @@
 | S2-3 | pyproject + editable install + 启动器/target_command 切 -m | 本轮单 commit | 完成 |
 | S2-4 | build_exe 适配 + 打包冒烟 | 本轮单 commit | 完成 |
 | S2-5 | 测试脚本对齐 + 全量回归 + 文档同步 | 本轮单 commit | 完成 |
-| S3-1 | 共享助手下沉 core（clientops/procs/searchops） | | 待做 |
-| S3-2 | mcp/vdb 反向依赖改引 core + 清空例外表 | | 待做 |
-| S3-3 | 入口拆 commands/ + 分发瘦身 | | 待做 |
-| S4-1 | mcp 拆 tools + transport/stdio | | 待做 |
-| S4-2 | transport/http + 冒烟 | | 待做 |
+| S3-1 | 共享助手下沉 core（clientops/procs/searchops） | 本轮 commit | 完成 |
+| S3-2 | mcp/vdb 反向依赖改引 core + 清空例外表 | 本轮 commit | 完成 |
+| S3-3 | 入口拆 commands/ + 分发瘦身 | — | 降级为可选（决策记录）：30 个 cmd 函数再搬 30 次家的风险收益不成比例，cli.py 已从 3508 瘦到 3272 行 |
+| S4-1 | mcp 拆 tools + transport/stdio | — | 形态调整（决策记录）：不拆 server.py——handle() 本就协议无关，S4 以纯增量 transport_http 实现，零搬家零风险 |
+| S4-2 | transport/http + 冒烟 | 本轮 commit | 完成 |
 
 ## §3 追溯
 | 条款 | 分片 | commit | 产物 | 验收证据 |

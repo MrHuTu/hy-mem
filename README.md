@@ -91,7 +91,8 @@ hy-mem/
 │   │   ├── setup_wizard.py#   设置向导与设置菜单
 │   │   └── ...            #   helptext / i18n / skill_ops
 │   └── mcp/
-│       └── server.py      # MCP stdio 服务（8 工具）
+│       ├── server.py      # MCP 服务（8 工具，handle 协议无关）
+│       └── transport_http.py  # HTTP transport（--transport http，默认 stdio 不变）
 ├── skill/                 # Skill 定义
 ├── scripts/               # 业务脚本（构建 / 闸门 / 12 套测试 / check_layering）
 ├── .local-test/           # 本地临时脚本（探针 / 实验 / bug 复现），整目录不入库
