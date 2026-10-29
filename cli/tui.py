@@ -846,13 +846,58 @@ def _select_numbered(
         err(f"无效输入：{raw!r}，请输入 1~{len(options)} 或英文键")
 
 
+def _decode_pipe_line(raw: bytes) -> str:
+    """管道字节 → 文本行。探测顺序与 hy_mem_cli._decode_stdin 同源：
+
+    BOM → UTF-8 → GBK → replace。冻结进程（PyInstaller）的 sys.stdin 是
+    系统 locale（中文 Windows=cp936），上游按 UTF-8 管道喂中文时 input()
+    会把字节切错（2026-10-29 探针 F 实测：`add 中文探针-stdin管道` 变
+    `涓鏂囧勘閽?stdin绠￠亾`）。读 buffer 原始字节、自己解码，与 add
+    子命令的 stdin 处理保持同一套规则。
+    """
+    if raw.startswith(b"\xef\xbb\xbf") and raw != b"\xef\xbb\xbf":
+        raw = raw[3:]
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
 def _ask_line(prompt: str, eof_is_exit: bool = False) -> str:
     """退化版行输入（非 TTY / 按键后端不可用）。
 
     eof_is_exit 决定「输入结束」怎么理解：控制台里它等于 Ctrl+D（退出），
     向导里它等于取消（Aborted）—— 两处都不该把 EOF 当成普通空行，否则
     管道喂完最后一行后就会在原地打转、把提示语刷满屏幕。
+
+    冻结进程按字节读 + _decode_pipe_line 解码（见上）；源码模式 input() 的
+    编码推断本来就对，走原路。
     """
+    if getattr(sys, "frozen", False):
+        buf = getattr(sys.stdin, "buffer", None)
+        if buf is not None:
+            # 按字节读到行尾（不预读整管道，交互式逐行语义不变）
+            parts = bytearray()
+            while True:
+                b = buf.read(1)
+                if not b:
+                    if not parts:
+                        print()
+                        if eof_is_exit:
+                            raise EOFError()
+                        raise Aborted()
+                    break
+                parts += b
+                if b == b"\n":
+                    break
+            line = _decode_pipe_line(bytes(parts)).rstrip("\r\n")
+            # 回显仅限真终端：input() 的回显由终端驱动做，管道下本就没有，
+            # 这里补打会污染捕获输出（test_menu 的管道断言会多一行）
+            if sys.stdout.isatty():
+                print(prompt + line)
+            return line
     try:
         return input(prompt)
     except EOFError as exc:

@@ -2720,7 +2720,13 @@ def cmd_tui_test(args) -> int:
 def cmd_setup(args) -> int:
     import setup_wizard
 
-    return setup_wizard.run_setup(scope=getattr(args, "step", "all") or "all")
+    scope = getattr(args, "step", "all") or "all"
+    # setup 子命令在「尚未完成设置」时等价首次向导（2026-10-29：菜单化改造后
+    # 若只看 scope 会直接进设置菜单，把首次安装的四步依赖顺序跳掉）
+    if scope == "all":
+        need, _why = setup_wizard.needs_setup()
+        return setup_wizard.run_setup(scope="all", first_run=need)
+    return setup_wizard.run_setup(scope=scope)
 
 
 def cmd_menu(args) -> int:

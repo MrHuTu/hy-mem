@@ -282,7 +282,7 @@ def _is_auth_error(msg: str) -> bool:
     return " 401" in msg or " 403" in msg or "401:" in msg or "403:" in msg
 
 
-def step_embedding(cfg: dict, _depth: int = 0) -> dict:
+def step_embedding(cfg: dict, _depth: int = 0, _in_first_wizard: bool = False) -> dict:
     emb = dict(cfg.get("embedding") or {})
     cur = presets.embedding_index(emb)
 
@@ -374,8 +374,9 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
                 new["apiKey"] = api_key
             else:
                 # 既没有新端点专用变量、又跨端点：旧 key 不能借（C3）。
-                if emb.get("baseUrl"):
-                    tui.warn(f"端点已从 {emb.get('baseUrl')} 换到 {chosen.base_url}，旧密钥不能复用")
+                _old_b = str(emb.get("baseUrl") or "").rstrip("/")
+                if _old_b and _old_b != chosen.base_url.rstrip("/"):
+                    tui.warn(f"端点已从 {_old_b} 换到 {chosen.base_url}，旧密钥不能复用")
                     tui.note(
                         f"环境变量里没有 ${chosen.key_env}；旧端点那把 key 属于另一家服务，"
                         "继续用只会拿到 401，所以这里必须填新的"
@@ -411,22 +412,24 @@ def step_embedding(cfg: dict, _depth: int = 0) -> dict:
                 + (f"（{emb.get('baseUrl')}）" if emb.get("baseUrl") else "")
                 + "，换端点要同时换 key"
             )
-        choice = tui.select(
-            "向量模型验证失败，怎么办？",
-            [
-                ("重新填写 retry", "回到本步骤最前面重来", "r"),
-                ("仍然保存 save", "离线或端点暂时不可用时选这个，之后用 hy-mem setup 校正", "s"),
-                ("放弃本次设置 abort", "不写入任何改动", "x"),
-            ],
-            default=0,
-        )
+        # 用户口径（2026-10-29）：测试不过只能重新配置或取消——单步/菜单路径
+        # 不给「仍然保存」；首次向导（可能真在离线装）保留 save 作离线出口。
+        opts = [
+            ("重新填写 retry", "回到本步骤最前面重来", "r"),
+            ("放弃本次设置 abort", "不写入任何改动", "x"),
+        ]
+        if _in_first_wizard:
+            opts.insert(1, ("仍然保存 save", "离线或端点暂时不可用时选这个，之后用 hy-mem setup 校正", "s"))
+        choice = tui.select("向量模型验证失败，怎么办？", opts, default=0)
+        if not _in_first_wizard and choice >= 1:
+            choice += 1  # 无 save 时把 1 映射回 abort 位
         if choice == 2:
             raise tui.Aborted()
         if choice == 0:
             if _depth >= 3:
                 tui.warn("重试次数过多，保留原配置")
                 raise tui.Aborted()
-            return step_embedding({**cfg, "embedding": new}, _depth + 1)
+            return step_embedding({**cfg, "embedding": new}, _depth + 1, _in_first_wizard)
     return new
 
 
@@ -446,7 +449,7 @@ def step_mode(cfg: dict) -> str:
 # --------------------------------------------------------------------------
 # 步骤 3/4：LLM（pro / ultra 必需）
 # --------------------------------------------------------------------------
-def step_llm(cfg: dict, _depth: int = 0) -> dict:
+def step_llm(cfg: dict, _depth: int = 0, _in_first_wizard: bool = False) -> dict:
     llm = dict(cfg.get("llm") or {})
     cur = presets.llm_index(llm)
 
@@ -501,8 +504,9 @@ def step_llm(cfg: dict, _depth: int = 0) -> dict:
             if llm.get("keyEnv"):
                 new["keyEnv"] = str(llm["keyEnv"])
         else:
-            if llm.get("baseUrl"):
-                tui.warn(f"端点已从 {llm.get('baseUrl')} 换到 {chosen.base_url}，旧密钥不能复用")
+            _old_l = str(llm.get("baseUrl") or "").rstrip("/")
+            if _old_l and _old_l != chosen.base_url.rstrip("/"):
+                tui.warn(f"端点已从 {_old_l} 换到 {chosen.base_url}，旧密钥不能复用")
                 tui.note(
                     f"环境变量里没有 ${chosen.key_env}；旧端点那把 key 属于另一家服务，"
                     "继续用只会拿到 401，所以这里必须填新的"
@@ -528,16 +532,19 @@ def step_llm(cfg: dict, _depth: int = 0) -> dict:
                 + (f"（{llm.get('baseUrl')}）" if llm.get("baseUrl") else "")
                 + "，换端点要同时换 key"
             )
-        choice = tui.select(
-            "LLM 验证失败，怎么办？",
-            [("重新填写 retry", "回到本步骤重来", "r"), ("仍然保存 save", "之后用 hy-mem setup 改", "s")],
-            default=0,
-        )
+        opts2 = [("重新填写 retry", "回到本步骤重来", "r"), ("放弃本次设置 abort", "不写入任何改动", "x")]
+        if _in_first_wizard:
+            opts2.insert(1, ("仍然保存 save", "之后用 hy-mem setup 改", "s"))
+        choice = tui.select("LLM 验证失败，怎么办？", opts2, default=0)
+        if not _in_first_wizard and choice >= 1:
+            choice += 1
+        if choice == 2:
+            raise tui.Aborted()
         if choice == 0:
             if _depth >= 3:
                 tui.warn("重试次数过多，保留原配置")
                 raise tui.Aborted()
-            return step_llm({**cfg, "mode": "pro"}, _depth + 1)
+            return step_llm({**cfg, "mode": "pro"}, _depth + 1, _in_first_wizard)
     return new
 
 
@@ -899,7 +906,7 @@ def _apply_step(cfg: dict, key: str, value) -> dict:
             # 步骤（同一次 setup 里完成，不打断流程）。
             print()
             tui.warn(f"{value} 模式需要 LLM 抽取事实，现在就配（跳过则模式改动不保存）：")
-            llm = step_llm(cfg)
+            llm = step_llm(cfg, _in_first_wizard=True)
             cfg = {**cfg, "llm": llm}
     elif key == "search":
         cfg = {**cfg, "search": value}
@@ -918,14 +925,14 @@ def _run_first_time_wizard(cfg: dict, old_cfg: dict) -> int:
     """首次安装：四步有依赖（mode 决定要不要 LLM），保留顺序向导。"""
     try:
         _welcome()
-        emb = step_embedding(cfg)
+        emb = step_embedding(cfg, _in_first_wizard=True)
         cfg = {**cfg, "embedding": emb}
 
         mode = step_mode(cfg)
         cfg = {**cfg, "mode": mode}
 
         if mode in ("pro", "ultra"):
-            llm = step_llm(cfg)
+            llm = step_llm(cfg, _in_first_wizard=True)
             cfg = {**cfg, "llm": llm}
         else:
             tui.info("lite 模式不调 LLM，跳过 LLM 设置（以后可在「设置」里补）")

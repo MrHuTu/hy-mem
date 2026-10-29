@@ -371,6 +371,27 @@ def scenario_pro_linkage(base: str) -> None:
     check("H3 mode 已存 pro", cfg.get("mode") == "pro", repr(cfg.get("mode")))
 
 
+def scenario_fail_menu(base: str) -> None:
+    """I. 验证失败菜单按场景分流：单步无 save（只能重配或取消），首次向导有 save（离线出口）。"""
+    print("\nI. 失败菜单 · 测试不过不放行")
+    # I1: 单步（已配置）→ 401 → 只有 retry/abort
+    sb = Path(tempfile.mkdtemp(prefix="hymem-uiI1-"))
+    (sb / "config.json").write_text(json.dumps({
+        "setupComplete": True, "mode": "lite",
+        "embedding": {"preset": "custom", "provider": "openai", "baseUrl": base,
+                      "model": "test-emb-1", "dims": 8, "apiKey": "sk-wrong", "keyEnv": ""},
+    }, ensure_ascii=False), encoding="utf-8")
+    rc, out, cfg = drive("embedding", "\n\n\n\n", sb)
+    check("I1 单步失败菜单出现", "验证失败" in out, out[-300:])
+    check("I2 单步失败无「仍然保存」（测试不过不放行）", "仍然保存" not in out, out[-300:])
+    # I3: 首次向导（无 config）→ 401 → 有 save（离线出口）
+    sb2 = Path(tempfile.mkdtemp(prefix="hymem-uiI2-"))
+    rc2, out2, _ = drive("all", f"\n4\n{base}\ntest-emb-x\nsk-bad\n\n", sb2,
+                         env_extra={"YSJX_API_KEY": "", "MEMORY_LLM_API_KEY": ""})
+    check("I3 首次向导失败菜单出现", "验证失败" in out2, out2[-300:])
+    check("I4 首次向导保留 save（离线可存）", "仍然保存" in out2, out2[-300:])
+
+
 def main() -> int:
     print("假端点启动中…")
     srv1, base1 = start_fake({EMB_KEY1, EMB_ROT}, LLM_KEY1, "S1")
@@ -386,6 +407,7 @@ def main() -> int:
         scenario_key_rotate(base1)
         scenario_settings_menu(base1)
         scenario_pro_linkage(base2)
+        scenario_fail_menu(base1)
     finally:
         srv1.shutdown(); srv1.server_close()
         srv2.shutdown(); srv2.server_close()
