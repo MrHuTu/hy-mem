@@ -211,6 +211,21 @@ add_extracted 落 L2 断掉挂根链接，不合规。
   发现 worker 旧写法「锁内整段 client.add」把 3 车道退化成串行 × 全程 ~45s/条
   ——test_concurrency 异步段 187s 的真因。验收：test_queue 21/21 +
   test_concurrency 异步段耗时对比（改造前 187s 基线）
+- R4.7 ✓（22:23 追加，Phase 1.5 预计算出锁）`prepare_commit` 新段：L1 原文
+  embed + facts 收集 + 本批 dedup（含各 fact 向量）+ WriteRequest 构造——
+  全部纯函数不读不写库状态（dedup 本批内判重，writer.py:452 实读确认），
+  从锁内挪到抢锁前。锁内只剩 reconcile 判定 LLM + upsert + SHADOW。
+  CLI/MCP/worker 三调用点同步接入；prepared 可跨瞬态重试复用。
+  验收：真库实测锁内 commit 2~11s → **1.5s**；prepare 0.5s 锁外；
+  repro_two_phase 7/7（T7 新增：prepare 锁外可执行 + commit 复用零 embed +
+  语义回归）；test_queue 21/21、test_mcp 31/31、test_cli 97/97；
+  风暴复测 4 轮×2 进程 ok=7 e_lock=1 零 BAD
+- R4.8 ✓（22:40 顺带修复，R4.7 风暴暴露的存量 NameError）pyflakes 全扫
+  发现两处平移期漏 import，均概率性路径（并发才触发，串行测试全绿掩盖）：
+  ① clientops.py:75 make_client 重试循环 time.sleep（R2 时代引入）
+  ② searchops.py _spawn_detached_worker 的 subprocess（S3-1 平移引入）。
+  修复后风暴 4 轮×2 零 BAD。教训入记忆：平移/重构后必须跑 pyflakes 级
+  静态扫，串行单测对概率路径零覆盖
 
 ### 执行记录（2026-10-29 20:51–21:40）
 
