@@ -28,3 +28,5 @@ config.json
 # 用 /data/ 锚定仓库根：不要误伤别处同名的 data 目录
 /data/
 cli/data/
+src/data/
+*.egg-info/
