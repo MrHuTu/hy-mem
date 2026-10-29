@@ -140,10 +140,10 @@ def main() -> int:
     else:
         print(f"PASS：{len(procs)} 进程并发，全部正常，总耗时 {time.time()-t0:.1f}s")
 
-    # --- R2/R3 回归：并发 sync add 风暴——失败形态只许 E_LOCK 干净失败 ---
+    # --- R2/R3/R4 回归：并发 sync add 风暴——失败形态只许干净失败 ---
     # readonly 裸崩 / 其他非零退出都算回归（§0.B2）。4 轮 × 2 进程。
     print("\n并发 sync add 风暴（4 轮 × 2 进程，失败形态分类）")
-    storm_ok = storm_lock = storm_busy = 0
+    storm_ok = storm_lock = storm_busy = storm_extract = 0
     for r in range(4):
         sps = [subprocess.Popen(
             [*cli_base(), "--json", "add", f"并发sync风暴-r{r}-p{i}：失败形态分类取证", "--json"],
@@ -159,23 +159,24 @@ def main() -> int:
                 code = (json.loads((out or "").strip().splitlines()[-1]).get("error") or {}).get("code", "")
             except Exception:  # noqa: BLE001
                 code = ""
-            if code in ("E_LOCK", "E_DB_BUSY"):
+            if code in ("E_LOCK", "E_DB_BUSY", "E_EXTRACT"):
                 # 允许的干净失败形态：E_LOCK=锁快失败（R3）；E_DB_BUSY=瞬态
-                # 重试耗尽后的结构化失败（R2.3，hint 明确指向重跑而非密钥）。
-                # R2.4 口径（变更 2026-10-29）：验收的是「零裸崩/零未分类」，
-                # WAL 窗口长于重试预算时 E_DB_BUSY 是诚实暴露而非硬失败。
+                # 重试耗尽后的结构化失败（R2.3）；E_EXTRACT=LLM 网关空响应
+                # 重试耗尽（R4.9，锁外抽取段、零写入可重试）。
                 if code == "E_LOCK":
                     storm_lock += 1
+                elif code == "E_EXTRACT":
+                    storm_extract += 1
                 else:
                     storm_busy += 1
             else:
                 fails.append((f"storm-r{r}-p{i}", p.returncode, code, (err or "")[-150:]))
-    print(f"  storm: ok={storm_ok} e_lock={storm_lock} e_db_busy={storm_busy} bad={len([f for f in fails if f[0].startswith('storm')])}")
+    print(f"  storm: ok={storm_ok} e_lock={storm_lock} e_db_busy={storm_busy} e_extract={storm_extract} bad={len([f for f in fails if f[0].startswith('storm')])}")
     if [f for f in fails if f[0].startswith("storm")]:
         rc = 1
         print("FAIL：风暴出现裸崩/未分类失败（见上方明细）")
     elif rc == 0:
-        print(f"PASS：风暴 8 进程无裸崩（ok={storm_ok}，E_LOCK={storm_lock}，E_DB_BUSY={storm_busy}）")
+        print(f"PASS：风暴 8 进程无裸崩（ok={storm_ok}，E_LOCK={storm_lock}，E_DB_BUSY={storm_busy}，E_EXTRACT={storm_extract}）")
 
     # --- 清理沙箱（Windows 上 WAL 句柄可能延迟释放，失败不阻塞判定）---
     try:

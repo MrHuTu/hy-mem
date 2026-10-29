@@ -115,23 +115,33 @@ def extract_phase(client: object, text: str, **kw):
         client, writer._collect_existing_tags(vs, user_id, agent_id)
     )
 
-    result = _run(
-        client,
-        writer.mem_agent.process_add(
-            content=text,
-            context={"uid": user_id, "agent_id": agent_id},
-            mode=ProcessMode.EXTRACT_ONLY,
-            memory_at=kw.get("memory_at"),
-            existing_tags=existing_tags,
-            basic_profile_fields=writer.config.basic_profile.effective_fields(),
-        ),
-    )
-    if result is None or not getattr(result, "success", False):
-        raise ExtractFailed(
-            getattr(result, "error_code", None),
-            getattr(result, "error", None) or "LLM 抽取失败",
+    # EMPTY_RESPONSE 瞬态重试（R4.9）：并发负载下网关偶发空响应（风暴实测
+    # 1/8 概率）。与 R2 哲学一致——瞬时故障换次重跑，不是干净失败。
+    # 仅对 EMPTY_RESPONSE 重试；其余错误码（配额/鉴权/内容审查）直接抛。
+    attempts = 3
+    last_err: tuple = (None, "LLM 抽取失败")
+    for i in range(attempts):
+        result = _run(
+            client,
+            writer.mem_agent.process_add(
+                content=text,
+                context={"uid": user_id, "agent_id": agent_id},
+                mode=ProcessMode.EXTRACT_ONLY,
+                memory_at=kw.get("memory_at"),
+                existing_tags=existing_tags,
+                basic_profile_fields=writer.config.basic_profile.effective_fields(),
+            ),
         )
-    return result
+        if result is not None and getattr(result, "success", False):
+            return result
+        code = getattr(result, "error_code", None) if result is not None else None
+        last_err = (code, (getattr(result, "error", None) if result is not None else None) or "LLM 抽取失败")
+        if code != "EMPTY_RESPONSE":
+            break  # 非瞬态错误码：重试无益
+        import time as _t
+
+        _t.sleep(0.5 * (i + 1))
+    raise ExtractFailed(last_err[0], last_err[1])
 
 
 # ---------------------------------------------------------------------------
