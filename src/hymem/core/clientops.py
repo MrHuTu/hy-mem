@@ -132,3 +132,34 @@ def sweep_derived_nodes(client: object, root_id: str) -> tuple[list[str], str]:
         except Exception:  # noqa: BLE001
             pass
     return purged, ""
+
+
+def is_transient_db_error(e: BaseException) -> bool:
+    """SQLite WAL 重建窗口的瞬态占用（R2）：与 make_client 的 init 重试同口径。"""
+    if isinstance(e, PermissionError):
+        return True
+    s = str(e).lower()
+    return "database" in s and ("readonly" in s or "locked" in s or "busy" in s)
+
+
+def add_sync_with_retry(client: object, text: str, *, attempts: int = 4, **kw):
+    """同步 add 包一层瞬态重试（readonly/locked 换次重跑，非瞬态直接抛）。
+
+    已知代价：若失败点在部分写入之后，重试可能产生重复条目——reconcile 的
+    判重/合并会在后续写入时吸收重复；对比硬失败（整条丢失且报错误导），
+    取舍为重试。队列消费侧（_execute_job）自带退避重试，不走这里。
+    重试耗尽仍瞬态占用 → 抛出，由 errors.classify_error 归为 E_DB_BUSY
+    （干净失败：明确 hint「稍等重跑」，绝不指向密钥）。
+    """
+    import time as _time
+
+    last: Exception | None = None
+    for i in range(max(1, attempts)):
+        try:
+            return client.add(text, **kw)
+        except Exception as e:  # noqa: BLE001
+            if not is_transient_db_error(e) or i == attempts - 1:
+                raise
+            last = e
+            _time.sleep(0.3 * (i + 1))
+    raise last  # type: ignore[misc]

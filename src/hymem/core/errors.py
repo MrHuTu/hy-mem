@@ -82,6 +82,15 @@ def classify_error(e: BaseException) -> tuple[int, str, str]:
         )
     if name in _INTERNAL_TYPES:
         return EXIT_INTERNAL, "E_INTERNAL", _tr("这多半是程序缺陷：加 --verbose 复跑可拿到堆栈")
+    # R2（2026-10-29）：sqlite 瞬态占用单列。WAL「最后一连接关闭→删 -wal/-shm→
+    # 下连接重建」窗口里，已打开连接写入会报 readonly/locked（Windows 实测约 5%）。
+    # 此前落进 _RUNTIME_TYPES 的通用 hint 指向「嵌入密钥无效」——纯误导。
+    _msg = str(e).lower()
+    if "database" in _msg and ("readonly" in _msg or "locked" in _msg or "busy" in _msg):
+        return EXIT_RUNTIME, "E_DB_BUSY", _tr(
+            "记忆库正被并发写入瞬态占用（SQLite WAL 重建窗口）：稍等重跑本命令即可；"
+            "反复出现跑 `hy-mem doctor` 自检。这与密钥无关"
+        )
     if name == "EndpointUnavailable":
         # 向量库服务活着却连不上：明确失败，绝不静默回落嵌入式读旧索引
         return (

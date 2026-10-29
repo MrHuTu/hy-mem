@@ -62,9 +62,13 @@ def main() -> int:
     procs: dict[str, subprocess.Popen] = {}
 
     # --- 4 个并发异步写（模拟 4 个子代理同时「记一下」）---
+    # 文本必须是事实型表述：extractor 会把合成测试句合理判为「无可提取事实」，
+    # 只落 L1 shadow 层 → 检索 0 命中（SDK 正常设计，见 test_mcp 同款注释）。
     for i in range(4):
         procs[f"add-{i}"] = subprocess.Popen(
-            [*cli_base(), "add", "--async", f"并发压测-{i}：多子代理同时写入落库验证", "--json"],
+            [*cli_base(), "add", "--async",
+             f"用户偏好：hy-mem 并发压测第 {i} 条——多子代理同时写入时用 --async 入队，"
+             f"队列由 SQLite 持久化，worker 3 车道消费（验收标记 conc-{i}）", "--json"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
             env=ENV,
         )
@@ -75,7 +79,7 @@ def main() -> int:
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
          "params": {"name": "list_memories", "arguments": {"limit": 5}}},
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-         "params": {"name": "search_memory", "arguments": {"query": "并发压测 落库验证", "limit": 3}}},
+         "params": {"name": "search_memory", "arguments": {"query": "hy-mem 并发压测 多子代理同时写入", "limit": 3}}},
     ]
     mcp_stdin = "\n".join(json.dumps(m, ensure_ascii=False) for m in mcp_msgs) + "\n"
     for i in range(2):
@@ -122,7 +126,7 @@ def main() -> int:
         dead = qd.get("dead") or qd.get("deadLetter") or 0
     except json.JSONDecodeError:
         dead = "?"
-    sr = subprocess.run([*cli_base(), "search", "并发压测 多子代理同时写入", "--json"],
+    sr = subprocess.run([*cli_base(), "search", "hy-mem 并发压测 多子代理同时写入", "--json"],
                         capture_output=True, text=True, encoding="utf-8", timeout=120, env=ENV)
     hits = len(json.loads(sr.stdout).get("results", [])) if sr.returncode == 0 else -1
 
@@ -135,6 +139,43 @@ def main() -> int:
         rc = 1
     else:
         print(f"PASS：{len(procs)} 进程并发，全部正常，总耗时 {time.time()-t0:.1f}s")
+
+    # --- R2/R3 回归：并发 sync add 风暴——失败形态只许 E_LOCK 干净失败 ---
+    # readonly 裸崩 / 其他非零退出都算回归（§0.B2）。4 轮 × 2 进程。
+    print("\n并发 sync add 风暴（4 轮 × 2 进程，失败形态分类）")
+    storm_ok = storm_lock = storm_busy = 0
+    for r in range(4):
+        sps = [subprocess.Popen(
+            [*cli_base(), "--json", "add", f"并发sync风暴-r{r}-p{i}：失败形态分类取证", "--json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=ENV,
+        ) for i in range(2)]
+        for i, p in enumerate(sps):
+            out, err = p.communicate(timeout=240)
+            if p.returncode == 0:
+                storm_ok += 1
+                continue
+            code = ""
+            try:
+                code = (json.loads((out or "").strip().splitlines()[-1]).get("error") or {}).get("code", "")
+            except Exception:  # noqa: BLE001
+                code = ""
+            if code in ("E_LOCK", "E_DB_BUSY"):
+                # 允许的干净失败形态：E_LOCK=锁快失败（R3）；E_DB_BUSY=瞬态
+                # 重试耗尽后的结构化失败（R2.3，hint 明确指向重跑而非密钥）。
+                # R2.4 口径（变更 2026-10-29）：验收的是「零裸崩/零未分类」，
+                # WAL 窗口长于重试预算时 E_DB_BUSY 是诚实暴露而非硬失败。
+                if code == "E_LOCK":
+                    storm_lock += 1
+                else:
+                    storm_busy += 1
+            else:
+                fails.append((f"storm-r{r}-p{i}", p.returncode, code, (err or "")[-150:]))
+    print(f"  storm: ok={storm_ok} e_lock={storm_lock} e_db_busy={storm_busy} bad={len([f for f in fails if f[0].startswith('storm')])}")
+    if [f for f in fails if f[0].startswith("storm")]:
+        rc = 1
+        print("FAIL：风暴出现裸崩/未分类失败（见上方明细）")
+    elif rc == 0:
+        print(f"PASS：风暴 8 进程无裸崩（ok={storm_ok}，E_LOCK={storm_lock}，E_DB_BUSY={storm_busy}）")
 
     # --- 清理沙箱（Windows 上 WAL 句柄可能延迟释放，失败不阻塞判定）---
     try:
