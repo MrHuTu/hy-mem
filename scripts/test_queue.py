@@ -150,6 +150,33 @@ def main() -> int:
     check("stats 口径：delayed≤pending，无死信残留", st["delayed"] <= st["pending"] and st["dead"] == 0,
           f"stats={st}")
 
+    # ---- 8. MCP queue_status 的 shadow_only hint（2026-10-29 实测事故回归）----
+    # 现场：job 87 状态 done、error 标 shadow_only（只落 l1_raw 影子、检索不到），
+    # hint 却说「已全部落库，可以 search_memory 验证内容」。done ≠ 可检索，
+    # shadow 提示必须压过一切「可检索」话术。
+    import mcp_server
+
+    conn.execute(
+        "INSERT INTO jobs (id, status, attempts, max_attempts, payload, memory_ids, error, created_at) "
+        "VALUES (9001, 'done', 1, 3, ?, '[]', ?, 0)",
+        (json.dumps({"text": "影子任务"}), "shadow_only: 抽取未产出可检索节点"),
+    )
+    conn.commit()
+    qs = json.loads(mcp_server._tool_queue_status({"job_ids": [9001]}))
+    check("shadow_only job 的 hint 说「检索不到」并给 retry --shadow",
+          ("检索不到" in qs["hint"]) and ("retry --shadow" in qs["hint"]), qs["hint"][:120])
+    check("shadow 提示压过「可以 search 验证」话术",
+          "可以 search_memory 验证" not in qs["hint"], qs["hint"][:120])
+    # 对照：正常 done（无 error）仍走「可以验证」话术
+    conn.execute(
+        "INSERT INTO jobs (id, status, attempts, max_attempts, payload, memory_ids, error, created_at) "
+        "VALUES (9002, 'done', 1, 3, ?, '[]', NULL, 0)",
+        (json.dumps({"text": "正常任务"}),),
+    )
+    conn.commit()
+    qs2 = json.loads(mcp_server._tool_queue_status({"job_ids": [9002]}))
+    check("正常 done 仍提示可 search 验证", "可以 search_memory 验证" in qs2["hint"], qs2["hint"][:120])
+
     conn.close()
     n_pass = sum(results)
     print(f"\n{'全部通过' if n_pass == len(results) else '存在失败'}（{n_pass}/{len(results)}）")

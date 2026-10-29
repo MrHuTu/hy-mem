@@ -220,7 +220,12 @@ def _tool_add_memory(args: dict) -> str:
             # 进度怎么查：调度方拿到 job_ids 就能用 queue_status 跟踪，
             # 不必用「search 空结果」反推落库与否
             "progress_tool": "queue_status",
-            "note": "已入队，后台 worker 约 6~9 秒落库；查进度用 queue_status(job_ids=[...])",
+            # 耗时承诺按实测口径（2026-10-29：pro + 推理型 LLM 单条 took_s=124.1），
+            # 「约 6~9 秒」是 lite/快模型的旧数字，按它去等必扑空
+            "note": (
+                "已入队，后台落库：lite 秒级，pro 模式单条实测可达 2 分钟左右。"
+                "要确认落库（而不是猜）就用 queue_status(job_ids=[...], wait_seconds=60)"
+            ),
         },
         ensure_ascii=False,
     )
@@ -294,12 +299,24 @@ def _tool_queue_status(args: dict) -> str:
 
     drained = stats["pending"] == 0 and stats["running"] == 0
     dead = [j["job_id"] for j in out_jobs if j["status"] == "dead"]
+    # shadow_only = done 但只落了 l1_raw 影子、检索不到（2026-10-29 实测：job 87
+    # 标 shadow_only，hint 却说「可以 search 验证」——智能体顺着走必撞墙）。
+    # 它的优先级压过一切「已落库」话术：done ≠ 可检索。
+    shadow_ids = [
+        j["job_id"] for j in out_jobs
+        if j["status"] == "done" and (j.get("error") or "").startswith("shadow_only")
+    ]
     if dead:
         hint = f"有死信任务 {dead}：看 error 字段；重投用 hy-mem retry <job_id>（或 retry dead 全部）"
+    elif shadow_ids:
+        hint = (
+            f"job {shadow_ids} 已落库但检索不到（只落 l1_raw 影子，done ≠ 可检索）："
+            "内容确有可抽取的事实时，用 `hy-mem retry --shadow` 重做抽取"
+        )
     elif not drained and not live:
-        hint = "队列有积压但没有 worker 在跑：先跑 hy-mem worker --once（pro 模式每条约 10~50s）"
+        hint = "队列有积压但没有 worker 在跑：先跑 hy-mem worker --once（pro 模式单条实测可达 2 分钟左右）"
     elif not drained:
-        hint = "仍在落库：pro 模式每条约 10~50s；可再调 queue_status(wait_seconds=30) 等它"
+        hint = "仍在落库：pro 模式单条实测可达 2 分钟左右；可再调 queue_status(wait_seconds=60) 等它"
     elif out_jobs and all(j["status"] == "done" for j in out_jobs):
         hint = "已全部落库，可以 search_memory 验证内容"
     else:
@@ -366,6 +383,26 @@ def _tool_search_memory(args: dict) -> str:
     if has_more:
         resp["has_more"] = True
         resp["next_offset"] = offset + limit
+    # 2026-10-29 实测缝隙：add 异步返回后立刻 search，返回旧结果/空结果且无任何
+    # 队列提示——智能体会把「还在落库」误读成「没有相关记忆」或拿旧内容冒充。
+    # 这里把队列未完成数带上：有积压时明说「此刻检索不到是正常的」。
+    try:
+        from hy_mem_cli import store as _store
+
+        _conn = _store.connect()
+        try:
+            _stats = _store.queue_stats(_conn)
+        finally:
+            _conn.close()
+        _busy = int(_stats.get("pending") or 0) + int(_stats.get("running") or 0)
+        if _busy > 0:
+            resp["pending_writes"] = _busy
+            resp["pending_note"] = (
+                f"另有 {_busy} 条写入还在队列落库中，此刻检索不到它们是正常的；"
+                "确认进度用 queue_status"
+            )
+    except Exception:  # noqa: BLE001
+        pass  # 队列库读不到不拦检索结果本身
     return json.dumps(resp, ensure_ascii=False)
 
 
@@ -481,17 +518,44 @@ def _tool_get_version(_args: dict) -> str:
             data_dir = str((cfg.get("storage") or {}).get("dataDir") or root / "data")
         except Exception:  # noqa: BLE001
             configured = False
-    return json.dumps(
-        {
-            "version": helptext.VERSION,
-            "mode": "exe" if getattr(sys, "frozen", False) else "source",
-            "installRoot": str(root),
-            "configPath": str(cfg_path),
-            "configured": configured,
-            "dataDir": data_dir or str(root / "data"),
-        },
-        ensure_ascii=False,
-    )
+    # 库健康摘要（2026-10-29）：shadow_only / dead 是「写了却检索不到/没写成」的
+    # 静默坑，不主动调 queue_status 就永远看不见。给智能体一个零成本入口：
+    # 每次 get_version 顺带带出，非零时直接给出处理命令。
+    queue_health: dict = {}
+    try:
+        from hy_mem_cli import store as _store
+
+        _conn = _store.connect()
+        try:
+            _stats = _store.queue_stats(_conn)
+        finally:
+            _conn.close()
+        _shadow = int(_stats.get("shadow_only") or 0)
+        _dead = int(_stats.get("dead") or 0)
+        _busy = int(_stats.get("pending") or 0) + int(_stats.get("running") or 0)
+        if _shadow or _dead or _busy:
+            queue_health = {"shadow_only": _shadow, "dead": _dead, "in_flight": _busy}
+            notes = []
+            if _shadow:
+                notes.append(f"shadow_only={_shadow}（已落库但检索不到，`hy-mem retry --shadow` 重做）")
+            if _dead:
+                notes.append(f"dead={_dead}（死信，`hy-mem retry dead` 重投）")
+            if _busy:
+                notes.append(f"in_flight={_busy}（队列还有未完成任务）")
+            queue_health["note"] = "；".join(notes)
+    except Exception:  # noqa: BLE001
+        pass  # 队列库读不到不影响版本信息本身
+    payload = {
+        "version": helptext.VERSION,
+        "mode": "exe" if getattr(sys, "frozen", False) else "source",
+        "installRoot": str(root),
+        "configPath": str(cfg_path),
+        "configured": configured,
+        "dataDir": data_dir or str(root / "data"),
+    }
+    if queue_health:
+        payload["queue_health"] = queue_health
+    return json.dumps(payload, ensure_ascii=False)
 
 
 TOOLS = [
@@ -499,7 +563,8 @@ TOOLS = [
         "name": "add_memory",
         "description": (
             "写入一条长期记忆。用户说「记一下」、表达偏好/决策/项目事实时调用。"
-            "默认异步：立即返回，后台落库（约 6~9 秒后可检索）。"
+            "默认异步：立即返回，后台落库（lite 秒级；pro 模式单条可长达 2 分钟，"
+            "确认落库用 queue_status，别按固定秒数等）。"
         ),
         "inputSchema": {
             "type": "object",

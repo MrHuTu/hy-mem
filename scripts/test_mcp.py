@@ -150,6 +150,16 @@ def main() -> int:
           res.get("worker_spawned") is True or res.get("worker_live") is True,
           f"worker_spawned={res.get('worker_spawned')} worker_live={res.get('worker_live')}")
     check("add 响应带 pending 计数", isinstance(res.get("pending"), int), f"pending={res.get('pending')}")
+    # 2026-10-29 口径修正：note 不许再承诺「约 6~9 秒」（实测 pro 可达 124s），
+    # 且必须给出 queue_status 确认动线
+    note = str(res.get("note") or "")
+    check("add note 按实测口径（不承诺固定秒数）",
+          "queue_status" in note and "6~9" not in note, note[:100])
+    # 缝隙#1 回归：add 刚返回、还没落库时，search 必须带 pending 提示
+    early = tool("search_memory", {"query": marker, "limit": 3})
+    check("落库前 search 带 pending_writes 提示",
+          int(early.get("pending_writes") or 0) >= 1 and "queue_status" in str(early.get("pending_note") or ""),
+          json.dumps({k: early.get(k) for k in ("pending_writes", "pending_note")}, ensure_ascii=False)[:140])
 
     # ---- 3b. queue_status：异步落库进度可查（0.9.9 新增的进度面）----
     prog = tool("queue_status", {"job_ids": res.get("job_ids") or []})
@@ -232,6 +242,15 @@ def main() -> int:
     check("get_version 返回版本与安装根",
           bool(res.get("version")) and bool(res.get("installRoot") or res.get("install_root")),
           f"v={res.get('version')}")
+    # 库健康摘要：有积压/影子/死信时必须带 queue_health（此刻队列刚清空+影子，
+    # 沙箱里 shadow_only 可能≥1；字段在且类型对即可）
+    qh = res.get("queue_health")
+    check("get_version 健康摘要字段合法（有异常时必现）",
+          qh is None or (isinstance(qh.get("shadow_only"), int)
+                         and isinstance(qh.get("dead"), int)
+                         and isinstance(qh.get("in_flight"), int)
+                         and bool(qh.get("note"))),
+          json.dumps(qh, ensure_ascii=False)[:120])
 
     # ---- 11. 协议纪律：全程无 JSON-RPC error（除守门用例外）----
     check("worker.err 无致命栈（supervisor 退出痕迹允许）", True)

@@ -588,6 +588,9 @@ def main() -> int:
     print("\n首次安装：配置不存在、密钥由环境变量回填")
     LLM_ENV = "MEMORY_LLM_API_KEY"
     LLM_KEY = "sk-test-llm-env-only-0123456789"
+    # 本机用户可能真设过 $YSJX_API_KEY（2026-10-29 实测踩到），而本段的前提是
+    # 「预设声明的变量名在本机为空、只有约定变量有值」。跑前临时摘掉，跑完还原。
+    _saved_ysjx = os.environ.pop("YSJX_API_KEY", None)
     _saved_llm_env = os.environ.get(LLM_ENV)
     os.environ[LLM_ENV] = LLM_KEY
     setup_wizard.probe_llm = _REAL_PROBE_LLM  # 真探针，只桩网络
@@ -662,6 +665,8 @@ def main() -> int:
         os.environ.pop(LLM_ENV, None)
     else:
         os.environ[LLM_ENV] = _saved_llm_env
+    if _saved_ysjx is not None:
+        os.environ["YSJX_API_KEY"] = _saved_ysjx
 
     netprobe.post_json = _real_post
     if _saved_env is None:
