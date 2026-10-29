@@ -53,10 +53,10 @@ def main() -> int:
     sandbox, ENV = _make_sandbox()
 
     def cli_base():
-        return [exe] if exe else [PY, str(REPO / "cli" / "hy_mem_cli.py")]
+        return [exe] if exe else [PY, "-m", "hymem"]
 
     def mcp_base():
-        return [exe, "mcp"] if exe else [PY, str(REPO / "cli" / "hy_mem_cli.py"), "mcp"]
+        return [exe, "mcp"] if exe else [PY, "-m", "hymem", "mcp"]
 
     t0 = time.time()
     procs: dict[str, subprocess.Popen] = {}

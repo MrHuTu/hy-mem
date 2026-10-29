@@ -36,7 +36,7 @@ def main() -> int:
     os.environ["MEMORY_DATA_DIR"] = str(sandbox)
     os.environ.pop("HY_MEM_CONFIG", None)
 
-    from cli.core import store
+    from hymem.core import store
 
     conn = store.connect()
 
@@ -154,7 +154,7 @@ def main() -> int:
     # 现场：job 87 状态 done、error 标 shadow_only（只落 l1_raw 影子、检索不到），
     # hint 却说「已全部落库，可以 search_memory 验证内容」。done ≠ 可检索，
     # shadow 提示必须压过一切「可检索」话术。
-    from cli.mcp import server as mcp_server
+    from hymem.mcp import server as mcp_server
 
     conn.execute(
         "INSERT INTO jobs (id, status, attempts, max_attempts, payload, memory_ids, error, created_at) "

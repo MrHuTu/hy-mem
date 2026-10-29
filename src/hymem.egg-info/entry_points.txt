@@ -1,0 +1,2 @@
+[console_scripts]
+hy-mem = hymem.cli:main

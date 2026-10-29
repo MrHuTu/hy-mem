@@ -27,9 +27,9 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "cli"))
+sys.path.insert(0, str(ROOT / "src"))
 
-import hy_mem_cli  # noqa: E402
+from hymem import cli as hy_mem_cli  # noqa: E402
 
 CJK = "刘德华是个歌星，香港歌手。"
 
@@ -94,9 +94,9 @@ class ReadTextInAccidentEnvTest(unittest.TestCase):
     def test_frozen_like_stdin(self):
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "gbk:surrogateescape"
-        env["PYTHONPATH"] = str(ROOT / "cli") + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
         code = (
-            "import sys, hy_mem_cli;"
+            "import sys;from hymem import cli as hy_mem_cli;"
             "t = hy_mem_cli._read_text(None);"
             "sys.stdout.buffer.write(t.encode('utf-8'))"
         )

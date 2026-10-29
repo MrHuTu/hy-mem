@@ -5,10 +5,10 @@
   L1  core 不得 import ui / mcp / hy_mem_cli
   L2  ui 与 mcp 互不 import；两者可依赖 core
   L3  除 hy_mem_cli.py 外，任何模块不得 import 入口 hy_mem_cli
-      —— 例外存量：mcp/server.py 的 12 处 from cli.hy_mem_cli import（S3 消除）
+      —— 例外存量：mcp/server.py 的 12 处 from hymem.cli import（S3 消除）
   L4  __init__.py 必须为空（防 import 副作用串包）
   L5  禁止裸模块名 import（import store / from config import ...）：
-      分层后必须用包全名（from cli.core import store），裸名在包模式下
+      分层后必须用包全名（from hymem.core import store），裸名在包模式下
       只有 cli/ 目录在 path 时才能碰巧工作，掩盖结构破坏
 
 用法：.venv/Scripts/python.exe scripts/check_layering.py
@@ -21,18 +21,18 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CLI = REPO / "cli"
+CLI = REPO / "src" / "hymem"
 
 # S3 待消除的例外（契约记录在案）：mcp/server.py 反向依赖入口的符号
 KNOWN_EXCEPTIONS = {
-    ("mcp/server.py", "cli.hy_mem_cli"),
-    ("core/vdb_endpoint.py", "cli.hy_mem_cli"),  # _spawn_detached_serve（S3 消除）
+    ("mcp/server.py", "hymem.cli"),
+    ("core/vdb_endpoint.py", "hymem.cli"),  # _spawn_detached_serve（S3 消除）
 }
 
 LAYERS = {
-    "core": {"cli.core", "cli.core.*"},
-    "ui": {"cli.ui", "cli.ui.*"},
-    "mcp": {"cli.mcp", "cli.mcp.*"},
+    "core": {"hymem.core", "hymem.core.*"},
+    "ui": {"hymem.ui", "hymem.ui.*"},
+    "mcp": {"hymem.mcp", "hymem.mcp.*"},
 }
 
 # 内部模块裸名（分层前的模块名）
@@ -80,17 +80,17 @@ def check() -> int:
                 continue
             # L1：core 不许碰 ui/mcp/入口
             if layer == "core":
-                if mod.startswith("cli.ui") or mod.startswith("cli.mcp") or mod == "cli.hy_mem_cli" or mod.startswith("cli.hy_mem_cli"):
-                    if (where, "cli.hy_mem_cli") not in KNOWN_EXCEPTIONS:
+                if mod.startswith("hymem.ui") or mod.startswith("hymem.mcp") or mod == "hymem.cli" or mod.startswith("hymem.cli"):
+                    if (where, "hymem.cli") not in KNOWN_EXCEPTIONS:
                         violations.append(f"L1 {where} 反向依赖上层：{mod}")
             # L2：ui 与 mcp 互不 import
-            if layer == "ui" and mod.startswith("cli.mcp"):
+            if layer == "ui" and mod.startswith("hymem.mcp"):
                 violations.append(f"L2 {where} import mcp：{mod}")
-            if layer == "mcp" and mod.startswith("cli.ui"):
+            if layer == "mcp" and mod.startswith("hymem.ui"):
                 violations.append(f"L2 {where} import ui：{mod}")
             # L3：不得 import 入口（例外：mcp/server.py 存量 + 入口自身）
-            if mod == "cli.hy_mem_cli" or mod.startswith("cli.hy_mem_cli"):
-                if where != "hy_mem_cli.py" and (where, "cli.hy_mem_cli") not in KNOWN_EXCEPTIONS:
+            if mod == "hymem.cli" or mod.startswith("hymem.cli"):
+                if where != "hy_mem_cli.py" and (where, "hymem.cli") not in KNOWN_EXCEPTIONS:
                     violations.append(f"L3 {where} import 入口：{mod}")
 
     if violations:

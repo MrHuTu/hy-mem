@@ -53,7 +53,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PY = sys.executable
-CLI = REPO / "cli" / "hy_mem_cli.py"
+CLI = REPO / "src" / "hymem" / "cli.py"
 
 results: list[tuple[str, bool, str]] = []
 
@@ -138,6 +138,7 @@ def drive(step, keys, sandbox, env_extra=None, timeout=120):
         "HY_MEM_CONFIG": str(sandbox / "config.json"),
         "MEMORY_DATA_DIR": str(sandbox / "data"),
         "PYTHONIOENCODING": "utf-8",
+        "PYTHONPATH": str(REPO / "src"),
         # 宿主机真 key 不许泄进测试判定
         "MEMORY_EMBEDDER_API_KEY": "",
         "MEMORY_LLM_API_KEY": "",

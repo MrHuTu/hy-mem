@@ -54,11 +54,10 @@ def is_frozen() -> bool:
 
 
 def app_root() -> Path:
-    """安装根：冻结后是 exe 所在目录，源码模式是 cli/ 的上一级。"""
-    if is_frozen():
-        return Path(sys.executable).resolve().parent
-    # S1 分层（2026-10-29）：本文件在 cli/<层>/ 下，安装根要多上一层
-    return Path(__file__).resolve().parent.parent.parent
+    """委托 paths 唯一实现（S2-2）。"""
+    from hymem.core.paths import app_root as _ar
+
+    return _ar()
 
 
 def internal_dir() -> Path:

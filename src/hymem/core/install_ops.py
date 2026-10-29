@@ -17,22 +17,25 @@ from pathlib import Path
 
 
 def app_root() -> Path:
-    """安装根：打包后是 exe 所在目录，源码模式是 cli/ 的上一级。"""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    # S1 分层（2026-10-29）：本文件在 cli/<层>/ 下，安装根要多上一层
-    return Path(__file__).resolve().parent.parent.parent
+    """委托 paths 唯一实现（S2-2）。"""
+    from hymem.core.paths import app_root as _ar
+
+    return _ar()
 
 
 def target_command() -> list[str]:
-    """真正要执行的命令（argv 前缀）。"""
+    """真正要执行的命令（argv 前缀）。
+
+    S2 起：源码模式统一走 python -m hymem（editable 安装后任意 cwd 可跑，
+    worker/serve 拉起的子进程不再依赖 cli.py 的路径推导）。
+    """
     if getattr(sys, "frozen", False):
         return [str(Path(sys.executable).resolve())]
     root = app_root()
     py = root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if py.exists():
-        return [str(py), str(root / "cli" / "hy_mem_cli.py")]
-    return [sys.executable, str(root / "cli" / "hy_mem_cli.py")]
+    if not py.exists():
+        py = Path(sys.executable)
+    return [str(py), "-m", "hymem"]
 
 
 def bin_dir() -> Path:
@@ -292,7 +295,7 @@ def _parse_launcher_target(text: str) -> Path | None:
     """从启动器文本解析出它指向的安装根；解析不出返回 None。"""
     tokens = re.findall(r'"([^"]+)"', text)
     for t in tokens:
-        if t.replace("\\", "/").endswith("cli/hy_mem_cli.py"):
+        if t.replace("\\", "/").endswith(("cli/hy_mem_cli.py", "hymem/cli.py")):
             try:
                 return Path(t).resolve().parent.parent
             except OSError:

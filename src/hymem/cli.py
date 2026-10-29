@@ -14,17 +14,18 @@ from __future__ import annotations
 
 # ---------------------------------------------------------------------------
 # S1 分层（2026-10-29）：本文件可被三种方式加载——
-#   1) python cli/hy_mem_cli.py      （直接执行，sys.path[0]=cli/）
-#   2) python -m cli.hy_mem_cli      （包模式，sys.path[0]=仓库根）
+#   1) python src/hymem/cli.py      （直接执行，sys.path[0]=src/hymem/）
+#   2) python -m hymem.cli      （包模式，sys.path[0]=仓库根）
 #   3) PyInstaller 冻结（_pyi_entry） —— 模块已收集，path 无关
-# 包导入（cli.core / cli.ui / cli.mcp）需要仓库根在 path 上，这里统一兜底。
+# 包导入（hymem.core / hymem.ui / hymem.mcp）需要仓库根在 path 上，这里统一兜底。
 # ---------------------------------------------------------------------------
 import sys as _sys
 from pathlib import Path as _Path  # bootstrap 自用，提前于业务 import
 if __package__ in (None, "") and not getattr(_sys, "frozen", False):
-    _REPO_ROOT = str(_Path(__file__).resolve().parent.parent)
-    if _REPO_ROOT not in _sys.path:
-        _sys.path.insert(0, _REPO_ROOT)
+    # S2 src 布局：包根是 src/（hymem 所在目录），不是仓库根
+    _PKG_ROOT = str(_Path(__file__).resolve().parents[1])
+    if _PKG_ROOT not in _sys.path:
+        _sys.path.insert(0, _PKG_ROOT)
 
 import argparse
 import asyncio
@@ -37,10 +38,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from cli.core import netprobe
-from cli.core import store
-from cli.core import vdb_endpoint
-from cli.mcp.server import _in_range, _item_ts, _parse_time as _parse_when
+from hymem.core import netprobe
+from hymem.core import store
+from hymem.core import vdb_endpoint
+from hymem.mcp.server import _in_range, _item_ts, _parse_time as _parse_when
 
 
 class _Palette:
@@ -77,8 +78,8 @@ class _Palette:
 c = _Palette()
 
 # 退出码在 errors.py 定义（CLI/MCP 共用一份口径），这里导入保持原名字可用
-from cli.core.errors import EXIT_INTERNAL, EXIT_OK, EXIT_RUNTIME, EXIT_USAGE  # noqa: E402
-from cli.core.errors import classify_error, error_detail  # noqa: E402,F401  分类口径单一来源
+from hymem.core.errors import EXIT_INTERNAL, EXIT_OK, EXIT_RUNTIME, EXIT_USAGE  # noqa: E402
+from hymem.core.errors import classify_error, error_detail  # noqa: E402,F401  分类口径单一来源
 
 
 def _resolve_home() -> Path:
@@ -138,7 +139,7 @@ def load_env(path: Path = DEFAULT_ENV) -> None:
     # 优先级必须高于 .env（否则改了向导却不生效，是最难排查的一类故障）。
     # 不存在时跳过，保证纯 .env 部署方式仍然可用。
     try:
-        from cli.core import config as cfgmod
+        from hymem.core import config as cfgmod
 
         if cfgmod.exists():
             cfgmod.apply_env(cfgmod.load())
@@ -151,7 +152,7 @@ def load_env(path: Path = DEFAULT_ENV) -> None:
     # 安装根/data，之前写的记忆就「消失」了。这里统一成安装根/data。
     if not os.getenv("MEMORY_DATA_DIR"):
         try:
-            from cli.core import config as cfgmod2
+            from hymem.core import config as cfgmod2
 
             os.environ["MEMORY_DATA_DIR"] = str(cfgmod2.default_data_dir())
         except Exception:  # noqa: BLE001
@@ -299,7 +300,7 @@ def readiness(cfg: dict | None = None) -> dict:
     静默返回空列表 —— 两种都让人误判成「程序坏了」「没有记忆」。这里把
     缺项翻成人话，并给出**可以直接复制执行的修复命令**。
     """
-    from cli.core import config as cfgmod
+    from hymem.core import config as cfgmod
 
     cfg = cfg if cfg is not None else cfgmod.load()
     emb = cfg.get("embedding") or {}
@@ -371,7 +372,7 @@ def _report_missing(state: dict, action: str) -> int:
     """把缺项清单打成人能照着做的样子（--json 走结构化错误）。"""
     global _LAST_FAIL
 
-    from cli.core import config as cfgmod
+    from hymem.core import config as cfgmod
 
     missing = state["missing"]
     lead = f"配置还没配好，暂不执行：{action}" if action else "配置还没配好"
@@ -380,8 +381,8 @@ def _report_missing(state: dict, action: str) -> int:
     if _JSON:
         return fail(msg, EXIT_USAGE, hint, extra={"kind": "config", "missing": missing})
     try:
-        from cli.ui import tui
-        from cli.ui.tui import c
+        from hymem.ui import tui
+        from hymem.ui.tui import c
 
         print()
         print(f"  {tui.icon('err')} {c.bold(lead)}")
@@ -435,7 +436,7 @@ def embedding_provider() -> str:
     if p:
         return p
     try:
-        from cli.core import config as cfgmod
+        from hymem.core import config as cfgmod
 
         return str((cfgmod.load().get("embedding") or {}).get("provider") or "openai").strip().lower()
     except Exception:  # noqa: BLE001
@@ -447,7 +448,7 @@ def build_embedding_service():
     provider = embedding_provider()
     if provider != "local":
         return None
-    from cli.core.local_embedder import LocalEmbeddingService
+    from hymem.core.local_embedder import LocalEmbeddingService
 
     svc = LocalEmbeddingService()
     # 先把维度对齐到环境变量，SDK 初始化时会校验二者一致
@@ -581,7 +582,7 @@ def cmd_doctor(args) -> int:
     # 1.5 运行环境：系统版本 / 位数 / 包完整性 / 安装目录可写 / 运行库 / 磁盘
     #     把「双击闪退」的成因搬进自检，不必等人报障再猜。
     try:
-        from cli.core import runtime_check
+        from hymem.core import runtime_check
 
         for rc_item in runtime_check.checks(full=True):
             detail = rc_item["detail"]
@@ -594,7 +595,7 @@ def cmd_doctor(args) -> int:
     # 2. 数据目录
     dd = Path(args.data_dir) if args.data_dir else data_dir()
     try:
-        from cli.core import config as _cfgdir
+        from hymem.core import config as _cfgdir
 
         _src = _cfgdir.data_dir_source()  # env / config / default（PRD F6 的可观测性）
     except Exception:  # noqa: BLE001
@@ -610,7 +611,7 @@ def cmd_doctor(args) -> int:
 
     # 2.5 身份与启动器：agent 不传 -u 时用的是哪个 user_id，命令在不在 PATH 上
     try:
-        from cli.core import config as _cfg
+        from hymem.core import config as _cfg
 
         _uid = _cfg.identity_defaults()
         _src_map = {
@@ -629,7 +630,7 @@ def cmd_doctor(args) -> int:
     except Exception as e:  # noqa: BLE001
         check("identity", False, f"解析失败：{type(e).__name__}: {e}", fatal=False)
     try:
-        from cli.core import install_ops
+        from hymem.core import install_ops
 
         # 先看 PATH 上到底能不能解析到 hy-mem —— 用户可能把启动器装在别的目录
         # （~/.local/bin 之类），只盯默认落点会误报 FAIL。
@@ -660,7 +661,7 @@ def cmd_doctor(args) -> int:
         # 模型没缓存时不要「顺手下载」：doctor 是诊断命令，不该让用户毫无预期
         # 地等 40s、占 92MB。只如实报告，并说清首次使用会发生什么。
         try:
-            from cli.core.local_embedder import _default_cache_dir
+            from hymem.core.local_embedder import _default_cache_dir
 
             _cache = Path(_default_cache_dir())
             _cached = any(_cache.glob("**/*.onnx"))
@@ -679,7 +680,7 @@ def cmd_doctor(args) -> int:
         try:
             import fastembed  # noqa: F401
 
-            from cli.core.local_embedder import LocalEmbeddingService
+            from hymem.core.local_embedder import LocalEmbeddingService
 
             svc = LocalEmbeddingService()
             t0 = time.time()
@@ -805,8 +806,8 @@ def cmd_doctor(args) -> int:
         f"  [{'PASS' if c['pass'] else 'FAIL'}] {c['name']}: {c['detail']}"
         for c in report["checks"]
     )
-    from cli.ui import i18n
-    from cli.core import errors as _ec
+    from hymem.ui import i18n
+    from hymem.core import errors as _ec
     _ec.register_tr(i18n.tr)  # S1 分层：错误文案翻译经钩子注入
 
     human = (i18n.tr("环境可用") if report["ok"] else i18n.tr("环境不可用")) + "\n" + human
@@ -1063,7 +1064,7 @@ def _spawn_detached_worker(idle_exit: float = 90.0,
     有意的——见 _worker_cap 的语义说明。WriteLock 与 SQLite 抢占兜底，
     即使拉重了也无害（闸门 cap=1 + 心跳判活）。
     """
-    from cli.core import install_ops
+    from hymem.core import install_ops
 
     # 上限闸门（WriteLock 内占位，串行化风暴竞态）：detached supervisor 恒 1 个。
     # 占位行 15s 过期，Popen 失败也不会永久卡死后续拉起。
@@ -1123,7 +1124,7 @@ def _spawn_detached_serve(idle_exit: float = 1800.0) -> bool:
     失败只 stderr 留痕、返回 False：调用方（ensure_endpoint）会继续轮询，
     也许已有别的进程把它拉起来了。
     """
-    from cli.core import install_ops
+    from hymem.core import install_ops
 
     argv = install_ops.target_command() + ["serve", "--idle-exit", str(idle_exit)]
     try:
@@ -1377,8 +1378,8 @@ def _embedding_unhealthy() -> str:
     if os.getenv("HY_MEM_NO_PROBE", "").strip().lower() in ("1", "true", "yes"):
         return ""
     try:
-        from cli.core import config as cfgmod
-        from cli.ui import setup_wizard
+        from hymem.core import config as cfgmod
+        from hymem.ui import setup_wizard
 
         emb = (cfgmod.load().get("embedding") or {})
         good, msg, _dims = setup_wizard.probe_embedding(emb, timeout=20)
@@ -2460,10 +2461,10 @@ def cmd_log(args) -> int:
     不做 --follow：日志是用来事后回看「刚才那条命令到底跑了什么」的，
     不是监控流；多一个长驻模式只会多一处要维护的退出路径。
     """
-    from cli.ui import i18n
-    from cli.core import errors as _ec
+    from hymem.ui import i18n
+    from hymem.core import errors as _ec
     _ec.register_tr(i18n.tr)  # S1 分层：错误文案翻译经钩子注入
-    from cli.core import oplog
+    from hymem.core import oplog
 
     try:
         p = oplog.path()
@@ -2498,7 +2499,7 @@ def cmd_log(args) -> int:
 
 def cmd_help(args) -> int:
     """命令说明。--json 是给智能体的入口：一次读完所有参数与语义。"""
-    from cli.ui import helptext
+    from hymem.ui import helptext
 
     spec = helptext.build_spec(build_parser())
     if args.json:
@@ -2517,7 +2518,7 @@ def cmd_help(args) -> int:
 
 
 def cmd_install(args) -> int:
-    from cli.core import install_ops
+    from hymem.core import install_ops
 
     if getattr(args, "print_only", False):
         body = install_ops.render_launcher()
@@ -2582,12 +2583,12 @@ def cmd_install(args) -> int:
 
 def cmd_version(args) -> int:
     """版本与安装信息。自动升级就靠它：比对版本 + 定位要替换的安装根。"""
-    from cli.core import config as cfgmod
-    from cli.ui import helptext
-    from cli.ui import i18n
-    from cli.core import errors as _ec
+    from hymem.core import config as cfgmod
+    from hymem.ui import helptext
+    from hymem.ui import i18n
+    from hymem.core import errors as _ec
     _ec.register_tr(i18n.tr)  # S1 分层：错误文案翻译经钩子注入
-    from cli.core import install_ops
+    from hymem.core import install_ops
 
     frozen = bool(getattr(sys, "frozen", False))
     root = install_ops._current_root()
@@ -2626,8 +2627,8 @@ def cmd_migrate(args) -> int:
     """
     import shutil
 
-    from cli.core import config as cfgmod
-    from cli.core import install_ops
+    from hymem.core import config as cfgmod
+    from hymem.core import install_ops
 
     cur = install_ops._current_root()
     target = cur / "data"
@@ -2691,7 +2692,7 @@ def cmd_skill(args) -> int:
     智能体「能用上」这个 CLI 需要两件事同时成立 —— 命令在 PATH 上、宿主能读到
     SKILL.md。install 解决前者，这里解决后者；两者都过一遍再宣称「接好了」。
     """
-    from cli.ui import skill_ops
+    from hymem.ui import skill_ops
 
     if getattr(args, "print_only", False):
         src = skill_ops.skill_path()
@@ -2731,14 +2732,14 @@ def cmd_skill(args) -> int:
 
 
 def cmd_tui_test(args) -> int:
-    from cli.ui import tui
+    from hymem.ui import tui
 
     tui.enable_ansi()
     return tui.keytest()
 
 
 def cmd_setup(args) -> int:
-    from cli.ui import setup_wizard
+    from hymem.ui import setup_wizard
 
     scope = getattr(args, "step", "all") or "all"
     # setup 子命令在「尚未完成设置」时等价首次向导（2026-10-29：菜单化改造后
@@ -2750,7 +2751,7 @@ def cmd_setup(args) -> int:
 
 
 def cmd_menu(args) -> int:
-    from cli.ui import menu
+    from hymem.ui import menu
 
     # 子进程派发（0.9.10）：交互进程只画界面，不承载任何后台角色。
     # 0.9.9 用 `lambda argv: main(argv)` 在本进程内跑 worker，worker 起的
@@ -2760,7 +2761,7 @@ def cmd_menu(args) -> int:
 
 
 def cmd_config(args) -> int:
-    from cli.core import config as cfgmod
+    from hymem.core import config as cfgmod
 
     cfg = cfgmod.load()
     action = args.action
@@ -2872,8 +2873,8 @@ def cmd_config(args) -> int:
     }
     if args.json:
         return ok(payload, True)
-    from cli.ui import i18n
-    from cli.core import errors as _ec
+    from hymem.ui import i18n
+    from hymem.core import errors as _ec
     _ec.register_tr(i18n.tr)  # S1 分层：错误文案翻译经钩子注入
 
     t = i18n.tr
@@ -2906,7 +2907,7 @@ def cmd_user(args) -> int:
     是同一份记忆；设了 = 只属于这个名字，与其它名字互不可见。
     切换**只改这一个字段**，不碰模型配置、不碰数据目录、不动已有记忆。
     """
-    from cli.core import config as cfgmod
+    from hymem.core import config as cfgmod
 
     cfg = cfgmod.load()
     action = getattr(args, "action", "show") or "show"
@@ -3039,7 +3040,7 @@ class _Parser(argparse.ArgumentParser):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    from cli.ui import helptext
+    from hymem.ui import helptext
 
     p = _Parser(
         prog="hy-mem",
@@ -3243,7 +3244,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _print_short_help() -> None:
-    from cli.ui import helptext
+    from hymem.ui import helptext
 
     print(helptext.render_text(helptext.build_spec(build_parser())))
     print()
@@ -3295,7 +3296,7 @@ def cmd_mcp(args) -> int:
     不经过 ok()/print() 那套人类输出。
     """
     load_env()
-    from cli.mcp import server as mcp_server
+    from hymem.mcp import server as mcp_server
 
     return mcp_server.serve()
 
@@ -3344,7 +3345,7 @@ def _record_operation(args, argv: list[str], seconds: float, rc: int, exc) -> No
     else:
         error = None
     try:
-        from cli.core import oplog
+        from hymem.core import oplog
 
         oplog.record(
             _sub_argv(argv, cmd),
@@ -3367,8 +3368,8 @@ def main(argv=None) -> int:
     # apply_env，否则 MEMORY_DATA_DIR 还停在新目录，队列会跟主库分家。
     # 说明走 stderr：stdout 属于协议/结果，不能混入。
     try:
-        from cli.core import config as _cfg_ad
-        from cli.core import install_ops as _iol_ad
+        from hymem.core import config as _cfg_ad
+        from hymem.core import install_ops as _iol_ad
 
         _ad_info, _ad_notes = _iol_ad.adopt_previous_install()
         if _ad_info:
@@ -3400,7 +3401,7 @@ def main(argv=None) -> int:
     # SDK 侧过滤成空列表后抛 "user_ids is required and cannot be empty"。
     if not getattr(args, "user", None):
         try:
-            from cli.core import config as _cfgmod
+            from hymem.core import config as _cfgmod
 
             args.user = _cfgmod.identity_defaults()
         except Exception:  # noqa: BLE001
@@ -3441,10 +3442,10 @@ def main(argv=None) -> int:
             _print_short_help()
             return EXIT_OK
         try:
-            from cli.ui import tui
+            from hymem.ui import tui
 
             tui.enable_ansi()
-            from cli.ui import setup_wizard
+            from hymem.ui import setup_wizard
 
             need, why = setup_wizard.needs_setup()
             if need:
@@ -3461,14 +3462,14 @@ def main(argv=None) -> int:
                         # 多按一次键纯属多余（2026-10-28 交互精简）
                         tui.warn("设置未全部通过；进控制台后可用 setup 补齐")
                 else:
-                    from cli.core import config as cfgmod
+                    from hymem.core import config as cfgmod
 
                     cfg = cfgmod.load()
                     cfg["setupComplete"] = True
                     cfg["setupSkipped"] = True
                     cfgmod.save(cfg)
                     tui.warn("已跳过：配置可能不完整，随时可用「设置」补齐")
-            from cli.ui import menu
+            from hymem.ui import menu
 
             return menu.run_menu(menu.subprocess_dispatch)
         except (KeyboardInterrupt, tui.Aborted):

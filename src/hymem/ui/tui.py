@@ -60,7 +60,7 @@ import sys
 import time
 import unicodedata
 
-from cli.core import config as cfgmod
+from hymem.core import config as cfgmod
 
 # ANSI 控制序列
 _MOUSE_ON = "\x1b[?1000h\x1b[?1006h"

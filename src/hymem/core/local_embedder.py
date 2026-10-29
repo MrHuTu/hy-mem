@@ -22,7 +22,8 @@ from typing import Any, Dict, List, Tuple
 
 DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_DIMS = 512
-_ROOT = Path(__file__).resolve().parent.parent.parent  # S1 分层：多上一层
+from hymem.core.paths import app_root as _app_root_fn
+_ROOT = _app_root_fn()  # S2-2：paths 唯一实现
 
 
 def _default_cache_dir() -> Path:

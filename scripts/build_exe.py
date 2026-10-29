@@ -60,23 +60,23 @@ ARGS = [
     # 产物目录必须显式传给 PyInstaller：默认它写 cwd/dist，HY_MEM_DIST 就形同
     # 虚设 —— 曾出现「指定了别的目录、它却回头去删 dist/hy-mem」的情况。
     "--distpath", str(DIST),
-    "--paths", ".",  # S1 分层：包导入（cli.core/cli.ui/cli.mcp）以仓库根为根
+    "--paths", "src",  # S2 src 布局：hymem 包根在 src/
     # 本地模块（部分是函数内延迟 import，显式声明更稳）
-    "--hidden-import", "cli.core.store",
-    "--hidden-import", "cli.core.config",
-    "--hidden-import", "cli.ui.tui",
-    "--hidden-import", "cli.core.presets",
-    "--hidden-import", "cli.ui.setup_wizard",
-    "--hidden-import", "cli.ui.menu",
-    "--hidden-import", "cli.core.storage_ops",
-    "--hidden-import", "cli.core.install_ops",
-    "--hidden-import", "cli.ui.skill_ops",
-    "--hidden-import", "cli.mcp.server",
-    "--hidden-import", "cli.ui.helptext",
-    "--hidden-import", "cli.core.local_embedder",
-    "--hidden-import", "cli.core.runtime_check",
-    "--hidden-import", "cli.core.netprobe",
-    "--hidden-import", "cli.core.vdb_endpoint",
+    "--hidden-import", "hymem.core.store",
+    "--hidden-import", "hymem.core.config",
+    "--hidden-import", "hymem.ui.tui",
+    "--hidden-import", "hymem.core.presets",
+    "--hidden-import", "hymem.ui.setup_wizard",
+    "--hidden-import", "hymem.ui.menu",
+    "--hidden-import", "hymem.core.storage_ops",
+    "--hidden-import", "hymem.core.install_ops",
+    "--hidden-import", "hymem.ui.skill_ops",
+    "--hidden-import", "hymem.mcp.server",
+    "--hidden-import", "hymem.ui.helptext",
+    "--hidden-import", "hymem.core.local_embedder",
+    "--hidden-import", "hymem.core.runtime_check",
+    "--hidden-import", "hymem.core.netprobe",
+    "--hidden-import", "hymem.core.vdb_endpoint",
     # SDK 及其动态子模块
     "--collect-submodules", "hy_memory",
     "--collect-submodules", "chromadb",
@@ -93,7 +93,7 @@ ARGS = [
     "--exclude-module", "matplotlib",
     "--exclude-module", "IPython",
     "--exclude-module", "pytest",
-    "cli/_pyi_entry.py",
+    "src/hymem/_pyi_entry.py",
 ]
 
 
@@ -179,7 +179,7 @@ def _version() -> str:
     try:
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))  # S1 分层：包导入根在仓库根
-        from cli.core import version as helptext
+        from hymem.core import version as helptext
 
         return str(getattr(helptext, "VERSION", "0.0.0"))
     except Exception:  # noqa: BLE001

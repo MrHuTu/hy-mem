@@ -104,8 +104,8 @@ def main() -> int:
         "MEMORY_DATA_DIR": str(sandbox / "data"),
         "NO_COLOR": "1",
     }
-    base = [exe, "mcp"] if exe else [PY, str(REPO / "cli" / "hy_mem_cli.py"), "mcp"]
-    cli_base = [exe] if exe else [PY, str(REPO / "cli" / "hy_mem_cli.py")]
+    base = [exe, "mcp"] if exe else [PY, "-m", "hymem", "mcp"]
+    cli_base = [exe] if exe else [PY, "-m", "hymem"]
     t0 = time.time()
     print("被测 MCP 命令：", " ".join(base))
 

@@ -33,8 +33,8 @@ os.environ["HY_MEM_TUI"] = "0"          # 强制走行输入（非按键交互�
 os.environ.pop("HY_MEM_LANG", None)
 os.environ.pop("HY_MEM_USER_ID", None)
 
-from cli.ui import tui  # noqa: E402
-from cli.ui import menu  # noqa: E402
+from hymem.ui import tui  # noqa: E402
+from hymem.ui import menu  # noqa: E402
 
 results: list[bool] = []
 
@@ -314,14 +314,14 @@ def case_commands() -> None:
 
 
 def tui_tr_en() -> bool:
-    from cli.ui.i18n import lang
+    from hymem.ui.i18n import lang
 
     return lang() == "en"
 
 
 def case_settings() -> None:
     print("\n设置类命令（setup 只验路由，不跑网络）")
-    from cli.ui import setup_wizard
+    from hymem.ui import setup_wizard
 
     seen: list[str] = []
     real = setup_wizard.run_setup

@@ -29,7 +29,7 @@ _cached: str = DEFAULT
 def _config_lang() -> str:
     global _stamp, _cached
     try:
-        from cli.core import config as cfgmod
+        from hymem.core import config as cfgmod
 
         p = cfgmod.config_path()
         try:
@@ -62,7 +62,7 @@ def set_lang(v: str) -> str:
     v = (v or "").strip().lower()
     if v not in LANGS:
         raise ValueError(f"lang 只能是 {'/'.join(LANGS)}，得到 {v!r}")
-    from cli.core import config as cfgmod
+    from hymem.core import config as cfgmod
 
     cfg = cfgmod.load()
     cfg["lang"] = v

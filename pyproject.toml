@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hymem"
+description = "Local long-term memory CLI for AI agents, built on Tencent Hy-Memory SDK"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dynamic = ["version"]
+# 运行依赖刻意不在此声明（仓库有 requirements.txt 全量清单，含本地 wheel 的
+# hy-memory SDK；这里只做结构化声明，避免 pip 解析不到内部依赖而失败）
+
+[project.scripts]
+hy-mem = "hymem.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "hymem.core.version.VERSION" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hymem = ["py.typed"]

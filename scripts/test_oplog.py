@@ -24,7 +24,7 @@ os.environ["MEMORY_DATA_DIR"] = str(_SANDBOX / "data")
 os.environ["HY_MEM_CONFIG"] = str(_SANDBOX / "config.json")
 os.environ.pop("HY_MEM_LANG", None)
 
-from cli.core import oplog  # noqa: E402
+from hymem.core import oplog  # noqa: E402
 
 results: list[bool] = []
 

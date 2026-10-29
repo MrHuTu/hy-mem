@@ -26,12 +26,12 @@ from __future__ import annotations
 import os
 import time
 
-from cli.core import config as cfgmod
-from cli.core import netprobe
-from cli.core import presets
-from cli.core import storage_ops
-from cli.ui import tui
-from cli.ui.tui import c
+from hymem.core import config as cfgmod
+from hymem.core import netprobe
+from hymem.core import presets
+from hymem.core import storage_ops
+from hymem.ui import tui
+from hymem.ui.tui import c
 
 PROBE_TEXT = "招商活动报名审批流用自研 FSM 落库"
 
@@ -55,7 +55,7 @@ def probe_embedding(emb: dict, timeout: int = 45) -> tuple[bool, str, int]:
         model = str(emb.get("model") or "")
         t0 = time.time()
         try:
-            from cli.core.local_embedder import LocalEmbeddingService
+            from hymem.core.local_embedder import LocalEmbeddingService
 
             svc = LocalEmbeddingService(model_name=model or None)
             vec = svc._embed_sync(PROBE_TEXT)  # 直调同步实现，避免 asyncio 包装

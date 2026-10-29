@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CLI = ROOT / "cli" / "hy_mem_cli.py"
+CLI = ROOT / "src" / "hymem" / "cli.py"  # 直跑形态（bootstrap 兜底）
 
 results: list[bool] = []
 

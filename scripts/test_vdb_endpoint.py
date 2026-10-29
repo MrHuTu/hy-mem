@@ -34,7 +34,7 @@ os.environ["MEMORY_DATA_DIR"] = str(TMP / "data")
 os.environ["HY_MEM_TUI"] = "0"
 (TMP / "data").mkdir(parents=True, exist_ok=True)
 
-from cli.core import vdb_endpoint  # noqa: E402
+from hymem.core import vdb_endpoint  # noqa: E402
 
 results: list[bool] = []
 

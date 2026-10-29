@@ -33,7 +33,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from cli.core import config as cfgmod
+from hymem.core import config as cfgmod
 
 
 # --------------------------------------------------------------------------

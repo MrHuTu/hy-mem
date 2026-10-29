@@ -40,10 +40,9 @@ def _root() -> Path:
         return Path(env).resolve()
     import sys
 
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    # S1 分层（2026-10-29）：本文件在 cli/<层>/ 下，安装根要多上一层
-    return Path(__file__).resolve().parent.parent.parent
+    from hymem.core.paths import app_root as _ar
+
+    return _ar()
 
 
 def config_path() -> Path:
