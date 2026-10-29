@@ -392,7 +392,7 @@ def clear_injected_env() -> None:
 
 def _spawn_serve() -> bool:
     """拉起 detached serve（数据所有者）。懒导入防循环依赖。"""
-    from hymem.cli import _spawn_detached_serve  # S3 存量例外（契约记录）
+    from hymem.core.procs import _spawn_detached_serve
     return _spawn_detached_serve()
 
 

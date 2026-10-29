@@ -24,10 +24,7 @@ REPO = Path(__file__).resolve().parent.parent
 CLI = REPO / "src" / "hymem"
 
 # S3 待消除的例外（契约记录在案）：mcp/server.py 反向依赖入口的符号
-KNOWN_EXCEPTIONS = {
-    ("mcp/server.py", "hymem.cli"),
-    ("core/vdb_endpoint.py", "hymem.cli"),  # _spawn_detached_serve（S3 消除）
-}
+KNOWN_EXCEPTIONS = set()  # S3-2（2026-10-29）：13 处反向依赖已全部消除，例外表清空
 
 LAYERS = {
     "core": {"hymem.core", "hymem.core.*"},
@@ -98,7 +95,7 @@ def check() -> int:
         for v in violations:
             print("  " + v)
         return 1
-    print("分层守卫通过：L1–L5 无违例（mcp→入口 12 处为契约记录的 S3 存量例外）")
+    print("分层守卫通过：L1–L5 无违例")
     return 0
 
 

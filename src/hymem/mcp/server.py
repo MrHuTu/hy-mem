@@ -122,14 +122,15 @@ def _identity() -> dict:
 
 
 def _client():
-    from hymem.cli import make_client
+    from hymem.core.clientops import make_client
 
     return make_client(None)
 
 
 def _tool_add_memory(args: dict) -> str:
     """写入记忆。默认走异步队列（毫秒返回，worker 自动拉起落库）。"""
-    from hymem.cli import _spawn_detached_worker, _parse_memory_at
+    from hymem.core.procs import _spawn_detached_worker
+    from hymem.core.searchops import _parse_memory_at
 
     text = str(args.get("text") or "").strip()
     if not text:
@@ -147,8 +148,8 @@ def _tool_add_memory(args: dict) -> str:
         raise ParamError(str(e))
     client = _client()
     if not use_async:
-        from hymem.cli import _ids_of, _new_ids_only, _bind_tags
-        from hymem.cli import store
+        from hymem.core.searchops import _ids_of, _new_ids_only, _bind_tags
+        from hymem.core import store
 
         before = set()
         if tags:
@@ -173,7 +174,7 @@ def _tool_add_memory(args: dict) -> str:
             {"mode": "sync", "memory_ids": ids, "tags": tags}, ensure_ascii=False
         )
     # 异步：入队 + 无人消费时自动拉起临时 worker（与 CLI add --async 同一套）
-    from hymem.cli import store
+    from hymem.core import store
 
     queued_extra = {}
     if metadata:
@@ -242,7 +243,7 @@ def _tool_queue_status(args: dict) -> str:
     「还在队列里」。这里给可轮询的事实：每条 job 的状态/耗时/错误、worker
     是否活着、队列是否已清空。wait_seconds 支持短阻塞，省得宿主自己 sleep。
     """
-    from hymem.cli import store
+    from hymem.core import store
 
     raw_ids = args.get("job_ids") or []
     if not isinstance(raw_ids, list):
@@ -344,7 +345,7 @@ def _tool_search_memory(args: dict) -> str:
     offset = max(0, int(args.get("offset") or 0))
     since = _parse_time(args.get("since"))
     until = _parse_time(args.get("until"))
-    from hymem.cli import _flatten_search
+    from hymem.core.searchops import _flatten_search
 
     client = _client()
     # search 的身份参数是复数形参（user_ids），与 CLI identity_lists 同口径；
@@ -361,7 +362,7 @@ def _tool_search_memory(args: dict) -> str:
         # 空手时补一次真实探测，端点挂了把真实原因当错误报出去，
         # 别让宿主把「密钥失效」误读成「没有相关记忆」。探测通过（why 空）
         # 则是窗口内真没命中，照常返回空 hits。
-        from hymem.cli import _embedding_unhealthy
+        from hymem.core.searchops import _embedding_unhealthy
 
         why = _embedding_unhealthy()
         if why:
@@ -387,7 +388,7 @@ def _tool_search_memory(args: dict) -> str:
     # 队列提示——智能体会把「还在落库」误读成「没有相关记忆」或拿旧内容冒充。
     # 这里把队列未完成数带上：有积压时明说「此刻检索不到是正常的」。
     try:
-        from hymem.cli import store as _store
+        from hymem.core import store as _store
 
         _conn = _store.connect()
         try:
@@ -465,7 +466,7 @@ def _tool_delete_memory(args: dict) -> str:
         raise ParamError("memory_id 不能为空：请传入 list 或 search 返回的 memory_id")
     if args.get("confirm") is not True:
         raise ParamError("删除是破坏性操作：必须显式传 confirm=true")
-    from hymem.cli import store
+    from hymem.core import store
 
     client = _client()
     with store.WriteLock():
@@ -483,7 +484,7 @@ def _tool_update_memory(args: dict) -> str:
         raise ParamError("content 不能为空：请提供修改后的记忆正文")
     if args.get("confirm") is not True:
         raise ParamError("更新会改变检索结果：必须显式传 confirm=true")
-    from hymem.cli import store
+    from hymem.core import store
 
     client = _client()
     if client.get(mid) is None:
@@ -523,7 +524,7 @@ def _tool_get_version(_args: dict) -> str:
     # 每次 get_version 顺带带出，非零时直接给出处理命令。
     queue_health: dict = {}
     try:
-        from hymem.cli import store as _store
+        from hymem.core import store as _store
 
         _conn = _store.connect()
         try:

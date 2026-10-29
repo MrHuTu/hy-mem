@@ -159,11 +159,6 @@ def load_env(path: Path = DEFAULT_ENV) -> None:
             pass
 
 
-def data_dir() -> Path:
-    p = Path(os.getenv("MEMORY_DATA_DIR") or (Path.home() / ".hy_memory"))
-    return p
-
-
 # --------------------------------------------------------------------------
 # 输出
 # --------------------------------------------------------------------------
@@ -425,70 +420,6 @@ def require_ready(action: str = "", cfg: dict | None = None) -> int | None:
 # --------------------------------------------------------------------------
 # 客户端
 # --------------------------------------------------------------------------
-def embedding_provider() -> str:
-    """当前生效的嵌入来源：环境变量 > config.json > openai。
-
-    不能简单把缺省当 local：全新安装时 env 里什么都没有，落成 local 就会在
-    第一次 doctor 时去下载 92MB 的 ONNX 模型（国内还要等 40s+），而用户
-    真正选的可能就是云端向量模型。config 的默认值本来就是 openai，保持一致。
-    """
-    p = (os.getenv("MEMORY_EMBEDDER_PROVIDER") or "").strip().lower()
-    if p:
-        return p
-    try:
-        from hymem.core import config as cfgmod
-
-        return str((cfgmod.load().get("embedding") or {}).get("provider") or "openai").strip().lower()
-    except Exception:  # noqa: BLE001
-        return "openai"
-
-
-def build_embedding_service():
-    """按嵌入来源决定是否注入进程内实例；local 时返回该实例。"""
-    provider = embedding_provider()
-    if provider != "local":
-        return None
-    from hymem.core.local_embedder import LocalEmbeddingService
-
-    svc = LocalEmbeddingService()
-    # 先把维度对齐到环境变量，SDK 初始化时会校验二者一致
-    os.environ["MEMORY_EMBEDDING_DIMS"] = str(svc.get_embedding_dims())
-    return svc
-
-
-def make_client(mode: str | None):
-    from hy_memory import HyMemoryClient  # 延迟导入，doctor 失败时也能跑
-
-    # 端点注入（2026-10-28 事故收敛）：有 worker 承载的 chroma server 就走
-    # HttpClient（SDK 按 MEMORY_VECTOR_HOST/PORT 自动切换），没有则拉起
-    # worker 等就绪。客户端进程从此不再自开嵌入式实例——chroma embedded
-    # 不支持多进程共享，长驻进程会读到过期/空的向量索引。
-    vdb_endpoint.ensure_endpoint()
-    svc = build_embedding_service()
-    kwargs = {}
-    if mode:
-        kwargs["mode"] = mode
-    if svc is not None:
-        kwargs["embedding_service"] = svc
-    # SDK 在 __init__ 里初始化 hy_memory.log（TimedRotatingFileHandler）和
-    # chroma 向量库连接。多进程同秒并发初始化时 Windows 上会互踩：
-    #   - 日志打开/轮转 → PermissionError (Errno 13)
-    #   - chroma WAL -shm 重建窗口 → code 8 readonly database
-    # 实测并发风暴命中率约 1/4——指数退避重试，让先到者完成初始化。
-    last: Exception | None = None
-    for i in range(5):
-        try:
-            return HyMemoryClient(**kwargs)
-        except Exception as e:  # noqa: BLE001
-            s = str(e).lower()
-            if not (isinstance(e, PermissionError)
-                    or "readonly" in s or "locked" in s or "busy" in s):
-                raise
-            last = e
-            time.sleep(0.2 * (i + 1))
-    raise last  # type: ignore[misc]
-
-
 def identity(args) -> dict:
     d = {}
     if getattr(args, "user", None):
@@ -510,25 +441,6 @@ def identity_lists(args) -> dict:
     if getattr(args, "session", None):
         d["session_ids"] = [args.session]
     return d
-
-
-def _parse_memory_at(v) -> "datetime | None":
-    """--memory-at 的值 → datetime。支持 2026-10-27 / 2026-10-27 14:30:00 / ISO T 分隔。"""
-    if v is None or not str(v).strip():
-        return None
-    s = str(v).strip()
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        pass
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            continue
-    raise ValueError(
-        f"--memory-at 时间格式不认识：{s!r}（支持 2026-10-27、2026-10-27 14:30:00 这类写法）"
-    )
 
 
 def _add_kwargs(args) -> dict:
@@ -560,6 +472,82 @@ def _add_kwargs(args) -> dict:
 # --------------------------------------------------------------------------
 # 子命令
 # --------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# S3-2（2026-10-29）：以下为转发 stub —— 真源已下沉 core（clientops/procs/searchops）。
+# 保留公共名仅为兼容既有调用点；新代码请直接 import core 模块。
+# ---------------------------------------------------------------------------
+def embedding_provider() -> str:
+    from hymem.core.clientops import embedding_provider as _f
+    return _f()
+
+
+def build_embedding_service():
+    from hymem.core.clientops import build_embedding_service as _f
+    return _f()
+
+
+def make_client(mode: str | None):
+    from hymem.core.clientops import make_client as _f
+    return _f(mode)
+
+
+def data_dir() -> Path:
+    from hymem.core.procs import data_dir as _f
+    return _f()
+
+
+def _worker_cap() -> int:
+    from hymem.core.procs import _worker_cap as _f
+    return _f()
+
+
+def _spawn_detached_worker(idle_exit: float = 90.0, extra_args: list | None = None) -> bool:
+    from hymem.core.procs import _spawn_detached_worker as _f
+    return _f(idle_exit, extra_args)
+
+
+def _spawn_detached_serve(idle_exit: float = 1800.0) -> bool:
+    from hymem.core.procs import _spawn_detached_serve as _f
+    return _f(idle_exit)
+
+
+def _parse_memory_at(v):
+    from hymem.core.searchops import _parse_memory_at as _f
+    return _f(v)
+
+
+def _snapshot_ids(client, ident: dict, cap: int = 2000) -> set:
+    from hymem.core.searchops import _snapshot_ids as _f
+    return _f(client, ident, cap)
+
+
+def _ids_of(result: dict) -> list[str]:
+    from hymem.core.searchops import _ids_of as _f
+    return _f(result)
+
+
+def _new_ids_only(returned: list[str], before: set[str] | None) -> list[str]:
+    from hymem.core.searchops import _new_ids_only as _f
+    return _f(returned, before)
+
+
+def _bind_tags(ids: list[str], tags: list[str], source: str = "user") -> int:
+    from hymem.core.searchops import _bind_tags as _f
+    return _f(ids, tags, source)
+
+
+def _flatten_search(resp: dict) -> list:
+    from hymem.core.searchops import _flatten_search as _f
+    return _f(resp)
+
+
+def _embedding_unhealthy() -> str:
+    from hymem.core.searchops import _embedding_unhealthy as _f
+    return _f()
+
+
+
 def cmd_doctor(args) -> int:
     report = {"ok": True, "checks": []}
 
@@ -886,73 +874,6 @@ def _split_lines(text: str) -> list[str]:
     return parts if len(parts) > 1 else [text]
 
 
-def _ids_of(result: dict) -> list[str]:
-    """pro 模式下 memory_id 是 l1_raw 事件 id，memory_ids 才是抽取后的最终节点 id。
-
-    标签必须绑最终节点，否则在 search/list 里永远对不上。
-    """
-    ids = result.get("memory_ids") or []
-    ids = [str(i) for i in ids if i]
-    if not ids:
-        mid = result.get("memory_id") or result.get("id")
-        if mid:
-            ids = [str(mid)]
-    return ids
-
-
-def _snapshot_ids(client, ident: dict, cap: int = 2000) -> set[str]:
-    """取写入前已存在的节点 id 集合，用于从 memory_ids 里剔除被 reconcile 合并到的老节点。
-
-    实测：一次 add 的 memory_ids 并不等于"新建节点"，而是"本次影响到的节点"。
-    写一句 CI 流水线的事实，会连带返回 8 个被合并/更新的旧节点 id。
-    直接全部打标签 = 把标签污染到无关记忆上，所以必须做前后差分。
-    """
-    ids: set[str] = set()
-    offset = 0
-    # 只按 user 取全量快照：reconcile 会跨 session 合并节点，
-    # 若同时按 session/agent 过滤，已知集合会偏小，导致把老节点误判为新节点。
-    kwargs: dict = {}
-    if (ident or {}).get("user_id"):
-        kwargs["user_id"] = ident["user_id"]
-    try:
-        while offset < cap:
-            r = client.list_memories(limit=200, offset=offset, **kwargs)
-            batch = (r.get("vdb") or {}).get("memories") or []
-            if not batch:
-                break
-            for it in batch:
-                mid = it.get("memory_id")
-                if mid:
-                    ids.add(str(mid))
-            offset += len(batch)
-            if len(batch) < 200:
-                break
-    except Exception:  # noqa: BLE001
-        pass
-    return ids
-
-
-def _new_ids_only(returned: list[str], before: set[str] | None) -> list[str]:
-    if not returned:
-        return []
-    if not before:
-        return returned
-    fresh = [i for i in returned if i not in before]
-    # 全都被识别为老节点时（内容被 reconcile 判为"已存在"），退回第一个，
-    # 避免标签无处可挂；这比把标签铺到 N 个老节点上安全。
-    return fresh or returned[:1]
-
-
-def _bind_tags(ids: list[str], tags: list[str], source: str = "user") -> int:
-    if not ids or not tags:
-        return 0
-    conn = store.connect()
-    try:
-        return store.bind_tags(conn, ids, tags, source)
-    finally:
-        conn.close()
-
-
 def _bind_tags_to_new(client, ident: dict, before: set[str], returned: list[str],
                       tags: list[str]) -> tuple[list[str], set[str]]:
     """把用户标签绑到「本次真正新建的可检索节点」上，返回 (绑定的 id, 新快照)。
@@ -1033,128 +954,6 @@ def _filter_by_tags(items: list[dict], tags: list[str] | None, tag_mode: str = "
             it["_tags"] = sorted(have)
             out.append(it)
     return out
-
-
-def _worker_cap() -> int:
-    """消费并发线程数（lane 数）。HY_MEM_MAX_WORKERS 可覆盖，默认 3。
-
-    0.9.8 起语义变化：以前是「detached worker 进程数上限」，现在是单个
-    supervisor 进程内的消费线程数。SDK 的 reconcile 是读改写序列，跨进程/
-    跨线程必须由 WriteLock 串行（锁覆盖整个 client.add 含 LLM 抽取），
-    所以多个消费进程是伪并发——N 个进程只会在锁上排队，还各付一份 SDK
-    初始化（hy_memory.log / chroma 的多进程初始化竞态正是历史并发风暴的
-    根源）。线程池里锁语义不变，非临界区（snapshot 读、入账、退避调度）
-    可与在途写入重叠。
-    """
-    try:
-        return max(1, int(os.getenv("HY_MEM_MAX_WORKERS") or 3))
-    except ValueError:
-        return 3
-
-
-def _spawn_detached_worker(idle_exit: float = 90.0,
-                           extra_args: list[str] | None = None) -> bool:
-    """拉起一个脱管的后台消费 supervisor（空闲自退出），成功返回 True。
-
-    为什么不常驻：智能体场景下「临时拉起 + 空闲自杀」最干净 —— add --async
-    入队后立即返回毫秒级，落库由后台进程完成，不留僵尸进程。
-
-    消费并发模型（0.9.8）：detached supervisor 恒为 1 个进程，进程内跑
-    N 个消费线程（--lanes，默认 HY_MEM_MAX_WORKERS=3）。进程数恒 1 是
-    有意的——见 _worker_cap 的语义说明。WriteLock 与 SQLite 抢占兜底，
-    即使拉重了也无害（闸门 cap=1 + 心跳判活）。
-    """
-    from hymem.core import install_ops
-
-    # 上限闸门（WriteLock 内占位，串行化风暴竞态）：detached supervisor 恒 1 个。
-    # 占位行 15s 过期，Popen 失败也不会永久卡死后续拉起。
-    try:
-        with store.WriteLock():
-            conn = store.connect()
-            try:
-                slot = store.claim_worker_slot(conn, 1)
-            finally:
-                conn.close()
-    except Exception:  # noqa: BLE001  闸门失败宁可多拉不多丢
-        slot = True
-    if not slot:
-        return False
-
-    argv = install_ops.target_command() + [
-        "worker",
-        "--idle-exit", str(idle_exit),
-        "--poll", "1.0",
-        "--lanes", str(_worker_cap()),
-    ] + (extra_args or [])
-    try:
-        if os.name == "nt":
-            flags = 0x08000000  # CREATE_NO_WINDOW：不闪黑框
-            # stderr 落文件而非 DEVNULL：worker 若在启动期静默死亡（日志
-            # 文件竞态/readonly 等），这里就是唯一现场
-            try:
-                err_f = open(store.data_dir() / "logs" / "worker.err", "ab")
-            except OSError:
-                err_f = subprocess.DEVNULL
-            subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=err_f, creationflags=flags, close_fds=True,
-            )
-        else:
-            err_f = None
-            try:
-                (store.data_dir() / "logs").mkdir(parents=True, exist_ok=True)
-                err_f = open(store.data_dir() / "logs" / "worker.err", "ab")
-            except OSError:
-                err_f = None
-            subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=err_f or subprocess.DEVNULL, start_new_session=True,
-            )
-        return True
-    except OSError:
-        return False
-
-
-def _spawn_detached_serve(idle_exit: float = 1800.0) -> bool:
-    """拉起 detached 的向量库服务（数据唯一所有者）。
-
-    与 worker 分开拉：serve 必须长驻单例，worker 天然短命——0.9.9 把两者塞进
-    同一个进程，消费者退出就顺手把数据所有者带走了（见 PRD F2/F5）。
-
-    失败只 stderr 留痕、返回 False：调用方（ensure_endpoint）会继续轮询，
-    也许已有别的进程把它拉起来了。
-    """
-    from hymem.core import install_ops
-
-    argv = install_ops.target_command() + ["serve", "--idle-exit", str(idle_exit)]
-    try:
-        if os.name == "nt":
-            flags = 0x08000000  # CREATE_NO_WINDOW：不闪黑框
-            try:
-                logs = store.data_dir() / "logs"
-                logs.mkdir(parents=True, exist_ok=True)
-                err_f: object = open(logs / "serve.err", "ab")
-            except OSError:
-                err_f = subprocess.DEVNULL
-            subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=err_f, creationflags=flags, close_fds=True,
-            )
-        else:
-            err_f = None
-            try:
-                logs = store.data_dir() / "logs"
-                logs.mkdir(parents=True, exist_ok=True)
-                err_f = open(logs / "serve.err", "ab")
-            except OSError:
-                err_f = None
-            subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=err_f or subprocess.DEVNULL, start_new_session=True,
-            )
-        return True
-    except OSError:
-        return False
 
 
 def cmd_serve(args) -> int:
@@ -1333,25 +1132,6 @@ def cmd_add(args) -> int:
 
 
 
-def _flatten_search(resp: dict) -> list:
-    """search 返回 {memories:{schema:[],proactive:[],normal:[]}}，拍平后按 score 降序。"""
-    mem = resp.get("memories") or {}
-    items = []
-    if isinstance(mem, dict):
-        for bucket in ("normal", "proactive", "schema"):
-            v = mem.get(bucket)
-            if isinstance(v, list):
-                items.extend(x for x in v if isinstance(x, dict))
-        # 兜底：未知桶
-        for k, v in mem.items():
-            if k not in ("normal", "proactive", "schema") and isinstance(v, list):
-                items.extend(x for x in v if isinstance(x, dict))
-    elif isinstance(mem, list):
-        items = [x for x in mem if isinstance(x, dict)]
-    items.sort(key=lambda x: x.get("score") or 0, reverse=True)
-    return items
-
-
 def _pending_jobs() -> int:
     """队列里还有多少条没落库。
 
@@ -1368,24 +1148,6 @@ def _pending_jobs() -> int:
             conn.close()
     except Exception:  # noqa: BLE001
         return 0
-
-
-def _embedding_unhealthy() -> str:
-    """空结果时的自证：嵌入端点到底通不通。通就返回 ""（真没命中）。
-
-    只在「搜索结果为空」这条路上调用，正常命中不付这份时间（约 300ms）。
-    """
-    if os.getenv("HY_MEM_NO_PROBE", "").strip().lower() in ("1", "true", "yes"):
-        return ""
-    try:
-        from hymem.core import config as cfgmod
-        from hymem.ui import setup_wizard
-
-        emb = (cfgmod.load().get("embedding") or {})
-        good, msg, _dims = setup_wizard.probe_embedding(emb, timeout=20)
-        return "" if good else msg
-    except Exception as e:  # noqa: BLE001
-        return f"{type(e).__name__}: {e}"
 
 
 def cmd_search(args) -> int:
