@@ -94,7 +94,10 @@ def main() -> int:
     (TMP / "data").mkdir(exist_ok=True)
     (TMP / "data" / "keep.txt").write_text("x", encoding="utf-8")
 
-    rc = setup_wizard.run_setup(scope="all")
+    # 2026-10-29 起 scope=all 分流：无 config 的首次走顺序向导（first_run=True
+    # 显式指定），已有 config 进设置菜单。本用例测的是顺序向导语义；
+    # existing=None 让 run_setup 自己 load()（沙箱里 config 由前一步写入）。
+    rc = setup_wizard.run_setup(scope="all", first_run=True)
     cfg = cfgmod.load_raw()
     check("run_setup 返回 0", rc == 0, f"rc={rc}")
     check("setupComplete 已写入", cfg.get("setupComplete") is True)
@@ -528,8 +531,9 @@ def main() -> int:
     _new = setup_wizard.step_embedding({"mode": "pro", "embedding": _probe_cfg()})
     check("二次配置不再追问 API Key", not _asked, str(_asked))
     check("二次配置的探针用的是环境变量 key", _seen["key"] == ENV_KEY, repr(_seen["key"]))
-    check("二次配置后 apiKey 仍为空（不落盘）", _new.get("apiKey") == "", repr(_new.get("apiKey")))
-    check("二次配置后 keyEnv 保留", _new.get("keyEnv") == ENV_NAME, repr(_new.get("keyEnv")))
+    # 2026-10-29 语义反转：key 默认固化进 config.json（apiKey 有值、keyEnv 清空）
+    check("二次配置后 key 已固化进配置（apiKey=env 值）", _new.get("apiKey") == ENV_KEY, repr(_new.get("apiKey"))[:30])
+    check("固化后 keyEnv 清空（不再依赖环境变量）", _new.get("keyEnv") == "", repr(_new.get("keyEnv")))
     check("二次配置后 dims 按实测写入", _new.get("dims") == 1024, str(_new.get("dims")))
 
     # Q4 换到**另一个端点**：旧端点的 key 绝不能借用（那正是 401 的来源），
@@ -545,8 +549,8 @@ def main() -> int:
     check("换端点必须重填 key（不继承旧 key）", bool(_asked), str(_asked))
     check("换端点时探针拿新 key（旧 env key 没被借用）", _seen["key"] == "sk-zhipu-new",
           repr(_seen["key"]))
-    check("换端点后 keyEnv 指向新端点的变量名", _new2.get("keyEnv") == _other.key_env,
-          repr(_new2.get("keyEnv")))
+    check("换端点后新 key 直存 config（keyEnv 清空）", _new2.get("apiKey") == "sk-zhipu-new"
+          and _new2.get("keyEnv") == "", repr(_new2.get("keyEnv")))
     # 关键回归：新配置 apiKey=手填值，resolve 优先取它（旧 env key 不参与），不会 401
     check("换端点后 resolve 取手填新 key（不是旧 env key）",
           cfgmod.resolve_embed_key({"embedding": _new2}) == "sk-zhipu-new",
@@ -563,7 +567,8 @@ def main() -> int:
     )
     check("同端点改模型不追问 key", not _asked, str(_asked))
     check("同端点改模型仍用环境变量 key", _seen["key"] == ENV_KEY, repr(_seen["key"]))
-    check("同端点改模型保留 keyEnv", _same.get("keyEnv") == ENV_NAME, repr(_same.get("keyEnv")))
+    check("同端点改模型后 key 固化（keyEnv 清空）", _same.get("apiKey") == ENV_KEY
+          and _same.get("keyEnv") == "", repr(_same.get("keyEnv")))
 
     # Q5 预设自身要把 keyEnv 带进配置（否则重选预设会把变量名冲成空）
     check("预设 to_cfg 带 keyEnv",
@@ -607,8 +612,8 @@ def main() -> int:
     _new_llm = setup_wizard.step_llm({"mode": "pro", "llm": _llm_cfg})
     check("首次安装不追问 LLM key", not _asked, str(_asked))
     check("首次安装的探针拿到环境变量 key", _seen["key"] == LLM_KEY, repr(_seen["key"]))
-    check("首次安装写回真实变量名", _new_llm.get("keyEnv") == LLM_ENV, repr(_new_llm.get("keyEnv")))
-    check("首次安装不把 key 烤进配置", _new_llm.get("apiKey") == "", repr(_new_llm.get("apiKey")))
+    check("首次安装 key 固化进配置", _new_llm.get("apiKey") == LLM_KEY, repr(_new_llm.get("apiKey"))[:30])
+    check("固化后 keyEnv 清空", _new_llm.get("keyEnv") == "", repr(_new_llm.get("keyEnv")))
 
     # Q7 首次安装的向量模型同理：env 回填让 key_in_file 为真，但不应追问
     _asked.clear()
@@ -618,8 +623,8 @@ def main() -> int:
     )
     check("首次安装不追问嵌入 key", not _asked, str(_asked))
     check("首次安装的嵌入探针拿到 env key", _seen["key"] == ENV_KEY, repr(_seen["key"]))
-    check("首次安装的嵌入 apiKey 不落盘", _new_emb_fresh.get("apiKey") == "", repr(_new_emb_fresh.get("apiKey")))
-    check("首次安装的嵌入 keyEnv 保留", _new_emb_fresh.get("keyEnv") == ENV_NAME, repr(_new_emb_fresh.get("keyEnv")))
+    check("首次安装的嵌入 key 固化", _new_emb_fresh.get("apiKey") == ENV_KEY, repr(_new_emb_fresh.get("apiKey"))[:30])
+    check("固化后 keyEnv 清空", _new_emb_fresh.get("keyEnv") == "", repr(_new_emb_fresh.get("keyEnv")))
 
     if _saved_llm_env is None:
         os.environ.pop(LLM_ENV, None)
@@ -635,8 +640,8 @@ def main() -> int:
                                                               "search": {"minScore": 0.35}})
     _afterq = cfgmod.load_raw()
     check("单步设置返回 0", _rc == 0, str(_rc))
-    check("落盘后 apiKey 仍为空", (_afterq.get("embedding") or {}).get("apiKey") == "", str(_afterq.get("embedding")))
-    check("落盘后 keyEnv 保留", (_afterq.get("embedding") or {}).get("keyEnv") == ENV_NAME, str(_afterq.get("embedding")))
+    check("落盘后 key 已固化（apiKey 有值）", (_afterq.get("embedding") or {}).get("apiKey") == ENV_KEY, str(_afterq.get("embedding"))[:120])
+    check("落盘后 keyEnv 清空", (_afterq.get("embedding") or {}).get("keyEnv") == "", str(_afterq.get("embedding"))[:120])
 
     # Q7 同一类坑的另一半：LLM 预设声明 $YSJX_API_KEY，本机实际存在 $MEMORY_LLM_API_KEY。
     # 只看预设名会逼重填；继承之后还必须把 keyEnv 写回成本机那个变量名，否则保存后取不到。
@@ -659,8 +664,8 @@ def main() -> int:
     })
     check("LLM 二次配置不追问 key", not _asked, str(_asked))
     check("LLM 探针用的是本机环境变量的 key", _seen["key"] == LLM_KEY, repr(_seen["key"]))
-    check("LLM 继承后 keyEnv 指向真实变量", _llm_new.get("keyEnv") == LLM_ENV, repr(_llm_new.get("keyEnv")))
-    check("LLM 继承不落盘", _llm_new.get("apiKey") == "", repr(_llm_new.get("apiKey")))
+    check("LLM 二次配置 key 固化", _llm_new.get("apiKey") == LLM_KEY, repr(_llm_new.get("apiKey"))[:30])
+    check("固化后 keyEnv 清空", _llm_new.get("keyEnv") == "", repr(_llm_new.get("keyEnv")))
     if _saved_llm_env is None:
         os.environ.pop(LLM_ENV, None)
     else:

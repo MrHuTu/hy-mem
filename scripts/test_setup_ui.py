@@ -143,8 +143,9 @@ def drive(step, keys, sandbox, env_extra=None, timeout=120):
         "MEMORY_LLM_API_KEY": "",
     }
     env.update(env_extra or {})
+    argv = [PY, str(CLI), "setup"] + ([] if step == "all" else ["--step", step])
     proc = subprocess.run(
-        [PY, str(CLI), "setup", "--step", step],
+        argv,
         input=keys.encode("utf-8"),
         capture_output=True,
         env=env,
@@ -200,9 +201,9 @@ def scenario_first_use(base: str) -> None:
     check("A2 baseUrl/model 落盘为新端点", cfg.get("embedding", {}).get("baseUrl") == base
           and cfg.get("embedding", {}).get("model") == "test-emb-a",
           json.dumps(cfg.get("embedding", {}), ensure_ascii=False))
-    check("A3 手填 key 落 apiKey、keyEnv 指向约定变量（不清空）",
+    check("A3 手填 key 固化进 config、keyEnv 清空",
           cfg.get("embedding", {}).get("apiKey") == EMB_KEY1
-          and cfg.get("embedding", {}).get("keyEnv") == "MEMORY_EMBEDDER_API_KEY",
+          and cfg.get("embedding", {}).get("keyEnv") == "",
           json.dumps(cfg.get("embedding", {}), ensure_ascii=False))
     check("A4 探针发出且带环境变量 key", any(r["auth_ok"] and r["path"].endswith("/embeddings") for r in req),
           json.dumps(req, ensure_ascii=False))
@@ -216,9 +217,9 @@ def scenario_second_same(base: str) -> None:
     sb = Path(tempfile.mkdtemp(prefix="hymem-uiB-"))
     mkcfg(sb, base)
     m = len(SEEN)
-    # 回车=自定义 → baseUrl 回车保留 → 模型回车保留 → 三选一(回车=继承) → 探针 200
-    # → 无 diff 不问覆盖 → 写入(y)
-    rc, out, cfg = drive("embedding", "\n\n\n\ny\n", sb,
+    # 回车=自定义 → baseUrl 回车保留 → 模型回车保留 → 三选一(回车=存入配置文件，固化 env 值)
+    # → 探针 200 → 固化让 keyEnv 有→空 = diff，弹覆盖(y) → 写入(y)
+    rc, out, cfg = drive("embedding", "\n\n\n\ny\ny\n", sb,
                          {"MEMORY_EMBEDDER_API_KEY": EMB_KEY1})
     req = SEEN[m:]
     check("B1 干净退出(rc=0)", rc == 0, f"rc={rc}")
@@ -227,9 +228,11 @@ def scenario_second_same(base: str) -> None:
           out[-800:])
     check("B3 探针用继承的 key 命中", any(r["auth_ok"] and r["path"].endswith("/embeddings") for r in req),
           json.dumps(req, ensure_ascii=False))
-    check("B4 key 仍不落盘", cfg.get("embedding", {}).get("apiKey") == "",
-          repr(cfg.get("embedding", {}).get("apiKey")))
-    check("B5 无变化不弹「覆盖旧配置」", "覆盖旧配置" not in out, out[-300:])
+    check("B4 env 值被固化进 config（apiKey=KEY1、keyEnv 清空）",
+          cfg.get("embedding", {}).get("apiKey") == EMB_KEY1
+          and cfg.get("embedding", {}).get("keyEnv") == "",
+          repr(cfg.get("embedding", {}).get("apiKey"))[:30])
+    check("B5 固化改变 keyEnv 时弹「覆盖旧配置」（明示存储位置变化）", "覆盖旧配置" in out, out[-300:])
 
 
 def scenario_custom_cross(base1: str, base2: str) -> None:
@@ -322,6 +325,52 @@ def scenario_key_rotate(base: str) -> None:
           repr(cfg.get("embedding", {}).get("apiKey")))
 
 
+def scenario_settings_menu(base1: str) -> None:
+    """G. setup 无参 = 设置菜单：选一项改一项改完回菜单，key 固化进 config。"""
+    print("\nG. 设置菜单 · key 固化")
+    sb = Path(tempfile.mkdtemp(prefix="hymem-uiG-"))
+    mkcfg(sb, base1)
+    m = len(SEEN)
+    # 1(向量) → 回车(自定义) → baseUrl/模型回车 → 三选一回车(存文件) → 探针
+    # → 覆盖(y) → 写入(y) → 回菜单 → 8(退出)
+    rc, out, cfg = drive("all", f"1\n\n\n\n\ny\ny\n8\n", sb,
+                         {"MEMORY_EMBEDDER_API_KEY": EMB_KEY1})
+    req = SEEN[m:]
+    check("G1 设置菜单出现（每项带当前值）", "设置（选一项改一项" in out and "向量模型 · test-emb-1" in out, out[:400])
+    check("G2 key 固化进 config（apiKey=env 值、keyEnv 清空）",
+          cfg.get("embedding", {}).get("apiKey") == EMB_KEY1
+          and cfg.get("embedding", {}).get("keyEnv") == "",
+          json.dumps(cfg.get("embedding", {}), ensure_ascii=False)[:120])
+    check("G3 探针在固化后命中", any(r["auth_ok"] for r in req if r["path"].endswith("/embeddings")),
+          json.dumps(req, ensure_ascii=False)[:120])
+    check("G4 改完回菜单可继续", "完成，退出设置" in out, out[-200:])
+
+
+def scenario_pro_linkage(base: str) -> None:
+    """H. pro 联动：mode 选 pro 且 LLM 不可用 → 同流强制进 LLM 设置。"""
+    print("\nH. pro 联动 LLM")
+    sb = Path(tempfile.mkdtemp(prefix="hymem-uiH-"))
+    (sb / "config.json").write_text(json.dumps({
+        "setupComplete": True, "mode": "lite",
+        "embedding": {"preset": "custom", "provider": "openai", "baseUrl": base,
+                      "model": "test-emb-1", "dims": 8, "apiKey": "sk-any", "keyEnv": ""},
+    }, ensure_ascii=False), encoding="utf-8")
+    m = len(SEEN)
+    # mode 选 2(pro) → 联动警告 → LLM:4(自定义) → baseUrl → 模型 → key 追问 → KEY2
+    # → 三选一回车(存文件) → 探针 → 覆盖(y) → 写入(y)
+    # 预填段 keyEnv=YSJX_API_KEY 且本机真实存在——沙箱必须清掉，否则
+    # _pick_key 会判「LLM 已配好」跳过联动（G/H 语义测的是手配路径）
+    rc, out, cfg = drive("mode", f"2\n4\n{base}\ntest-llm-1\n{LLM_KEY2}\n\ny\ny\n", sb,
+                         {"MEMORY_LLM_API_KEY": LLM_KEY2, "YSJX_API_KEY": ""})
+    req = SEEN[m:]
+    check("H1 选 pro 触发 LLM 联动引导", "需要 LLM 抽取事实" in out, out[-400:])
+    check("H2 同流完成 LLM 配置并固化 key",
+          cfg.get("llm", {}).get("model") == "test-llm-1"
+          and cfg.get("llm", {}).get("apiKey") == LLM_KEY2,
+          json.dumps(cfg.get("llm", {}), ensure_ascii=False)[:120])
+    check("H3 mode 已存 pro", cfg.get("mode") == "pro", repr(cfg.get("mode")))
+
+
 def main() -> int:
     print("假端点启动中…")
     srv1, base1 = start_fake({EMB_KEY1, EMB_ROT}, LLM_KEY1, "S1")
@@ -335,6 +384,8 @@ def main() -> int:
         scenario_switch_preset_abort(base1)
         scenario_llm(base2)
         scenario_key_rotate(base1)
+        scenario_settings_menu(base1)
+        scenario_pro_linkage(base2)
     finally:
         srv1.shutdown(); srv1.server_close()
         srv2.shutdown(); srv2.server_close()

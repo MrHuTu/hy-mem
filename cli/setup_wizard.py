@@ -229,17 +229,30 @@ def _confirm_credentials(new: dict, *, kind: str) -> dict:
         # 「一路回车继承」会把这个入口藏没。这里给三选一，继承是默认快路，
         # 「换一把 key」是显式入口，取消兜底。
         if complete:
+            # key 存哪（2026-10-29 用户口径）：config.json 不进 git 仓（.gitignore
+            # 恒定忽略，check_secrets 也会拦截误提交），key 直存文件比环境变量
+            # 直接得多——换模型时环境变量里的旧 key 只会作废误导。默认落文件；
+            # 环境变量降级为兼容旧配置的读取来源，不再作为推荐存储。
             choice = tui.select(
                 "密钥怎么用？",
                 [
-                    ("就用上面这把（回车直接测）", "key 没换过、属于这个端点", "k"),
-                    ("换一把 key", "换了全新模型 / key 已轮换；粘贴新 key 后再测", "n"),
+                    ("存入配置文件（推荐）", "key 写进 config.json（不进 git 仓），换模型不用动环境变量", "k"),
+                    ("换一把 key 再存", "换了全新模型 / key 已轮换：粘贴新 key 存入配置文件", "n"),
                     ("取消本次设置", "不改配置", "x"),
                 ],
                 default=0,
             )
             if choice == 2:
                 raise tui.Aborted()
+            if choice == 0:
+                # 把当前生效的 key（手填值或环境变量里的值）固化进配置文件
+                eff = str(new.get("apiKey") or "").strip() or (
+                    os.getenv(str(new.get("keyEnv") or ""), "") if new.get("keyEnv") else ""
+                )
+                if eff:
+                    new["apiKey"] = eff
+                    new["keyEnv"] = ""   # 已固化，读取时不再依赖环境变量
+                return new
             if choice == 1:
                 new_key = tui.ask_secret(
                     "新 API Key", hint="逐字粘贴，前后别带空格"
@@ -249,8 +262,8 @@ def _confirm_credentials(new: dict, *, kind: str) -> dict:
                     tui.warn("key 为空，未改动；重新选择或取消")
                     continue
                 new["apiKey"] = new_key
-                new["keyEnv"] = fallback_env
-            return new
+                new["keyEnv"] = ""      # 直存文件：不写变量名
+                return new
         # 信息不完整：只能补 key（baseUrl / 模型在上面各自问过）
         new_key = tui.ask_secret(
             "API Key", hint="信息不完整，先补 key；逐字粘贴，前后别带空格"
@@ -826,52 +839,99 @@ def needs_setup() -> tuple[bool, str]:
     return False, ""
 
 
+def _mode_llm_ok(cfg: dict, mode: str) -> bool:
+    """该模式下 LLM 是否齐备（lite 不需要）。"""
+    if mode not in ("pro", "ultra"):
+        return True
+    llm = cfg.get("llm") or {}
+    return bool(llm.get("model")) and bool(
+        str(llm.get("apiKey") or "").strip()
+        or (llm.get("keyEnv") and os.getenv(str(llm["keyEnv"]), ""))
+    )
+
+
 def run_setup(scope: str = "all", existing: dict | None = None, first_run: bool = False) -> int:
-    """scope=all 走四步向导；scope=<step key> 只改一项（设置页用）。"""
+    """首次（无 config）走顺序向导；之后 scope=all 进**设置菜单**，选一项改一项。
+
+    2026-10-29 用户反馈：全流程向导对「只改一项」太繁琐——LLM/向量/模式等
+    本就各自独立，改哪个进哪个，改完回菜单。顺序向导只在四步有依赖的
+    首次安装时保留。
+    """
     cfg = cfgmod.load() if existing is None else existing
     old_cfg = dict(cfg)
 
+    if scope == "all" and first_run:
+        return _run_first_time_wizard(cfg, old_cfg)
+    if scope == "all":
+        return _run_settings_menu(cfg, old_cfg)
+
+    step = next((s for s in STEPS if s[0] == scope), None)
+    if step is None:
+        tui.err(f"未知的设置项：{scope}")
+        return 1
+    key, title, fn = step
+    print(tui.title(f"设置 · {title}"))
     try:
-        if scope == "all":
-            if first_run:
-                _welcome()
-            emb = step_embedding(cfg)
-            cfg = {**cfg, "embedding": emb}
+        value = fn(cfg)
+    except tui.Aborted:
+        print()
+        tui.warn("已取消，配置未改动。")
+        return 0
+    cfg = _apply_step(cfg, key, value)
 
-            mode = step_mode(cfg)
-            cfg = {**cfg, "mode": mode}
+    try:
+        return _commit(old_cfg, cfg)
+    except tui.Aborted:
+        print()
+        tui.warn("已取消，配置未改动。")
+        return 0
 
-            if mode in ("pro", "ultra"):
-                llm = step_llm(cfg)
-                cfg = {**cfg, "llm": llm}
-            else:
-                tui.info("lite 模式不调 LLM，跳过 LLM 设置（以后可单独在「设置」里补）")
 
-            storage = step_storage(cfg)
-            cfg = {**cfg, "storage": storage}
+def _apply_step(cfg: dict, key: str, value) -> dict:
+    """把单个 step 的返回值并进配置。mode 切到 pro/ultra 且 LLM 未齐时立刻联动。"""
+    if key == "mode":
+        cfg = {**cfg, "mode": value}
+        # 判据是「LLM 真的可用」而不是「有 model 字段」：无 config 首次运行时
+        # _fill_from_env 会预填一个 llm 段（model 来自预设、key 可能为空），
+        # 只看 model 会把「预填了但没 key」误判成已配好（2026-10-29 联动失效根因）。
+        if value in ("pro", "ultra") and not _mode_llm_ok(cfg, value):
+            # 用户口径：pro 必须有 LLM——不当场配齐就不算配好。直接引导进 LLM
+            # 步骤（同一次 setup 里完成，不打断流程）。
+            print()
+            tui.warn(f"{value} 模式需要 LLM 抽取事实，现在就配（跳过则模式改动不保存）：")
+            llm = step_llm(cfg)
+            cfg = {**cfg, "llm": llm}
+    elif key == "search":
+        cfg = {**cfg, "search": value}
+    elif key == "queue":
+        cfg = {**cfg, "queue": value}
+    elif key == "storage":
+        cfg = {**cfg, "storage": value}
+    elif key == "llm":
+        cfg = {**cfg, "llm": value}
+    else:
+        cfg = {**cfg, key: value}
+    return cfg
+
+
+def _run_first_time_wizard(cfg: dict, old_cfg: dict) -> int:
+    """首次安装：四步有依赖（mode 决定要不要 LLM），保留顺序向导。"""
+    try:
+        _welcome()
+        emb = step_embedding(cfg)
+        cfg = {**cfg, "embedding": emb}
+
+        mode = step_mode(cfg)
+        cfg = {**cfg, "mode": mode}
+
+        if mode in ("pro", "ultra"):
+            llm = step_llm(cfg)
+            cfg = {**cfg, "llm": llm}
         else:
-            step = next((s for s in STEPS if s[0] == scope), None)
-            if step is None:
-                tui.err(f"未知的设置项：{scope}")
-                return 1
-            key, title, fn = step
-            print(tui.title(f"设置 · {title}"))
-            value = fn(cfg)
-            if key == "mode":
-                cfg = {**cfg, "mode": value}
-                if value in ("pro", "ultra") and not (cfg.get("llm") or {}).get("model"):
-                    tui.warn("pro/ultra 需要 LLM，请再设置 LLM 模型")
-            elif key == "search":
-                cfg = {**cfg, "search": value}
-            elif key == "queue":
-                cfg = {**cfg, "queue": value}
-            elif key == "storage":
-                cfg = {**cfg, "storage": value}
-            elif key == "llm":
-                cfg = {**cfg, "llm": value}
-            else:
-                cfg = {**cfg, key: value}
+            tui.info("lite 模式不调 LLM，跳过 LLM 设置（以后可在「设置」里补）")
 
+        storage = step_storage(cfg)
+        cfg = {**cfg, "storage": storage}
     except tui.Aborted:
         print()
         tui.warn("已取消，配置未改动。")
@@ -883,6 +943,52 @@ def run_setup(scope: str = "all", existing: dict | None = None, first_run: bool 
         print()
         tui.warn("已取消，配置未改动。")
         return 0
+
+
+def _run_settings_menu(cfg: dict, old_cfg: dict) -> int:
+    """设置菜单（2026-10-29）：每项显示当前值，选哪项改哪项，改完回菜单。
+
+    改动即时生效（每项改完就 _commit 一次），退出时不再问「写入配置」——
+    菜单循环里每次 commit 已经问过了，重复问就是「按 N」式摩擦。
+    """
+    while True:
+        emb = cfg.get("embedding") or {}
+        llm = cfg.get("llm") or {}
+        rows = [
+            (f"向量模型 · {emb.get('model') or '（未设）'}", "baseUrl / 模型 / 密钥 / 实测维度", "e"),
+            (f"运行模式 · {cfg.get('mode') or 'pro'}", "lite 纯向量 / pro 加 LLM 抽取 / ultra 再加归纳", "m"),
+            (f"LLM 模型 · {llm.get('model') or '（未设）'}"
+             + ("（pro 必需）" if cfg.get("mode") in ("pro", "ultra") else ""), "事实抽取与自动标签", "l"),
+            (f"存储目录 · {(cfg.get('storage') or {}).get('dataDir') or '默认'}", "用量 / 迁移 / 备份", "s"),
+            (f"检索阈值 · {(cfg.get('storage') or {}).get('minScore') or (cfg.get('search') or {}).get('minScore') or 0.35}", "0.30 宽松 / 0.35 平衡 / 0.45 严格", "t"),
+            (f"队列参数 · 重试{(cfg.get('queue') or {}).get('maxRetries') or 3}次", "失败重试次数 / 锁超时", "q"),
+            ("查看当前配置", "打印全部生效配置", "v"),
+            ("完成，退出设置", "改动已保存，回到控制台", "x"),
+        ]
+        idx = tui.select("设置（选一项改一项，改完回这里）", rows, default=7)
+        if idx == 7:
+            return 0
+        if idx == 6:
+            print()
+            print(tui.kv(_summary_rows(cfg)))
+            continue
+        key, _title, fn = STEPS[idx]
+        print(tui.title(f"设置 · {_title}"))
+        try:
+            value = fn(cfg)
+        except tui.Aborted:
+            print()
+            tui.warn("已取消，此项未改动。")
+            continue
+        before = dict(cfg)
+        cfg = _apply_step(cfg, key, value)
+        try:
+            _commit(before, cfg)
+            old_cfg = dict(cfg)
+        except tui.Aborted:
+            print()
+            tui.warn("已取消，此项未改动。")
+            cfg = before
 
 
 def _welcome() -> None:
