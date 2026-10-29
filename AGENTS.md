@@ -28,7 +28,7 @@
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
 | 源码规模 | **35 个 py，16900 行**（`cli/` 20 个 12634 行 + `scripts/` 15 个 4266 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **622**（CLI 84 / UI 110 / setup 139 / setup_ui 29 / vdb 36 / MCP 25 / queue 21 / oplog 25 / i18n 31 / encoding 10 / menu 112） | 见 §8 |
+| 测试用例 | **629**（CLI 84 / UI 110 / setup 139 / setup_ui 36 / vdb 36 / MCP 25 / queue 21 / oplog 25 / i18n 31 / encoding 10 / menu 112） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 33 MB）；对外分发 `dist/hy-mem-0.9.13-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **160 s**（含压缩包 24 s） | 构建日志末行 |
@@ -363,7 +363,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | `scripts/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe scripts/test_encoding.py` |
 | `scripts/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe scripts/test_oplog.py` |
 | `scripts/test_menu.py` | **112** | 控制台全覆盖：18 条命令逐个跑通、旧菜单 18 项逐一映射到命令、别名/补全/切词、未知命令给建议、真 `run_menu` 管道循环（命令后仍回到提示符、不「按任意键」、EOF 干净退出）、历史落盘与去重 | `.venv/Scripts/python.exe scripts/test_menu.py` |
-| `scripts/test_setup_ui.py` | **29** | 设置向导 UI 级：真 CLI 子进程 + 管道喂键 + 本地假 OpenAI 端点（只认自家 key）。覆盖首次/二次选当前项/自定义跨端点/换预设 EOF 中止/LLM 同型/同端点三选一显式换 key；抓到并修掉 3 个「第二次配置」家族 bug（自定义 same_endpoint 写死、默认光标落预设、ask_secret 空回车放行） | `.venv/Scripts/python.exe scripts/test_setup_ui.py`（不打真云厂商） |
+| `scripts/test_setup_ui.py` | **36** | 设置向导 UI 级：真 CLI 子进程 + 管道喂键 + 本地假 OpenAI 端点（只认自家 key）。覆盖首次/二次选当前项/自定义跨端点/换预设 EOF 中止/LLM 同型/同端点三选一显式换 key/设置菜单+key固化+pro联动；抓到并修掉 3 个「第二次配置」家族 bug（自定义 same_endpoint 写死、默认光标落预设、ask_secret 空回车放行） | `.venv/Scripts/python.exe scripts/test_setup_ui.py`（不打真云厂商） |
 | `scripts/test_i18n.py` | **31** | 中英切换：默认 zh 逐字不变、`HY_MEM_LANG=en` 生效、缺译回落中文、`config set lang=en` 读到 en | `.venv/Scripts/python.exe scripts/test_i18n.py` |
 
 ```bash
@@ -376,7 +376,7 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe scripts/test_cli
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：十一套全绿（cli 84 / ui 110 / setup 139 / setup_ui 29 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 31 / encoding 10 / menu 112 = **622**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：十一套全绿（cli 84 / ui 110 / setup 139 / setup_ui 36 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 31 / encoding 10 / menu 112 = **629**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
 
 ### 8.1 怎么测 CLI —— 四条铁律（2026-10-28 补，源自 401 事故）
 
@@ -804,7 +804,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 | 阶段 | 位置 | 入库 |
 |---|---|---|
 | 开发期红 → 绿 | `.local-test/repro_<slug>.py` / `case_<slug>.py` | ❌（整目录被忽略） |
-| 稳定后**转正** | `scripts/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 622** | ✅ |
+| 稳定后**转正** | `scripts/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 629** | ✅ |
 
 判据：这条用例是发版必跑的门禁吗？是 → 转正；只是一次性复现 → 留 `.local-test/`。
 

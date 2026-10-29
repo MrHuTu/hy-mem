@@ -51,6 +51,7 @@
 | 2026-10-28 | C1 定为「向量 GPT/GLM/百炼qwen + 自定义」 | 用户选择：保留 qwen 作为独立预设，避免当前配置重选时落到自定义要手填端点 | S1 | 是（已问） |
 | 2026-10-28 | LLM 默认档位定为轻量档 | 用户选择：gpt-4o-mini / glm-4-flash / deepseek-chat | S1 | 是（已问） |
 | 2026-10-28 | 新增 C9~C12，分片表扩到 S1~S6 | 用户补充"ui 界面交互很多地方反人类，仿照 pi / bash shell 重做，别偷懒" —— 原 S4（worker 确认）/ S5（菜单扫描）被合并进 S3 / S6，空出的编号给控制台与行编辑 | S3 / S4 / S5 / S6 | 否（用户已给方向） |
+| 2026-10-29 | setup 无参从顺序向导改为**设置菜单**（每项带当前值、选一项改一项、改完回菜单；首次安装保留顺序向导）；mode 切 pro/ultra 且 LLM 不可用时同流强制引导 LLM（判据 `_mode_llm_ok`=model+可用 key，防 `_fill_from_env` 预填误判）；**key 存储语义反转：默认固化进 config.json**（apiKey 有值、keyEnv 清空；config.json 恒被 gitignore、check_secrets 拦截误提交，不构成泄密面）——环境变量降级为兼容读取来源；setup_ui 29→36（+G 菜单/H 联动），test_setup 7 组断言反转 | 用户反馈三点：①各配置项应可单独设置而非嵌在引导流程；②pro 必须有 LLM；③key 放环境变量无实际意义（换模型即作废），当初用环境变量只为源码仓不泄密，config.json 本就不进仓 | S2/S4/S7 | 是（用户已给口径） |
 | 2026-10-29 | MCP 异步反馈四缝修复：queue_status 的 shadow_only hint 压过「可检索」话术、search 返回体带 pending_writes、add note 按实测口径（pro 单条可达 2 分钟）、get_version 带 queue_health；mcp 22→25、queue 18→21 | 用户问「add 走异步静默返回是否不友好」；实测 0.9.14 抓到 job 87 done+shadow_only 但 hint 说「可以 search 验证」的自相矛盾、落库前 search 无队列提示、note 承诺 6~9s 实测 124s | （本轮为 MCP 交互修复，挂在同一契约下追溯） | 是（实测驱动） |
 | 2026-10-29 | C13 的 key 决定从「confirm 二态」改为三选一菜单（就用这把/换一把 key/取消），新增 F 场景验证同端点显式换 key；setup_ui 25→29 | 用户反馈：设置/重置模型时没有要求输入 key 的机会——换全新模型的用户被「一路回车继承」挡住 | S7 | 是（用户已给口径） |
 | 2026-10-28 | 新增 C13（设置四段式）与 S7（UI 级测试）；同时修掉 3 个「第二次配置」残留 bug：自定义分支 same_endpoint 写死 True、自定义配置默认光标落第 1 预设、ask_secret 空回车放行 | 用户给出明确交互规范（信息补齐→测连通→可重设→覆盖确认）；UI 级测试首跑红测抓到 | S2 / S7 | 是（用户已给规范） |

@@ -320,7 +320,7 @@ hy-mem untag --tag infra --yes    # 全局解绑某标签（需 --yes）
 
 `config.json`（默认在安装根，`D:\tools_open\agent-bridge\config.json`）是设置的**单一真源**，优先级 **命令行 > config.json > .env**。向导里改过的值会覆盖 .env 同名项。
 
-**密钥是唯一例外，且方向相反：只从环境变量取。** `config.json` 里 `embedding.apiKey` / `llm.apiKey` 恒为空，只留 `keyEnv` 记变量名（默认 `MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`）。所以：
+**密钥默认直接存 config.json**（2026-10-29 起）：`embedding.apiKey` / `llm.apiKey` 保存明文 key，`keyEnv` 置空。config.json 恒被 .gitignore 忽略、check_secrets 拦截误提交，不构成泄密面；换模型时新 key 直接写进文件，不依赖环境变量。**兼容读取**：apiKey 为空且 keyEnv 有名字时仍会读环境变量（老配置不动也能用）。所以：
 
 - 换 key 只改环境变量，**不要**动 config.json，更不要写进脚本或代码；
 - `hy-mem doctor` 会显示密钥「来自 MEMORY_EMBEDDER_API_KEY」还是「来自 config.json」，据此判断优先级走的是哪条；
