@@ -27,6 +27,10 @@ config.json
 # 目录由程序自建（config.default_data_dir()），新克隆不依赖它存在。
 # 用 /data/ 锚定仓库根：不要误伤别处同名的 data 目录
 /data/
-cli/data/
-src/data/
+# 数据目录可能因 app_root 判定偏移误落在包内任意层（S1 暗雷实录），
+# 逐层防：src/ 下任何位置的 data/ 都不入库
+src/**/data/
 *.egg-info/
+# PyInstaller 每次构建自动改写根目录 spec（build_exe.py 不走它），
+# 纯构建副产物，不跟踪
+/hy-mem.spec
