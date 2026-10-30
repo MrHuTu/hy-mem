@@ -25,6 +25,9 @@ from hymem.core import errors  # CLI/MCP 共用的错误分类与格式化
 from hymem.core.version import VERSION
 
 SERVER_NAME = "hy-mem"
+# serve() 用的热切换检测：上次发通知时的 mode。None = 尚未记录（连接后第一条
+# 消息只记录不发，避免对刚连上的宿主多推一次无意义通知）。
+_LAST_MODE: str | None = None
 SERVER_VERSION = VERSION  # 单一来源：CLI --version / help / MCP initialize 三处共用
 
 # JSON-RPC 错误码（常用三个，够用）
@@ -1333,7 +1336,10 @@ def handle(msg: dict) -> dict | None:
     if method == "initialize":
         return None if is_notification else _resp(id_, {
             "protocolVersion": params.get("protocolVersion") or "2024-11-05",
-            "capabilities": {"tools": {}},
+            # listChanged：工具集随 mode 变（evolve 仅 ultra），模式切换时
+            # 服务端会主动发 notifications/tools/list_changed，宿主收到后
+            # 重拉 tools/list 即可，无需重连。
+            "capabilities": {"tools": {"listChanged": True}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
         })
     if method in ("notifications/initialized", "notifications/cancelled"):
@@ -1376,10 +1382,25 @@ def serve() -> int:
     except Exception:  # noqa: BLE001  非 tty/被重定向的极端场景保底
         pass
     print(f"hy-mem mcp server {SERVER_VERSION} ready (stdio)", file=sys.stderr)
+    global _LAST_MODE
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
+        # 模式热切换检测（准实时）：stdio 服务是被动循环，没有文件监听线程，
+        # config 被外部 CLI 改了只有下一条消息进来时才能发现。宿主每轮都会
+        # 发请求（ping / tools/call…），所以下一轮就能刷新工具集——发出
+        # list_changed 后客户端自动重拉 tools/list，无需重连。
+        cur_mode = _memory_mode()
+        if _LAST_MODE is None:
+            _LAST_MODE = cur_mode
+        elif cur_mode != _LAST_MODE:
+            _LAST_MODE = cur_mode
+            note = json.dumps({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"},
+                              ensure_ascii=True)
+            sys.stdout.write(note + "\n")
+            sys.stdout.flush()
+            print(f"hy-mem mcp: mode -> {cur_mode}，已发 tools/list_changed", file=sys.stderr)
         t0 = time.time()
         try:
             msg = json.loads(line)

@@ -50,6 +50,7 @@ class McpClient:
             stderr=self._err, text=True, encoding="utf-8", env=env,
         )
         self._id = 0
+        self.notifications: list[str] = []  # 服务端主动推的通知（无 id），按序收集
 
     def call(self, method: str, params: dict | None = None, timeout: float = 300) -> dict:
         self._id += 1
@@ -67,6 +68,9 @@ class McpClient:
             if not line:
                 continue
             msg = json.loads(line)
+            if "id" not in msg:
+                self.notifications.append(msg.get("method") or "?")
+                continue
             if msg.get("id") == self._id:
                 return msg
         raise TimeoutError(f"{method} 超时")
@@ -227,6 +231,34 @@ def main() -> int:
         check("C3 search_memory schema_available=false", (sp or {}).get("schema_available") is False, "")
         check("C3 hits 里没有 l6_schema 混入",
               not any((h.get("layer") == "l6_schema") for h in ((sp or {}).get("hits") or [])), "")
+
+        # C4 模式热切换：外部 CLI 改 config.json，服务端下一条消息时发现并发通知
+        init = mcp.call("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                       "clientInfo": {"name": "test_evolve-c4", "version": "1"}})
+        check("C4 initialize 声明 listChanged 能力",
+              (init.get("result", {}).get("capabilities", {}).get("tools", {}) or {}).get("listChanged") is True, "")
+        mcp.call("ping")  # 记录初始 mode（pro），不触发通知
+        mcp.notifications.clear()
+
+        cfg_p = sb_pro / "config.json"
+        cfg_obj = json.loads(cfg_p.read_text(encoding="utf-8"))
+        cfg_obj["mode"] = "ultra"
+        cfg_p.write_text(json.dumps(cfg_obj, ensure_ascii=False), encoding="utf-8")
+        mcp.call("ping")
+        check("C4 切 ultra 后发 tools/list_changed",
+              mcp.notifications == ["notifications/tools/list_changed"], mcp.notifications)
+        tools2 = {t["name"] for t in mcp.call("tools/list").get("result", {}).get("tools", [])}
+        check("C4 重拉后含 evolve", "evolve" in tools2, sorted(tools2))
+
+        cfg_obj["mode"] = "pro"
+        cfg_p.write_text(json.dumps(cfg_obj, ensure_ascii=False), encoding="utf-8")
+        mcp.call("ping")
+        mcp.call("tools/list")
+        check("C4 切回 pro 再发一次通知且列表复原",
+              mcp.notifications == ["notifications/tools/list_changed", "notifications/tools/list_changed"],
+              mcp.notifications)
+        tools3 = {t["name"] for t in mcp.call("tools/list").get("result", {}).get("tools", [])}
+        check("C4 切回后不含 evolve", "evolve" not in tools3, sorted(tools3))
     finally:
         mcp.close()
 
