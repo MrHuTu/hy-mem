@@ -1325,10 +1325,83 @@ def _pending_jobs() -> int:
         return 0
 
 
+def _cmd_search_scene(args, scene: str) -> int:
+    """S2：生产力场景检索——facts/experiences 双路 + chain_block（S4 开关）。"""
+    ws = getattr(args, "workspace", None)
+    branch = getattr(args, "branch", None)
+    if branch and not ws:
+        return fail("--branch 需要同时传 --workspace", EXIT_USAGE)
+    chain_block = bool(getattr(args, "chain_block", False))
+    if chain_block:
+        os.environ["MEMORY_CODING_CHAIN_BLOCK_ENABLED"] = "true"
+    client = make_client(args.mode)
+    try:
+        r = client.search(
+            args.query,
+            scene=scene,
+            workspace_id=ws or None,
+            branch=branch or None,
+            limit=args.limit,
+            user_ids=[identity(args).get("user_id") or config_defaults_user()],
+            **({"include_sources": [args.source_filter]} if getattr(args, "source_filter", None) else {}),
+        )
+    except Exception as e:  # noqa: BLE001
+        return fail(f"scene 检索失败：{type(e).__name__}: {e}")
+    facts = r.get("facts") or []
+    experiences = r.get("experiences") or []
+    payload = {
+        "scene": r.get("scene"), "count": len(facts) + len(experiences),
+        "facts": facts, "experiences": experiences,
+        "chain_used": r.get("chain_used") or [],
+        "chain_block": (r.get("chain_block") or "")[:2000] or None,
+        "elapsed_ms": r.get("elapsed_ms"),
+    }
+    human_parts = [f"[{scene}] 事实 {len(facts)} 条、经验 {len(experiences)} 条"]
+    if ws:
+        human_parts.append(f"workspace={ws}" + (f"/{branch}" if branch else ""))
+    human = "，".join(human_parts)
+    if not args.json:
+        for f_ in facts:
+            print(f"  [fact] {str(f_.get('statement') or f_.get('content') or f_)[:100]}")
+        for e_ in experiences:
+            print(f"  [exp ] {str(e_.get('solution') or e_.get('task') or e_)[:100]}")
+        cb = r.get("chain_block") or ""
+        if cb:
+            print(f"  [chain] {cb[:400]}")
+    return ok(payload, args.json, human)
+
+
+def config_defaults_user() -> str:
+    from hymem.core import config as _c
+
+    return _c.identity_defaults()
+
+
+def cmd_outcome(args) -> int:
+    """S2：按 request_id 查异步写入结果（SDK get_write_outcome）——比 queue_status
+    的 job 状态更进一步：直接看 SDK 写成了什么（含 scene 写入）。"""
+    rc = require_ready("查询写入结果")
+    if rc is not None:
+        return rc
+    client = make_client(args.mode)
+    try:
+        r = client.get_write_outcome(args.request_id)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"查询失败：{type(e).__name__}: {e}")
+    if r is None:
+        return fail(f"request_id {args.request_id} 无结果（仍在写入或不存在）", EXIT_RUNTIME)
+    return ok(r, args.json, str(r)[:200])
+
+
 def cmd_search(args) -> int:
     rc = require_ready("检索记忆")
     if rc is not None:
         return rc
+    # S2 scene 分路（2026-10-30 scene spec）：--scene working/coding 走生产力
+    # 检索（facts/experiences 双路返回）；缺省 chat 路径零变化。
+    scene = getattr(args, "scene", None)
+    if scene in ("working", "coding"):
+        return _cmd_search_scene(args, scene)
     client = make_client(args.mode)
     try:
         # 默认阈值按实测调过：qwen3.7-flash 的分数带更窄
@@ -3285,7 +3358,18 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--tag-mode", choices=["all", "any"], default="all", help="多个标签是 AND 还是 OR")
     ps.add_argument("--since", default=None, help="只要这段时间之后：30m/12h/7d/30d/1y 或 2026-01-01")
     ps.add_argument("--until", default=None, help="只要这段时间之前，格式同 --since")
+    ps.add_argument("--scene", choices=["working", "coding"], default=None,
+                    help="生产力场景检索（facts/experiences 双路返回）；缺省 chat")
+    ps.add_argument("--workspace", default=None, help="按仓库/项目过滤（--scene 时可选）")
+    ps.add_argument("--branch", default=None, help="分支过滤（需同时传 --workspace）")
+    ps.add_argument("--chain-block", action="store_true",
+                    help="（coding）注入版本演进链块（本次调用临时开启）")
+    ps.add_argument("--source-filter", default=None, help="按来源白名单过滤（如 mcp）")
     ps.set_defaults(func=cmd_search)
+
+    ps = sub.add_parser("outcome", help="按 request_id 查写入结果（含异步/scene 写入）")
+    ps.add_argument("request_id", help="add 返回的 request_id")
+    ps.set_defaults(func=cmd_outcome)
 
     ps = sub.add_parser("list", help="列出记忆")
     ps.add_argument("-n", "--limit", type=int, default=20)
