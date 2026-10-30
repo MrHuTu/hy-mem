@@ -296,17 +296,22 @@ CMD_META: dict[str, dict] = {
             'hy-mem add --tag infra --tag k8s "生产集群 12 节点，etcd 独立部署"',
             'hy-mem add --async --split < facts.txt',
             'cat notes.md | hy-mem add --split',
+            'hy-mem add --scene coding --workspace github.com/me/repo --branch master --trace trace.json',
         ],
         "output": {
             "single": "{ok, memory_id, memory_ids[], tagged_ids[], tags[], ...SDK 原始字段}",
             "split": "{ok, count, memory_ids[], tagged_ids[], tags[]}",
             "async": "{ok, queued, job_ids[], tags[], queue{pending,running,done,dead}}",
+            "scene": "{ok, scene, request_id, fact_ids[], experience_ids[], chain_rounds, workspace, branch}",
         },
         "notes": [
             "一条一个主题；--split 按行拆条，显著提升检索命中率。",
             "同步 add 两段式：LLM 抽取在锁外（可多进程并行），写锁只包 SDK 标准提交段（约 3~15s）；抢不到写锁 5s 即失败（E_LOCK，本条零写入），超时可用 HY_MEM_ADD_LOCK_TIMEOUT 调整。",
             "多条/并发务必 --async：入队即返回，3 车道消费；批量写法 --async --split。",
             "标签绑到「本次真正新建」的节点（已做差集），不会污染旧节点。",
+            "--scene working|coding 是独立管线（独立库、独立向量集合），与 chat 记忆互不可见，检索要带同样的 --scene。必须配 --trace（OpenAI messages 数组，含 tool_calls/role=tool 的工具轨迹）；没有轨迹会被拒（E_NO_TRACE）——SDK 对无轨迹的显式 scene 会静默回退 chat，这里在门口拦住。",
+            "coding 只记「文件坐标 + 决策」，不要贴整段代码：抽取预算约 200 字，代码放上去会把最有价值的坐标挤掉。想留 diff 版本链，就把 `git diff` 输出放进 tool 消息的 content（链层从文本里读 diff，读不到 assistant 的 tool_calls.arguments）。",
+            "--scene 写入恒同步（不走异步队列），返回即已落库。",
         ],
     },
     "search": {
@@ -317,12 +322,19 @@ CMD_META: dict[str, dict] = {
             'hy-mem --json search "上次定的部署方式" -n 5',
             'hy-mem --json search "网关限流" --tag infra',
             'hy-mem --json search "报名审批" --min-score 0.28',
+            'hy-mem --json search "请求超时怎么修的" --scene coding --workspace github.com/me/repo --chain-block',
         ],
-        "output": {"resp": "{count, min_score, elapsed_ms, tags_filter[], results:[{score, content, layer, tags}]}"},
+        "output": {
+            "resp": "{count, min_score, elapsed_ms, tags_filter[], results:[{score, content, layer, tags}]}",
+            "scene": "{scene, count, facts[], experiences[], chain_block, chain_used[], chain_note?}",
+        },
         "notes": [
             "默认阈值 0.35，是实测最优分割点；改写问法分数带窄，漏召回时先降到 0.30 再试。",
             "标签是后过滤，命中标签时会自动多取候选，所以 --tag 与 -n 可同时用。",
             "无命中是正常结果，不要据此编造记忆内容。",
+            "--scene working|coding 搜生产力/编码库（facts 事实段 + experiences 经验段两路），默认只搜 chat。两库互不覆盖，跨库要搜两次。",
+            "--chain-block 只在 --scene coding 生效：额外返回该文件的 diff 版本演进块，默认关（注入 diff 会明显加长返回体）。",
+            "带 --workspace 检索时，若 chain_block 由 hy-mem 兜底补齐，返回里会有 chain_note 说明（上游 SDK 在 workspace 作用域下会把链全滤掉）。",
         ],
     },
     "list": {
@@ -340,6 +352,29 @@ CMD_META: dict[str, dict] = {
         "examples": ["hy-mem --json get 3f9a2c1b"],
         "output": {"resp": "{memory_id, content, layer, tags[], create_time, ...}"},
         "notes": ["id 不存在返回 exit 2。"],
+    },
+    "outcome": {
+        "group": "读取",
+        "when": "手里有 request_id（add / add --scene 返回的那个），想看 SDK 最终写成了什么。比 queue_status 更进一步——queue_status 看的是 job 状态，这里看的是结果本身。",
+        "mutates": False,
+        "examples": ["hy-mem --json outcome 6fc9354b-6e8c-4bca"],
+        "output": {"resp": "{scene, fact_ids[], experience_ids[], ops_summary, ...SDK 原样}"},
+        "notes": [
+            "request_id 只在写入时带了（或 SDK 自动生成）才有；查不到就说明仍在写入或 id 不对。",
+            "异步队列的 job 状态用 queue_status，两者不是一个维度。",
+        ],
+    },
+    "profile": {
+        "group": "读取",
+        "when": "想知道「记忆里的这个人是谁」——姓名/职业/所在地这类 L0 基础信息，与检索出来的 L1 事实是两层。",
+        "mutates": False,
+        "examples": ["hy-mem profile", "hy-mem --json profile"],
+        "output": "{user, count, memories[], elapsed_ms}",
+        "notes": [
+            "L0 basic_info 是 add 时顺带抽取的，零 LLM/零 embedding，读取很快。",
+            "空结果说明还没有自述类记忆——add 一条「我叫 X，在 Y 做 Z」即可。",
+            "身份由 -u / HY_MEM_USER_ID / config.identity.userId 决定，与 search 同口径。",
+        ],
     },
     "delete": {
         "notes": [

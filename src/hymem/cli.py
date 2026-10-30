@@ -1404,6 +1404,40 @@ def cmd_outcome(args) -> int:
     return ok(r, args.json, str(r)[:200])
 
 
+def cmd_profile(args) -> int:
+    """S6：读 L0 用户画像（SDK get_user_basic_info，零 LLM/零 embedding）。
+
+    L0 basic_info 是 add 时顺带抽取的「这个人是谁」——姓名/职业/所在地/偏好，
+    与检索出来的 L1 事实是两层。以前只有写入没有读取，等于白抽。
+    """
+    rc = require_ready("读取用户画像")
+    if rc is not None:
+        return rc
+    client = make_client(args.mode)
+    uid = identity(args).get("user_id") or config_defaults_user()
+    try:
+        r = client.get_user_basic_info(user_id=uid) or {}
+    except Exception as e:  # noqa: BLE001
+        return fail(f"读取画像失败：{type(e).__name__}: {e}",
+                    hint="确认身份与数据目录正确；排查用 hy-mem doctor")
+    mems = [m for m in (r.get("memories") or []) if isinstance(m, dict)]
+    payload = {
+        "user": uid,
+        "count": len(mems),
+        "memories": mems,
+        "elapsed_ms": r.get("elapsed_ms"),
+    }
+    if not mems:
+        return ok(payload, args.json,
+                  f"用户 {uid} 还没有 L0 画像记忆——add 写入时会顺带抽取基础信息")
+    lines = [f"用户 {uid} 的 L0 画像（{len(mems)} 条）", ""]
+    for m in mems:
+        c = str(m.get("content") or "").strip()
+        if c:
+            lines.append(f"  - {c[:200]}")
+    return ok(payload, args.json, "\n".join(lines))
+
+
 def cmd_search(args) -> int:
     rc = require_ready("检索记忆")
     if rc is not None:
@@ -3410,6 +3444,9 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("outcome", help="按 request_id 查写入结果（含异步/scene 写入）")
     ps.add_argument("request_id", help="add 返回的 request_id")
     ps.set_defaults(func=cmd_outcome)
+
+    ps = sub.add_parser("profile", help="查看 L0 用户画像（基础信息，如姓名/职业）")
+    ps.set_defaults(func=cmd_profile)
 
     ps = sub.add_parser("list", help="列出记忆")
     ps.add_argument("-n", "--limit", type=int, default=20)
