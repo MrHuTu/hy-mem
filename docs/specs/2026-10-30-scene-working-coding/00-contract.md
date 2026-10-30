@@ -120,12 +120,14 @@ hy-mem search "..." --source mcp --exclude-source cli    # sources 过滤
 - `MEMORY_CODING_CHAIN_BLOCK_ENABLED=true` 由 `search --chain-block` 按次注入（还是全局开？**待拍板**，倾向按次——官方默认关是省 token）
 - 验收：同一文件两轮修改 → 检索 fact 挂两版 diff
 
-### S5 ultra 评估（只评估不实现）→ **已完成，结论：不接**
+### S5 ultra 评估（只评估不实现）→ **已完成，结论：暂不接；第一版归因有误，已更正**
 
-- 实测（2026-10-30，详见同目录 `S5-ultra-eval.md`）：ultra 起得来（kuzu 0.11.3 已装，init 4.2~4.4s 与 pro 无差）；30 条同主题库 evolve 一次 **4.0s / 4209 prompt tokens**、1 批 LLM —— 成本从来不是问题
-- **产出是问题**：唯一成簇的用例（25 facts → 1 簇 20 条）跑完仍 `schemas=0`、layer 只有 `l2_fact`、sweeper `no L6 basics` 跳过；6 条分散事实直接 `no_clusters` 空转
-- 判定：个人技术事实库不满足 L6 归纳前提（reconcile 还在合并同类事实，缺多版本证据）；等库到千条级或出现「把同类决策归纳成通则」的真实需求再重估
-- 重估触发条件与将来接入的改动面清单已写入 `S5-ultra-eval.md` 第五、六节
+- 实测（2026-10-30，详见同目录 `S5-ultra-eval.md`）：ultra 起得来（kuzu 0.11.3 已装，init 4.0~4.4s 与 pro 无差）；30 条同主题库 evolve 一次 4~34s、4.2k~5.5k prompt tokens —— 成本从来不是问题
+- **第一版结论错在哪**：把 `schemas=0` 读成「素材不满足 L6 前提」，实际日志显示 S2 agent 已被调用（`total_prompt_tokens=4209`）却只回 **7 个 completion token**（约一句 `{"operations": []}`），还报 `success=true` —— 是模型放弃，不是素材不够
+- **复议实测（同素材只换 `llm.model`）**：xiaomi-analysis-flash → 7 tokens / 0 schema；deepseek-v4.1-flash → 2772~3532 tokens / **2~3 个 schema**，内容经核对是真实归纳（把「data/ 不入库 + 发布走 Releases + 身份切换不删记忆」合成「本地数据主权 / 可逆操作」）。**用户质疑成立：是模型问题**
+- 第二重限制（这部分第一版没错）：DBSCAN 要「同主题但细节各异、≥4 条不被 reconcile 合并」—— 太分散不聚类（12 条两主题 → 0 簇、LLM 未调用），太相似被合并（30 条同一行为 → 落库 1 条）
+- 为何仍不接：默认模型出不了活且失败静默，换模型要给 evolve 单独分流的配置面；schema 对检索的实际增益仍无量化证据
+- 最小接入路径（`evolve --model`、空转检测、阈值可调、`search --layer schema`、探针转正）已写入 `S5-ultra-eval.md` 第七节
 
 ### S6 profile 命令
 
@@ -194,7 +196,8 @@ hy-mem search "..." --source mcp --exclude-source cli    # sources 过滤
 ### S5 ultra 评估（2026-10-30）
 
 - 产出 `S5-ultra-eval.md`（决策记录）。三次探针实测：6 条分散 → `no_clusters`；30 条同主题 → 1 簇 20 条、evolve 4.0s/4209 tokens，但 `schemas=0`、sweeper 跳过
-- 结论：**不接（缓做）**。成本可接受，产出为零；重估条件与改动面清单见该文档
+- 当日复核（同日 13:00 后）：第一版「素材不满足前提」归因**错误**。同素材换 deepseek-v4.1-flash 稳定产出 2~3 个 schema —— 真因是默认模型（意图分类模型）做不了开放归纳，且空转报 success。详见该文档 §二/§三
+- 结论：**暂不接（缓做）**。拦路的是模型能力 + 前置门禁太窄，不是素材；最小接入路径见该文档 §七
 
 ### S6 profile + helptext（2026-10-30，commit `23a2840`）
 
