@@ -280,7 +280,7 @@ chroma 嵌入式库不支持多进程共享——0.9.8 及以前，长驻进程�
 
 - 协议：JSON-RPC 2.0 换行分隔（MCP stdio 标准），宿主按会话拉起、随会话退出，不常驻。
 - 工具：`add_memory`（默认异步毫秒返回）/ `queue_status`（查异步落库进度）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `update_memory`（改内容，走演化链，须 `confirm: true`）/ `get_version` / `evolve`（**仅 ultra**，见下节）。
-- **工具集随模式变化**：`tools/list` 按当前模式生成——pro 下只有 8 个工具，`evolve` 根本不会出现。切模式后宿主需要**重连 MCP**（`tools/list` 是连接时快照）。`get_version` 返回 `memoryMode` / `capabilities`（`evolve` / `l6Search` / `scene` 三个布尔）可直接自检当前能不能用；pro 下硬调 `evolve` 会被拒并返回中文说明。
+- **工具集随模式变化，且是热切换**：`tools/list` 按当前模式实时生成——pro 下只有 8 个工具，`evolve` 根本不会出现。外部 `hy-mem config set mode=…` 改模式后，服务端在下一条消息时会主动发 `notifications/tools/list_changed`（initialize 时声明了 `listChanged` 能力），宿主收到自动重拉列表，**无需重连**；`tools/call` 另有实时校验兜底，列表过时硬调 `evolve` 也会被拒并返回中文说明。`get_version` 返回 `memoryMode` / `capabilities`（`evolve` / `l6Search` / `scene` 三个布尔）可直接自检当前能不能用。
 - 异步写进度：`add_memory` 返回的 `job_ids` 交给 `queue_status`（可选 `wait_seconds` 0~60 短阻塞），拿到每条 job 的 `status`（pending/running/done/dead）、耗时、`error`，以及 `drained`（队列是否清空）与 `worker.live`。**别用「search 空结果」反推落库与否**——那大概是还在队列里；`search_memory` 返回的 `pending_jobs` 字段也是同一信号。
 - 写入附加参数（`add_memory`）：`metadata`（对象，附加元数据）、`memory_at`（补录记忆发生时间，`2026-03-01` 这类写法；时间过滤按它算）、`request_id`（幂等写 id，同一 id 重复提交只落一条）。
 - 时间过滤与翻页：`search_memory` 和 `list_memories` 都支持 `since` / `until`（两种写法：相对值 `30m`/`12h`/`7d`/`30d`/`1y`，或 ISO 日期 `2026-01-01`）与 `offset` 翻页；响应带 `has_more` / `next_offset`，还有更多就带 offset 接着翻。`list_memories` 另支持 `order`（`desc` 最新在前 / `asc` 最旧在前）。时间过滤优先按 `memory_at`（补录的发生时间），没有补录才按写入时间。

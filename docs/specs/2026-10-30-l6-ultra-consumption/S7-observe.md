@@ -89,3 +89,32 @@ worker 被回收**导致的，与 mode 无关。
 
 修法：沙箱显式 `cfg["mode"] = "pro"`。理由——本套只验 MCP 协议全链路，ultra 的
 工具集差异由 `test_evolve` C 面覆盖。修完 31/31。
+
+### R5 模式热切换通知（C19，rc.3 打包后追加）
+
+用户问「evolve 能不能动态——只有 ultra 时才把工具交给 MCP」。核查结论：S4 的
+`_visible_tools()` 本就每次实时读 config（`cfgmod.load()` 无缓存），缺的是**主动
+通知**——模式变了宿主不知道，只能重连。
+
+补齐（`mcp/server.py`）：
+
+1. initialize 的 capabilities 声明 `tools.listChanged=true`
+2. serve 主循环每条消息处理前比对当前 mode 与 `_LAST_MODE`，变化则先写
+   `notifications/tools/list_changed` 再处理请求
+
+设计取舍：stdio 服务是被动循环，没有文件监听线程，外部 CLI 改 config 后要到
+**下一条消息**才被发现——这是「请求驱动的准实时」，不是事件级实时。宿主每轮
+对话都会发请求，够用；`tools/call` 的实时校验继续兜底「列表已刷新但还没重拉」
+的窗口期。
+
+端到端证据（沙箱，pro 起步）：
+
+```
+初始 tools: 8
+ping 后收到的通知: ['notifications/tools/list_changed']
+切换后 tools: 9 含 evolve: True
+切回后 tools: 8 | 通知累计: [...list_changed, ...list_changed]
+```
+
+转正：`tests/test_evolve.py` C4 五项（35 → 40）；`McpClient.call` 顺带补了
+通知收集（无 id 消息入 `self.notifications`，向后兼容）。

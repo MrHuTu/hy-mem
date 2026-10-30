@@ -1,6 +1,6 @@
 ---
 name: hy-dev
-description: hy-mem 项目的开发与修复流水线规范（只给开发用，不进产物、不铺到宿主）。改 cli/*.py、修用户报的 bug、准备发版打包时必读。规定三件事：① 开工先按改动类型分道（L0 文档 / L1 修复 / L2 功能 / L3 发版），避免每次都跑一遍全量；② 动手前先写「契约文档」（docs/specs/<日期>-<slug>/00-contract.md，唯一事实源），再按序号拆「分片文档」S1/R1…，每片一个 commit，完成后把状态与 commit 回写契约；③ 红测试一律先落 .local-test/，稳定后转正到 tests/test_*.py 计入 772 项验收。含十四条套件回归一条龙命令、提交纪律、打包五坑。
+description: hy-mem 项目的开发与修复流水线规范（只给开发用，不进产物、不铺到宿主）。改 cli/*.py、修用户报的 bug、准备发版打包时必读。规定三件事：① 开工先按改动类型分道（L0 文档 / L1 修复 / L2 功能 / L3 发版），避免每次都跑一遍全量；② 动手前先写「契约文档」（docs/specs/<日期>-<slug>/00-contract.md，唯一事实源），再按序号拆「分片文档」S1/R1…，每片一个 commit，完成后把状态与 commit 回写契约；③ 红测试一律先落 .local-test/，稳定后转正到 tests/test_*.py 计入 777 项验收。含十四条套件回归一条龙命令、提交纪律、打包五坑。
 ---
 
 # hy-dev · 开发与修复流水线
@@ -38,7 +38,7 @@ description: hy-mem 项目的开发与修复流水线规范（只给开发用，
 | **1 契约** | 写 `00-contract.md` §1 契约条款 + §2 分片表 | 写 `00-contract.md`，主体是**现象 + 复现命令 + 根因表** | `docs/specs/<日期>-<slug>/00-contract.md` |
 | **2 切片** | 按分片表逐片实现，**每片一个 commit**（可分多次提交，但一片只对应一个 commit） | 一个根因 = 一片 | 代码 + 分片文档 |
 | **3 测试** | 红测试落 `.local-test/`，绿后再转正 | 同左 | `repro_<slug>.py` / `case_<slug>.py` |
-| **4 回归** | 全量 14 套 772 项 + `check_secrets` | 同左 + **同一路径修前/修后证据** | 全绿日志 |
+| **4 回归** | 全量 14 套 777 项 + `check_secrets` | 同左 + **同一路径修前/修后证据** | 全绿日志 |
 | **5 回写** | 分片表填 `✓` + commit hash + 验证证据 | 同左 | 契约文档更新 |
 | **6 提交** | `code` 与 `docs` 两个 commit，不 push | 同左 | — |
 
@@ -118,7 +118,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 | 阶段 | 位置 | 命名 | 是否入库 |
 |---|---|---|---|
 | 开发期（红 → 绿） | `.local-test/` | `repro_<slug>.py`（修 bug）/ `case_<slug>.py`（功能） | 否（整目录被 `.gitignore` 忽略） |
-| 稳定后**转正** | `tests/test_*.py` | 并入现有 14 套中语义最近的一套，或新增 `test_<域>.py` | 是，计入 772 |
+| 稳定后**转正** | `tests/test_*.py` | 并入现有 14 套中语义最近的一套，或新增 `test_<域>.py` | 是，计入 777 |
 
 **转正判据**：这条用例是发版必跑的门禁吗？是 → 转正；只是一次性复现 → 留在 `.local-test/`。
 
@@ -156,9 +156,9 @@ for t in ('test_mcp', 'test_concurrency', 'test_scene', 'test_evolve'):
 .venv/Scripts/python.exe scripts/check_secrets.py      # 必须 0 ERROR；WARN 逐条确认
 ```
 
-期望：14 套 **772** 项全绿（cli 97 / ui 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 /
+期望：14 套 **777** 项全绿（cli 97 / ui 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 /
 queue 21 / oplog 25 / i18n 31 / encoding 10 = 离线 632；mcp 31 / concurrency 31 / scene 43 /
-evolve 35 = 真模型 140）。
+evolve 40 = 真模型 145）。
 数字对不上 = 有人加了用例没同步本行与 `README.md` 测试段，先对齐再继续。
 
 ## 5. 提交纪律

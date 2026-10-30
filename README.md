@@ -128,7 +128,7 @@ python scripts/build_exe.py
 ```bash
 python tests/test_cli.py        # CLI（97 项）
 python tests/test_setup_ui.py   # 设置向导 UI 级（40 项）
-# 共 14 套 772 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
+# 共 14 套 777 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
 # i18n / encoding / concurrency / scene / evolve。其中 mcp、concurrency、scene、evolve
 # 会真调模型（缺密钥时显式跳过，不产出假绿）
 ```

@@ -23,7 +23,7 @@
 | **L6 = ultra 专属** | `evolve` 仅 ultra 可调（SDK `client.py:2118` 硬拦 `RuntimeError`） |
 | **pro 下 L6 通道恒关** | `reader_base.py:1674` `schema_search_on = has_graph and schema_limit != 0`；pro 下 `graph_store=None`（实测 `NoneType`） |
 | **模式是安装级配置** | `config.json` 的 `mode`；现网安装 = `pro` |
-| **MCP 客户端只能看到启动时的模式** | `tools/list` 在 initialize 时快照，切模式需重连客户端 |
+| **MCP 客户端只能看到启动时的模式** | ~~`tools/list` 在 initialize 时快照，切模式需重连客户端~~ → C19：实时按 config 计算 + `notifications/tools/list_changed` 热通知，无需重连 |
 
 ### 1.3 条款
 
@@ -47,6 +47,7 @@
 | C16 | **沉淀模型必须能从「设置功能」里换**：`setup` 新增 `evolve` 项（面板一行 + `setup --step evolve` 单步）；只能填与 LLM 同一端点下的模型名（端点/密钥共用 llm），选完实测一次连通性，失败给「重填 / 仍保存 / 放弃」 | `ui/setup_wizard.py`、`ui/menu.py`、`ui/i18n.py` | `tests/test_setup.py` R 节 9 例（含两遍配置与落盘）；控制台 `setup evolve` 路由通 |
 | C17 | **零产出必须给解释，不得只报 +0**：`batches_completed == 0` 时按 `continuation_reason` 分支给话——`no_clusters` + 仍有未消费事实要说「素材太散/太像，S2 连 LLM 都没调」；`fresh=0` 说「素材已消费完，要 add 新内容」。CLI 在 0 批时**不得**用 `tasks_processed` 冒充簇数（实测 `tasks_processed=1` 而批次数 0，显示「处理 1 个簇」是误导） | `core/evolveops.py`、`cli.py cmd_evolve` | 真实库（32 条 fact、`no_clusters`）跑 `evolve` 输出「未成簇（素材太散或已被判重合并）　no_clusters，剩 32 条未消费」+ 提示段，不再只有 `schema +0 条` |
 | C18 | MCP `evolve` 工具描述必须覆盖 agent 实际会用错的四件事：**①** 不传 `model` 时用 `config.evolve.model`（未配回落 `llm.model`）；**②** 耗时数十秒到数分钟，别中途重试/并发重复调；**③** ultra 下 MCP 长驻持有图库（kuzu 独占），**这是唯一可行路径**，不能让用户改去 CLI；**④** 返回只看 `schemas_added`，`idle=true` 不等于故障、`note` 解释零增量 | `mcp/server.py` `ULTRA_TOOLS`、`skill/hy-mem/SKILL.md` | `tools/list` 里 evolve 描述含「唯一可行路径」「schemas_added」「耗时」；SKILL 有 MCP 场景段 |
+| C19 | **模式热切换无需重连**：`tools/list` 每次实时按 config.json 计算（非连接时快照）；initialize 的 capabilities 声明 `tools.listChanged=true`；serve 主循环每条消息前比对当前 mode 与上次记录，变化则先发 `notifications/tools/list_changed` 再处理请求（准实时：stdio 被动循环，下一条消息时才发现外部改动；宿主每轮都会发请求，足够）。`tools/call` 实时校验继续兜底列表过时的情形 | `mcp/server.py` `serve()`/`handle()`、`tests/test_evolve.py` | C 面 C4：initialize 声明 listChanged；外部改 config → ping 后收到且仅收到一条 list_changed；重拉 tools/list 含 evolve；切回 pro 再收一条并复原 |
 | C19 | **ultra 是单写者模式，必须在文档与错误提示里讲明**：kuzu 图库独占（`kuzu.Database(path)` 无 read_only），同一数据目录**第二进程必失败**（实测 2 进程并发 add → 1 成 1 败 `GraphStore (kuzu) init failed`；8 进程风暴全灭）。需并发写入的用户应留 pro/lite。hy-mem 不改 SDK，但错误提示不得只给泛化的 `doctor` 建议 | `README.md`、`skill/hy-mem/SKILL.md`、`core/clientops.py` 错误 hint | 并发双进程实测复现；文档写清「ultra 不支持多进程并发」 |
 
 ### 1.4 不改的边界
@@ -87,6 +88,7 @@
 | 2026-10-30 | 修正 C4 退出码 3 → 1 | `EXIT_INTERNAL(3)` 表示内部错误，而 pro 下调 evolve 是「当前配置下不支持」，与 `E_NO_TRACE` 同属用法类，应为 `EXIT_USAGE(1)` | S2 | 否 |
 | 2026-10-30 | 补记 C16（新增 S6） | 用户最初就要求「这个设置必须放到 CLI 的设置功能中去，不然用户无法更换模型」，初版契约漏写成条款（S1 只做了 `config set evolve.model`）。S1–S5 完成后补齐 `setup evolve` | S6 | 否（补记既有要求） |
 | 2026-10-30 | 补记 C17/C18（新增 S7） | 实际切 ultra 后跑真实库才暴露：32 条事实一条簇都没成，CLI 只输出「schema +0 条」，还把 `tasks_processed=1` 显示成「处理 1 个簇」——用户无从判断是素材问题还是坏了。同时 MCP 工具描述没写「不传 model 用哪个模型 / 耗时 / MCP 是唯一路径 / 返回看哪个字段」，agent 极易误用 | S7 | 否（可观测性与文档缺口） |
+| 2026-10-30 | 补记 C19（S4 增强，归 S7 片） | 用户问「evolve 能不能动态——只有 ultra 才交给 MCP」。核查发现 tools/list 本就实时计算，缺的是主动通知：模式变了宿主不知道、必须重连。补 `tools.listChanged` 能力声明 + serve 循环发 `notifications/tools/list_changed` | S7 | 否（S4 既有目标的补全：S4 只做到「列表实时 + 调用拦截」，未做主动通知） |
 
 ---
 
@@ -102,3 +104,4 @@
 | 全部 | S5 | `3354f7a` | `tests/test_evolve.py` 35 项 78s | 14 套 **772** 项全绿（离线 632 + 真模型 140） |
 | C16 | S6 | `04e83a9` | 同上 | `test_setup` R1–R9（首次指定 / 改回沿用 / 失败两分支 / `run_setup(scope=evolve)` 真落盘 / 不串 `llm.model`）；`test_setup_ui` G0 菜单含该行 |
 | C17–C18 | S7 | 见 `S7-observe.md` | 1.0.0-rc.3（待打包） | 真实库 32 条 fact：`hy-mem evolve` → 「未成簇（素材太散或已被判重合并）　no_clusters，剩 32 条未消费」+ 提示段；沙箱走配置链路 `.local-test/verify_evolve_config.py` 7/7（`model=deepseek-v4.1-flash` / `schemas_added=3` / completion 3214 / `llm.model` 跑完不变）；`test_mcp` 31/31 |
+| C19 | S7 | 本次 commit | 1.0.0-rc.3（待重打包） | `test_evolve` 40/40（C4 五项：listChanged 声明 / 切 ultra 通知 / 重拉含 evolve / 切回通知 / 列表复原）；端到端烟测 pro(8)→ultra(9 含 evolve)→pro(8) 通知各一条 |

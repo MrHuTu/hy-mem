@@ -116,7 +116,7 @@ Distribution is in directory or archive format; using 'onefile' mode is not reco
 ```bash
 python tests/test_cli.py          # CLI contract (97 cases)
 python tests/test_setup_ui.py     # Setup wizard, UI level (40 cases)
-# 14 suites / 772 cases total: cli / ui / menu / setup / setup_ui / mcp / queue / vdb /
+# 14 suites / 777 cases total: cli / ui / menu / setup / setup_ui / mcp / queue / vdb /
 # oplog / i18n / encoding / concurrency / scene / evolve. mcp, concurrency, scene and
 # evolve call real models (they skip explicitly without keys instead of faking green).
 ```
