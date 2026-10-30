@@ -1545,14 +1545,41 @@ def cmd_search(args) -> int:
             return fail(str(e), EXIT_USAGE)  # 坏时间格式是用法错，exit 1
         kw = {"created_after": since} if since is not None else {}
 
+        # S3：L6 由我们自己跑正路。给 SDK 传 schema_limit=0 把它的「正路语义 +
+        # 反路证据反查」一起关掉——反路不看 query，且注入时 score 被 RRF 融合分
+        # 覆盖（0.01~0.03，与语义分不是一个尺度），调用方没法过滤也没法解释。
+        want_schema = bool(getattr(args, "schema", True))
+        from hymem.core import config as _cfgmod_l6
+
+        _ev = (_cfgmod_l6.load().get("evolve") or {})
+        schema_limit = int(
+            getattr(args, "schema_limit", 0)
+            or _ev.get("schemaLimit")
+            or 3
+        )
+        schema_min = float(_ev.get("schemaMinScore") or 0.4)
+
         r = client.search(
             args.query,
             limit=fetch_limit,
             min_score=min_score,
+            schema_limit=0,
             **kw,
             **identity_lists(args),
         )
         items = _flatten_search(r)
+        # schema 单独取、单独给，绝不混进 items：混进去就会在 normal 命中不足
+        # limit 时补位冒充搜索结果，agent 会拿一条无关归纳当事实用。
+        schemas: list[dict] = []
+        schema_state = "off"
+        if want_schema:
+            uid = identity(args).get("user_id") or config_defaults_user()
+            from hymem.core.searchops import fetch_l6_schemas
+
+            schemas, schema_state = fetch_l6_schemas(
+                client, args.query, user_id=uid,
+                limit=schema_limit, min_score=schema_min,
+            )
         if not items and not want_tags:
             # 空结果有两种截然不同的原因：真的没有相似记忆，或者嵌入端点挂了。
             # SDK 会吞掉异常并返回空列表（日志里才有 401），不区分的话 agent
@@ -1579,7 +1606,18 @@ def cmd_search(args) -> int:
                 "elapsed_ms": r.get("elapsed_ms"),
                 "tags_filter": want_tags,
                 "results": items,
+                "schemas": schemas,
+                "schema_available": schema_state == "",
             }
+            if schema_state and schema_state != "off":
+                # disabled：pro/lite 没这条通道；error：图库/嵌入调用失败。
+                # 两种都不该让调用方以为「没有相关模式」，必须说清是「没有这条路」。
+                _payload["schema_note"] = (
+                    "L6 仅 ultra 模式提供（schema 存在 Kuzu 图库里）——"
+                    "切到 ultra 并跑过 evolve 才有模式可检索"
+                    if schema_state == "disabled"
+                    else f"L6 检索失败：{schema_state}"
+                )
             if not items:
                 # agent 只看 JSON，这条线索必须进结构体，否则它只会得出
                 # 「没有相关记忆」的结论，而真相是「还没落库」。
@@ -1614,6 +1652,20 @@ def cmd_search(args) -> int:
             pad = " " * len(head)
             for extra in body_lines[1:]:
                 lines.append(pad + extra)
+        # L6 单独一段：它不是「检索结果」，是「你碰到的这些事实背后有什么模式」。
+        # 混进上面的编号列表会让人以为它是按相关度排出来的第 N 条记忆。
+        if schemas:
+            lines.append("")
+            lines.append(c.dim(f"L6 行为模式（{len(schemas)} 条，按语义相似度）"))
+            for i, s in enumerate(schemas, 1):
+                txt = str(s.get("content") or "").replace("\n", " ")
+                lines.append(f"{i:>2}. [{s.get('score'):.3f}] {txt}")
+        elif want_schema and schema_state == "disabled":
+            lines.append("")
+            lines.append(c.dim("（L6 行为模式不可用：仅 ultra 模式提供，且需先跑过 evolve）"))
+        elif schema_state.startswith("error"):
+            lines.append("")
+            lines.append(c.dim(f"（L6 行为模式检索失败：{schema_state}）"))
         return ok(items, False, "\n".join(lines))
     finally:
         client.close()
@@ -3540,6 +3592,18 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--chain-block", action="store_true",
                     help="（coding）注入版本演进链块（本次调用临时开启）")
     ps.add_argument("--source-filter", default=None, help="按来源白名单过滤（如 mcp）")
+    ps.add_argument(
+        "--schema", dest="schema", action="store_true", default=True,
+        help="（ultra）附带 L6 行为模式：按语义检索 schema，独立成段不占 -n",
+    )
+    ps.add_argument(
+        "--no-schema", dest="schema", action="store_false",
+        help="只要普通记忆，不要 L6 行为模式",
+    )
+    ps.add_argument(
+        "--schema-limit", type=int, default=0,
+        help="L6 返回条数，默认取 config.evolve.schemaLimit（3）",
+    )
     ps.set_defaults(func=cmd_search)
 
     ps = sub.add_parser("outcome", help="按 request_id 查写入结果（含异步/scene 写入）")

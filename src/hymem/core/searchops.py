@@ -137,6 +137,82 @@ def _flatten_search(resp: dict) -> list:
     return items
 
 
+def fetch_l6_schemas(
+    client,
+    query: str,
+    *,
+    user_id: str = "default",
+    limit: int = 3,
+    min_score: float = 0.4,
+) -> tuple[list[dict], str]:
+    """L6 正路：把 query 向量化，去 l6_schema 层做语义检索。
+
+    返回 `(schemas, state)`，state 为空串表示正常，其余是原因：
+    `"disabled"`（非 ultra / 没有图库）、`"error: ..."`（调用失败）。
+
+    为什么不让 SDK 带 schema：SDK 的 schema 通道一票控两路——
+      * 正路：query 向量 vs l6_schema，有阈值（schema_min_score）
+      * 反路：拿 normal 命中的 fact id 反查「哪些 schema 引用了它」，**不看 query**、
+        不卡阈值
+    而且注入时 score 被 RRF 融合分覆盖（0.01~0.03 量级），和语义分不是一个
+    尺度，调用方既过滤不了也解释不了。实测「问向量库用什么」返回的 6 条 schema
+    全是「凭证不入库」「发布前跑测试」这类无关归纳，就是这么来的。
+
+    所以：给 SDK 传 schema_limit=0 把两路一起关掉，正路由这里单独跑，
+    阈值/条数/排序全在我们手里。反路（证据反查）首版不做（契约 C9）。
+    """
+    if getattr(client, "_mode", "") != "ultra":
+        return [], "disabled"
+    gs = getattr(client, "_graph_store", None)
+    es = getattr(client, "_embed_service", None)
+    if gs is None or es is None:
+        return [], "disabled"
+
+    async def _run():
+        from hy_memory.models.memory import MemoryLayer
+
+        qe = await es.embed(query)
+        # embed 的返回形态在不同 provider 下不一致：可能是 (vec, meta)、
+        # [[vec]] 或 vec 本身，逐层剥到一维 float 列表为止。
+        if isinstance(qe, tuple):
+            qe = qe[0]
+        if qe and isinstance(qe[0], (list, tuple)):
+            qe = qe[0]
+        return await gs.vector_search(
+            query_embedding=qe,
+            isolation_key="",
+            layers=[MemoryLayer.L6_SCHEMA],
+            limit=int(limit),
+            score_threshold=float(min_score),
+            user_id=user_id,
+        )
+
+    try:
+        import asyncio
+
+        rows = asyncio.run(_run()) or []
+    except Exception as e:  # noqa: BLE001
+        return [], f"error: {type(e).__name__}: {e}"
+
+    out: list[dict] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        content = str(r.get("content") or "").strip()
+        if not content:
+            continue
+        out.append(
+            {
+                "content": content,
+                "score": float(r.get("score") or 0),
+                "layer": "l6_schema",
+                "node_id": r.get("node_id"),
+            }
+        )
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out[:limit], ""
+
+
 def _pending_jobs() -> int:
     """队列里还有多少条没落库。
 

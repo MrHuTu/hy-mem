@@ -323,9 +323,10 @@ CMD_META: dict[str, dict] = {
             'hy-mem --json search "网关限流" --tag infra',
             'hy-mem --json search "报名审批" --min-score 0.28',
             'hy-mem --json search "请求超时怎么修的" --scene coding --workspace github.com/me/repo --chain-block',
+            'hy-mem search "这套系统在持久化上有什么讲究" --schema-limit 3',
         ],
         "output": {
-            "resp": "{count, min_score, elapsed_ms, tags_filter[], results:[{score, content, layer, tags}]}",
+            "resp": "{count, min_score, elapsed_ms, tags_filter[], results:[{score, content, layer, tags}], schemas[], schema_available, schema_note?}",
             "scene": "{scene, count, facts[], experiences[], chain_block, chain_used[], chain_note?}",
         },
         "notes": [
@@ -335,6 +336,8 @@ CMD_META: dict[str, dict] = {
             "--scene working|coding 搜生产力/编码库（facts 事实段 + experiences 经验段两路），默认只搜 chat。两库互不覆盖，跨库要搜两次。",
             "--chain-block 只在 --scene coding 生效：额外返回该文件的 diff 版本演进块，默认关（注入 diff 会明显加长返回体）。",
             "带 --workspace 检索时，若 chain_block 由 hy-mem 兜底补齐，返回里会有 chain_note 说明（上游 SDK 在 workspace 作用域下会把链全滤掉）。",
+            "schemas 是 L6 行为模式（「这人做事的一贯方式」），仅 ultra 模式且跑过 evolve 才有；pro 下恒为空并带 schema_note 说明。",
+            "schemas 独立成段：不占 -n、不混进 results、按语义相似度排序（与普通结果的分数同一尺度，可直接比较）。默认 3 条，--no-schema 可关。",
         ],
     },
     "list": {
