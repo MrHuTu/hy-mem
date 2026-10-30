@@ -1,7 +1,7 @@
 # Working/Coding 场景接入 + ultra 能力评估（scene 契约）
 
 - slug：`2026-10-30-scene-working-coding`
-- 状态：**§1 设计待用户拍板（未拍板不开工）**
+- 状态：**S0–S6 全部完成**（S5 为评估档，结论不接；其余已实现并通过 repro + 回归）
 - 参考：vendor/hy-memory（pin v1.0.5）`docs/scene_coding_usage.md`、`docs/usage.md`、`docs/hy_memory_search_skill.md`、`tests/coding/`
 - 上游 SDK：pip `hy-memory==2.0.5`（**coding 管线默认开启：MEMORY_CODING_ENABLED=true，缺的只是入口**）
 
@@ -120,10 +120,12 @@ hy-mem search "..." --source mcp --exclude-source cli    # sources 过滤
 - `MEMORY_CODING_CHAIN_BLOCK_ENABLED=true` 由 `search --chain-block` 按次注入（还是全局开？**待拍板**，倾向按次——官方默认关是省 token）
 - 验收：同一文件两轮修改 → 检索 fact 挂两版 diff
 
-### S5 ultra 评估（只评估不实现）
+### S5 ultra 评估（只评估不实现）→ **已完成，结论：不接**
 
-- 产出：一页决策记录——evolve() 成本（读全量 VDB + LLM 归纳，适合夜间批跑）、Kuzu 引入成本、L6 Schema 对我们 chat 记忆的实际增益
-- 倾向：**缓做**。L6 schema 对个人记忆库增益未验证，Kuzu 是新依赖；等 working/coding 数据积累后再评估
+- 实测（2026-10-30，详见同目录 `S5-ultra-eval.md`）：ultra 起得来（kuzu 0.11.3 已装，init 4.2~4.4s 与 pro 无差）；30 条同主题库 evolve 一次 **4.0s / 4209 prompt tokens**、1 批 LLM —— 成本从来不是问题
+- **产出是问题**：唯一成簇的用例（25 facts → 1 簇 20 条）跑完仍 `schemas=0`、layer 只有 `l2_fact`、sweeper `no L6 basics` 跳过；6 条分散事实直接 `no_clusters` 空转
+- 判定：个人技术事实库不满足 L6 归纳前提（reconcile 还在合并同类事实，缺多版本证据）；等库到千条级或出现「把同类决策归纳成通则」的真实需求再重估
+- 重估触发条件与将来接入的改动面清单已写入 `S5-ultra-eval.md` 第五、六节
 
 ### S6 profile 命令
 
@@ -180,7 +182,31 @@ hy-mem search "..." --source mcp --exclude-source cli    # sources 过滤
 - 验收 `repro_scene_mcp` **15/15**（M1 schema 齐全、M2-M5 四类参数拦截、M6 真轨迹写入 fact 恰 1 条、M7 facts 命中刚写入 fact_id、M8 scope 不匹配零命中带 hint、M9 chat 缺省仍异步入队）；回归 `test_cli` 97/97、`test_mcp` 31/31
 - 测试环境坑（登记备查）：进程内直调 `hymem.mcp.server` 必须先跑 `cli.load_env()`，否则 `config.json` 没映射成 `MEMORY_*` 环境变量 → SDK 退回默认 openai 端点、embedding 连不上、facts 落不了库（第一轮 12/15 的失败全源于此，非产品缺陷）
 
+### S4 diff 链（2026-10-30，commit `7b0ca9b`）
+
+- `config` 新增 `coding.chainRepo`：`config set` 时校验（目录存在 + 带 `.git`，worktree 的 `.git` 文件也算），非法路径当场拒；`to_env` 只在填了才注入 `MEMORY_CODING_CHAIN_REPO_ROOT`；`config show` / `config validate` 同步展示
+- `--chain-block` 按次开（默认关，省 token）：CLI 已有，MCP `search_memory` 补 `chain_block` 参数——长驻进程必须 `finally` 还原 env；顺带修正 **client 构造顺序**（`CodingConfig` 在 client 初始化时读 env，先造 client 再设开关等于没开）
+- **上游交互缺陷（已实测定位）**：`search(scene=coding, workspace_id=...)` 内部把 `scope=workspace_id` 传给 `chain_store.decorate`，而 `_in_scope` 是拿 scope 比**文件相对路径的段**（`src/client.py`）。编码场景的 workspace_id 通常是仓库 URL（`github.com/org/repo`），一个段都对不上 → 全部 thread 被滤掉 → `chain_block` 恒空（链库本身写得正常：1 thread / 2 rounds）
+- 兜底：`searchops.fill_chain_block()` 用同一份链库补一次 `scope=None` 的 decorate，只补块不动 facts，返回里带 `chain_note` 说明是兜底补的（不假装是 SDK 原样输出）
+- 另一条实测边界：链层从**文本**读 diff（`_chain_text` 只渲染 role+content，assistant 的 `tool_calls.arguments` 不进文本）——结构化 apply_patch 轨迹的 diff 抓不到，必须在 tool 消息 content 里贴 `git diff`，或配 chainRepo 走 git 反查。已写进 helptext
+- 验收 `repro_scene_chain` **15/15**（非法路径拒绝、合法路径落盘、留空不注入、两轮同文件改动 → 第1版/第2版两版入库、chain_block 含两版 diff、不带开关不注入、MCP 侧同样拿到块）；回归 `test_cli` 97/97、`test_mcp` 31/31、`test_setup` 139/139
+
+### S5 ultra 评估（2026-10-30）
+
+- 产出 `S5-ultra-eval.md`（决策记录）。三次探针实测：6 条分散 → `no_clusters`；30 条同主题 → 1 簇 20 条、evolve 4.0s/4209 tokens，但 `schemas=0`、sweeper 跳过
+- 结论：**不接（缓做）**。成本可接受，产出为零；重估条件与改动面清单见该文档
+
+### S6 profile + helptext（2026-10-30，commit `23a2840`）
+
+- `hy-mem profile` → SDK `get_user_basic_info`：L0 基础信息（姓名/职业/所在地）此前只有写入没有读取；空结果明确说「还没有 L0 画像」而不是静默空列表
+- helptext 补 S1/S2/S4 欠账：`add` 段写清 `--scene working|coding` 是独立管线、必须带 `--trace`、无轨迹报 `E_NO_TRACE`、coding 只记文件坐标+决策、diff 链要靠 tool 消息贴 `git diff`；`search` 段写清两库互不可见与 `--chain-block`；新增 `outcome` / `profile` 两段
+- 验收 `repro_scene_profile` **11/11**；回归 `test_cli` 97/97、`test_ui` 110/110
+
+### 全部收尾状态
+
+六个分片 S0–S6 全部完成（S5 为评估档）。代码 commit：`a85ea13`(S1) / `5b8c6e3`(S2) / `356658b`(S3) / `7b0ca9b`(S4) / `23a2840`(S6)。
+
 ### 待办
 
-- S4 diff 链 / S5 ultra 评估 / S6 profile 命令
-- 三个 scene repro（S1/S2/S3）待 S6 收尾后统一转正进 `tests/`，计入套件总数
+- 四个 scene repro（`repro_scene_add` / `repro_scene_mcp` / `repro_scene_chain` / `repro_scene_profile`）待统一转正进 `tests/`（真模型那部分并入 `test_mcp` 或独立 `tests/test_scene.py`），并计入套件总数
+- 版本号与打包：本批改动未发版（rc.2 之后的累积），下次发版时统一走 `build_exe` + Release
