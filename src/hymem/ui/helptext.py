@@ -263,6 +263,7 @@ CMD_META: dict[str, dict] = {
             "validate": "{ok, checks:[{name,pass,detail}]}",
         },
         "notes": ["set 用点路径，例如 embedding.model=xxx；改嵌入相关字段后要自己确认维度一致。",
+                  "模型怎么选：llm.model（S1 抽取/分类）推荐分析类小模型（如 tongyi-xiaomi-analysis-flash），evolve.model（S2 归纳，仅 ultra）推荐更强的通用大模型（如 deepseek-v4.1-flash）；evolve.model 留空回落 llm.model。",
                   "界面语言：hy-mem config set lang=en（或设置页的「界面语言」），立即生效。"],
     },
     "user": {
@@ -403,7 +404,7 @@ CMD_META: dict[str, dict] = {
             "非幂等：每次扫当前全量 VDB，add 一批再 evolve 一次才有新意义。",
             "素材要求「同主题、细节各异、≥4 条且没被 reconcile 合并」。太散不成簇（LLM 根本不会被调用），太像会被判重合并成一条。",
             "同一批事实只会被归纳一次：参与过的会被标成已用（evidenced_excluded），所以「用弱模型跑空转了，再换强模型重跑」通常仍然没产出——要么 add 新内容，要么一开始就用 --model 指定强模型。",
-            "模型选择很关键：意图分类模型（如 tongyi-*-analysis-flash）抽取很快但做不了开放归纳，实测 3850 prompt tokens 只回 7 个 token。这种空转会被标成 idle=true，框架仍报 success——别被 success 骗了。",
+            "模型怎么选：llm.model（S1）服务抽取/分类等封闭判定，推荐分析类小模型（快、便宜）；evolve.model（S2）做开放归纳，推荐更强的通用大模型。意图分类模型（如 tongyi-*-analysis-flash）做归纳实测 3850 prompt tokens 只回 7 个 token。这种空转会被标成 idle=true，框架仍报 success——别被 success 骗了。",
             "kuzu 是独占锁：MCP 服务长驻会一直持有图库，CLI 的 evolve 会失败。先停 MCP，或改用 MCP 里的 evolve 工具（跑在持有进程内）。",
             "--model 只影响本次，不改 config.json；想长期生效写 evolve.model。",
         ],
