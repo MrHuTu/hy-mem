@@ -209,12 +209,37 @@ def _schema_count(client, user_id: str = "default") -> int:
         return -1
 
 
-def evolve(model_override: str = "", max_batches: int | None = None, user_id: str = "default") -> dict:
+def evolve(
+    model_override: str = "",
+    max_batches: int | None = None,
+    user_id: str = "default",
+    client=None,
+) -> dict:
     """跑一次 S2 归纳。返回 summarize() 的结构（含 idle 判定与 schema 增量）。
 
-    调用方负责把异常转成用户能读的错误；这里只把 kuzu 锁单独标出来。
+    `client` 为空时现造一个（CLI 用，短命进程）；传入时复用它（MCP 用）——
+    MCP 长驻进程已经拿着图库，再开一个 client 必然撞 kuzu 独占锁
+    （`Could not set lock on file`）。复用时不重建 provider，只在内存里临时改
+    `llm.model`，跑完还原：LLMProvider 每次调用都读 config.llm.model，所以
+    这一次 evolve 会真的用上强模型，而同一个进程里的 add/search 不受影响。
     """
-    client = build_evolve_client(model_override=model_override)
+    from hymem.core import config as cfgmod
+
+    ev = cfgmod.load().get("evolve") or {}
+    model = str(model_override or ev.get("model") or "").strip()
+    own = client is None
+    old_model = ""
+    old_mt = None
+    if own:
+        client = build_evolve_client(model_override=model)
+    else:
+        llm = client._config.llm
+        old_model = getattr(llm, "model", "")
+        old_mt = getattr(llm, "agent_max_tokens", None)
+        if model:
+            llm.model = model
+        llm.agent_max_tokens = int(ev.get("maxTokens") or 8000)
+
     before = _schema_count(client, user_id)
     try:
         try:
@@ -257,10 +282,17 @@ def evolve(model_override: str = "", max_batches: int | None = None, user_id: st
                 )
         return res
     finally:
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001
-            pass
+        if own:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            # 还原临时覆盖：MCP 里这个 client 还要继续服务 add/search，
+            # 留着强模型会让之后的每次写入都变慢（S1 抽取 0.7s → 1.7s/条）。
+            client._config.llm.model = old_model
+            if old_mt is not None:
+                client._config.llm.agent_max_tokens = old_mt
 
 
 def _effective_model(override: str = "") -> str:

@@ -124,10 +124,48 @@ def _identity() -> dict:
     return {"user_id": u}
 
 
-def _client():
-    from hymem.core.clientops import make_client
+_CLIENT = None
 
-    return make_client(None)
+
+def _client():
+    """进程内复用同一个 client。
+
+    ultra 模式下 graph_store 会独占 kuzu 库文件（第二个实例报
+    `IO exception: Could not set lock on file ... kuzu_db`）。早期每次 tool call
+    都新建 client 且不关闭：pro 下无害（没有 graph_store），ultra 下第二次调用
+    就必然失败。MCP 是长驻进程，本来就该持有一个。
+
+    代价：ultra 下本进程会一直占着图库，CLI 的 evolve 会撞锁——所以 evolve
+    必须同时暴露成本进程里的工具（C12），而不是只留 CLI。
+    """
+    global _CLIENT
+    if _CLIENT is None:
+        from hymem.core.clientops import make_client
+
+        _CLIENT = make_client(None)
+    return _CLIENT
+
+
+def _close_client() -> None:
+    """放掉单例（仅供测试/排障；正常静默退出时进程结束自然释放）。"""
+    global _CLIENT
+    if _CLIENT is None:
+        return
+    try:
+        _CLIENT.close()
+    except Exception:  # noqa: BLE001
+        pass
+    _CLIENT = None
+
+
+def _memory_mode() -> str:
+    """当前记忆模式（lite/pro/ultra）。只读配置，不构造 client——要快。"""
+    try:
+        from hymem.core import config as cfgmod
+
+        return str(cfgmod.load().get("mode") or "pro")
+    except Exception:  # noqa: BLE001
+        return "pro"
 
 
 def _str_list(v, name: str) -> list[str] | None:
@@ -698,7 +736,11 @@ def _tool_search_memory(args: dict) -> str:
         kw["include_sources"] = inc
     if exc:
         kw["exclude_sources"] = exc
-    r = client.search(query, limit=fetch, min_score=min_score, user_ids=[u], **kw)
+    # L6 只走正路（与 CLI 同口径）：SDK 的两路一起关，正路由 hy-mem 自己跑。
+    # 反路不看 query 只按「哪些 schema 引用了命中的 fact」取，且注入时 score 被
+    # RRF 融合分覆盖（0.01~0.03），宿主既过滤不了也解释不了。
+    r = client.search(query, limit=fetch, min_score=min_score, schema_limit=0,
+                      user_ids=[u], **kw)
     items = _flatten_search(r)
     if not items:
         # SDK 吞掉嵌入端异常静默返回空列表（见 cmd_search 同款防护）——
@@ -724,6 +766,35 @@ def _tool_search_memory(args: dict) -> str:
         for it in page
     ]
     resp = {"query": query, "count": len(out), "hits": out, "offset": offset}
+    # L6 行为模式：独立字段，绝不混进 hits——混进去会在命中不足时补位冒充检索
+    # 结果，宿主会把一条无关归纳当事实用。仅 ultra 有；pro 下明说「没有这条路」。
+    want_schema = args.get("schema") is not False
+    schemas: list[dict] = []
+    schema_state = "off"
+    if want_schema:
+        from hymem.core import config as _cfgmod
+
+        from hymem.core.searchops import fetch_l6_schemas
+
+        _ev = _cfgmod.load().get("evolve") or {}
+        schemas, schema_state = fetch_l6_schemas(
+            client,
+            query,
+            user_id=u,
+            limit=max(0, min(int(args.get("schema_limit") or _ev.get("schemaLimit") or 3), 10)),
+            min_score=float(_ev.get("schemaMinScore") or 0.4),
+        )
+    resp["schemas"] = [
+        {"content": s.get("content"), "score": s.get("score"), "layer": "l6_schema"}
+        for s in schemas
+    ]
+    resp["schema_available"] = schema_state == ""
+    if schema_state and schema_state != "off":
+        resp["schema_note"] = (
+            "L6 仅 ultra 模式提供（schema 存在 Kuzu 图库）——切 ultra 并跑过 evolve 才有模式可检索"
+            if schema_state == "disabled"
+            else f"L6 检索失败：{schema_state}"
+        )
     if has_more:
         resp["has_more"] = True
         resp["next_offset"] = offset + limit
@@ -858,6 +929,37 @@ def _tool_update_memory(args: dict) -> str:
     )
 
 
+def _tool_evolve(args: dict) -> str:
+    """L6 认知归纳（ultra 专属）：把全量事实归纳成行为模式。
+
+    为什么它必须在 MCP 侧存在：ultra 下本进程长驻持有图库（kuzu 独占锁），
+    CLI 的 evolve 根本抢不到锁。只有跑在持有者进程内的这条路径才可行。
+    所以这里复用 _client()，绝不新开 client。
+    """
+    mode = _memory_mode()
+    if mode != "ultra":
+        # 工具列表本来就不该在 pro 下出现（C11），但客户端可能缓存了旧列表，
+        # 所以这里再实时校验一次——这是唯一可信的真源。
+        raise ParamError(
+            f"evolve 仅 ultra 模式可用（当前 mode={mode}）：L6 归纳出的 schema 要落 "
+            "Kuzu 图库，pro/lite 没有这条存储。切换：hy-mem config set mode=ultra，"
+            "然后重连本 MCP 服务（工具列表在连接时快照）。"
+        )
+    from hymem.core import evolveops
+
+    uid = str(args.get("user_id") or "").strip() or _identity()["user_id"]
+    model = str(args.get("model") or "").strip()
+    batches = args.get("batches")
+    res = evolveops.evolve(
+        model_override=model,
+        max_batches=int(batches) if batches is not None else None,
+        user_id=uid,
+        client=_client(),
+    )
+    res["user_id"] = uid
+    return json.dumps(res, ensure_ascii=False)
+
+
 def _tool_get_version(_args: dict) -> str:
     """版本与安装信息。自动升级链路的第一步：比对版本、定位要替换的安装根。"""
     import os
@@ -906,9 +1008,21 @@ def _tool_get_version(_args: dict) -> str:
             queue_health["note"] = "；".join(notes)
     except Exception:  # noqa: BLE001
         pass  # 队列库读不到不影响版本信息本身
+    mem_mode = _memory_mode()
+    dist_mode = "exe" if getattr(sys, "frozen", False) else "source"
     payload = {
         "version": helptext.VERSION,
-        "mode": "exe" if getattr(sys, "frozen", False) else "source",
+        # 记忆模式（决定有没有 L6 / scene）与打包形态（exe/source）是两件事，
+        # 早先共用 "mode" 这个名字，宿主极容易把 exe 当成「模式」来理解。
+        "memoryMode": mem_mode,
+        "capabilities": {
+            "evolve": mem_mode == "ultra",
+            "l6Search": mem_mode == "ultra",
+            "scene": mem_mode in ("pro", "ultra"),
+        },
+        "distMode": dist_mode,
+        # 兼容旧调用方，语义仍是打包形态（已 deprecated，用 distMode）
+        "mode": dist_mode,
         "installRoot": str(root),
         "configPath": str(cfg_path),
         "configured": configured,
@@ -1036,6 +1150,17 @@ TOOLS = [
                 },
                 "until": {"type": "string", "description": "只要这段时间之前，格式同 since"},
                 "offset": {"type": "integer", "description": "翻页偏移；上页返回 has_more 时用 next_offset 继续"},
+                "schema": {
+                    "type": "boolean",
+                    "description": (
+                        "是否附带 L6 行为模式（默认 true）。仅 ultra 模式且跑过 evolve 才有；"
+                        "pro 下恒为空并返回 schema_available=false，不报错"
+                    ),
+                },
+                "schema_limit": {
+                    "type": "integer",
+                    "description": "L6 条数，默认取 config.evolve.schemaLimit（3），上限 10",
+                },
             },
             "required": ["query"],
         },
@@ -1109,6 +1234,54 @@ TOOLS = [
     },
 ]
 
+# ultra 专属工具：只在 mode=ultra 时出现在 tools/list 里（C11）。
+# 为什么不干脆常驻+调用时拦截：宿主是照着工具列表决定要不要用的，pro 下看到
+# evolve 会去试，白花一轮往返。代价是切模式后工具列表要重连才刷新——切模式
+# 本来就是低频操作，而且 tools/call 还有实时二次校验兜底（C12）。
+ULTRA_TOOLS = [
+    {
+        "name": "evolve",
+        "description": (
+            "把已有的一批事实归纳成「行为模式」（L6 认知层）。**仅 ultra 模式可用**。"
+            "add 只做抽取和判重，不会自动归纳；想让人格化的做事风格沉淀下来才用这个。"
+            "非幂等：每次扫当前全量库，add 一批再跑一次才有新意义。"
+            "素材要求「同主题、细节各异」——太散不成簇（LLM 根本不会被调用），"
+            "太像会被判重合并成一条。同一批事实只会被归纳一次，所以用弱模型跑过一遍"
+            "之后换强模型重跑通常仍无产出，要 add 新内容或一开始就用 model 指定强模型。"
+            "返回里 idle=true 表示模型被调了但几乎没输出（多半是模型做不了开放生成），"
+            "别被 success=true 骗了。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "本次使用的归纳模型（不改配置）。强烈建议显式指定通用大模型："
+                        "意图分类小模型（如 tongyi-*-analysis-flash）做不了开放归纳，实测只回 7 个 token"
+                    ),
+                },
+                "batches": {
+                    "type": "integer",
+                    "description": "最多跑几批（调试用）；不填由 SDK 按簇数决定",
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "归纳哪个用户的记忆，默认取当前身份",
+                },
+            },
+        },
+    },
+]
+
+
+def _visible_tools() -> list[dict]:
+    """按当前记忆模式给出工具列表。"""
+    if _memory_mode() == "ultra":
+        return list(TOOLS) + list(ULTRA_TOOLS)
+    return list(TOOLS)
+
+
 _HANDLERS = {
     "add_memory": _tool_add_memory,
     "queue_status": _tool_queue_status,
@@ -1118,6 +1291,7 @@ _HANDLERS = {
     "delete_memory": _tool_delete_memory,
     "update_memory": _tool_update_memory,
     "get_version": _tool_get_version,
+    "evolve": _tool_evolve,
 }
 
 
@@ -1158,7 +1332,7 @@ def handle(msg: dict) -> dict | None:
     if method == "ping":
         return None if is_notification else _resp(id_, {})
     if method == "tools/list":
-        return None if is_notification else _resp(id_, {"tools": TOOLS})
+        return None if is_notification else _resp(id_, {"tools": _visible_tools()})
     if method == "tools/call":
         name = params.get("name")
         handler = _HANDLERS.get(name)
