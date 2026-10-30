@@ -17,7 +17,7 @@
 ## 功能特性
 
 - **MCP 服务**：内置 stdio MCP server（9 工具：add/search/get/update/delete/list + queue_status + get_version + **evolve**），任何支持 MCP 的客户端（WorkBuddy / Claude Desktop / Cursor 等）即插即用。**pro 模式下 evolve 不出现在 `tools/list` 里**，客户端拿不到也就调不动
-- **L6 认知层（仅 ultra）**：`evolve` 把已有的一批事实归纳成「行为模式」，检索时与事实一起按语义返回；归纳用哪个模型与抽取/判重分开配（`config set evolve.model=…`），弱模型能抽取但做不了开放归纳
+- **L6 认知层（仅 ultra）**：`evolve` 把已有的一批事实归纳成「行为模式」，检索时与事实一起按语义返回；归纳用哪个模型与抽取/判重分开配（`config set evolve.model=…`）——**抽取（`llm.model`）配分析类小模型**（如 `tongyi-xiaomi-analysis-flash`，封闭判定够用且快），**归纳（`evolve.model`）配更强的通用大模型**（如 `deepseek-v4.1-flash`）：弱模型能抽取但做不了开放归纳
 - ⚠️ **ultra 是单写者模式**：L6 图库用 kuzu（独占锁，无 `read_only`），**同一数据目录第二个进程必失败**（实测 2 进程并发 `add` → 1 成 1 败）。所以 ultra 下 CLI 与 MCP 不要同时用同一库；需要多进程/多子代理并发写入请留在 **pro**。MCP 长驻持有图库时，`evolve` 只能走 MCP 工具，CLI 的 `hy-mem evolve` 会撞锁
 - **语义检索**：基于向量相似度的记忆搜索，写入时 LLM 自动抽取事实与标签
 - **异步写入**：非阻塞式入队，自动拉起后台 worker 消费；队列状态全程可查（pending / dead / shadow）
@@ -70,7 +70,8 @@ python -m cli.hy_mem_cli menu
 配置文件位于 `config.json`，支持以下配置项：
 
 - **embedding**: 嵌入模型配置（provider、model、apiKey）
-- **llm**: 大语言模型配置
+- **llm**: 大语言模型配置。**S1 抽取模型，推荐分析类小模型**（信息抽取、场景分类等封闭判定需求），如 `tongyi-xiaomi-analysis-flash` —— 高频调用，快和便宜优先，不要求开放生成能力
+- **evolve**: L6 归纳配置（model / maxTokens 8000 / schemaLimit 3 / schemaMinScore 0.4）。**model 是 S2 归纳模型，推荐更强的通用大模型**（如 `deepseek-v4.1-flash`）—— 开放归纳是成败关键，分析类小模型做不了（实测只回 7 个 token 还自报 success）；留空则回落 `llm.model`（等于没分）。配置入口：`config set evolve.model=…` 或 `setup` 面板「沉淀模型」（仅 ultra 生效）
 - **storage**: 存储路径配置
 - **user_id**: 当前身份标识
 - **search**: 检索参数（min_score 等）

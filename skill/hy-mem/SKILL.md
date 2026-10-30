@@ -353,6 +353,8 @@ hy-mem config reset --yes                # 删除配置（含密钥）
 | 3 | LLM 模型 | **仅 pro / ultra 才问**；lite 自动跳过 |
 | 4 | 存储目录 | 显示体积与剩余空间；换目录可选迁移 |
 
+设置面板另有第 5 项「沉淀模型」（`setup evolve`）：L6 归纳用哪个模型，**仅 ultra**；见下文 L6 章节与「模型怎么选」。
+
 ### 控制台（0.9.14 起：命令式 shell）
 
 无参数运行 `hy-mem` 进的是**控制台**，形态照 bash 来：常驻提示符 `hy-mem ›`，敲命令干活，结果直接打在滚动区。**不清屏、不「按任意键继续」**，上一条结果往上滚就能看到。
@@ -418,7 +420,8 @@ hy-mem config reset --yes                # 删除配置（含密钥）
 | 身份 user_id | `identity` | 通用（共享）/ 独立名字（隔离）；切换只改身份，不动模型与数据 |
 | 向量模型（嵌入） | `setup embedding` | 换模型会实测维度；维度或语义空间变化时提示「备份并重建数据目录」 |
 | 运行模式 MEMORY_MODE | `setup mode` | 改后已有记忆不受影响 |
-| LLM 模型 | `setup llm` | pro 及以上用于抽取事实与自动打标签 |
+| LLM 模型 | `setup llm` | pro 及以上用于抽取事实与自动打标签。**S1 抽取模型，推荐分析类小模型**（信息抽取 / 场景分类等封闭判定），如 `tongyi-xiaomi-analysis-flash`——add 高频调用，快和便宜优先 |
+| 沉淀模型 | `setup evolve` | **仅 ultra**。S2 归纳模型，**推荐更强的通用大模型**（如 `deepseek-v4.1-flash`）；留空回落 `llm.model`（等于没分）。端点/密钥共用 LLM，只能填同一 baseUrl 下的模型名 |
 | 数据存储目录 | `storage` | 用量/剩余空间 → 迁移 / 恢复默认 / 备份 / 清空重建 / 清理队列库 |
 | 检索阈值 minScore | `setup search` | 0.30 宽松 / 0.35 平衡 / 0.45 严格 / 手动 |
 | 队列参数 | `setup queue` | 失败重试次数、单任务锁超时 |
@@ -480,7 +483,7 @@ hy-mem evolve --batches 2            # 最多跑几批（调试用）
 
 五条硬事实（踩过坑）：
 
-1. **模型是成败关键。** 意图分类小模型（`*-analysis-flash` 这类）能抽取但做不了开放归纳——实测 3850 prompt tokens 只回 **7 个 token**、0 条 schema，还自报 success。换通用大模型同一批素材立刻出 2~3 条。所以 `evolve.model` 与 `llm.model` 分开配，能单独指一个强模型。
+1. **模型是成败关键，两个模型按用途分工**。`llm.model`（S1）服务 add 时的信息抽取、场景分类等**封闭判定**，推荐分析类小模型（如 `tongyi-xiaomi-analysis-flash`）——高频调用，快和便宜优先；`evolve.model`（S2）做开放归纳，**推荐更强的通用大模型**（如 `deepseek-v4.1-flash`）。反向验证：意图分类小模型做归纳——实测 3850 prompt tokens 只回 **7 个 token**、0 条 schema，还自报 success；换通用大模型同一批素材立刻出 2~3 条。`evolve.model` 留空回落 `llm.model`，等于没分。
 2. **素材只能用一次。** 参与过归纳的事实会被标记排除，同一批再跑一次通常零产出（返回里会说明）。要新结果就 `add` 新内容。
 3. **不是每条事实都能成簇。** 需要「同主题、细节各异、≥4 条且没被判重合并」。太散 → 簇都成不了，LLM 根本不会被调用（`batches_completed: 0`）；太像 → 被 reconcile 合成一条。零产出时会打印**剩余未消费事实数**与原因（`no_clusters` / `no_facts`），据此判断是「素材太散」还是「已消费完」，别当成故障。
 4. **返回 `idle: true` 别当成功。** 它表示模型被调了但 completion < 150 token——多半是模型做不了这件事。看 `schemas_before/after` 增量才算数。

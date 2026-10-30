@@ -9,7 +9,7 @@ Local long-term memory service providing cross-session memory storage and semant
 - **Tag Management**: Flexible tag system supporting archiving and classification
 - **Interactive Configuration**: Visual setup wizard and health check
 - **Multi-Identity Support**: Distinguish different Agent memory spaces via `user_id`
-- **L6 Cognitive Layer (ultra only)**: `evolve` condenses a batch of facts into "behavior patterns" that are retrieved semantically alongside facts. Its model is configured separately (`config set evolve.model=…`) — small intent-classification models can extract but cannot do open-ended induction
+- **L6 Cognitive Layer (ultra only)**: `evolve` condenses a batch of facts into "behavior patterns" that are retrieved semantically alongside facts. Its model is configured separately (`config set evolve.model=…`) — **use a small analysis model for extraction** (`llm.model`, e.g. `tongyi-xiaomi-analysis-flash`: closed-set judgments, fast), **and a stronger general-purpose model for induction** (`evolve.model`, e.g. `deepseek-v4.1-flash`): small intent-classification models can extract but cannot do open-ended induction
 - ⚠️ **ultra is single-writer**: the L6 graph store uses kuzu (exclusive lock, no `read_only`), so a **second process on the same data directory always fails** (measured: 2 concurrent `add` → 1 ok / 1 fail). Do not run CLI and MCP against the same store in ultra; stay on **pro** if you need multi-process / multi-subagent concurrent writes. While MCP holds the graph, `evolve` only works through the MCP tool — the CLI `hy-mem evolve` will hit the lock
 
 ## Quick Start
@@ -58,7 +58,8 @@ A complete list of commands can be viewed via `python -m cli.hy_mem_cli help`.
 The configuration file is located at `config.json`, supporting the following items:
 
 - **embedding**: Embedding model configuration (provider, model, api_key)
-- **llm**: Large Language Model configuration
+- **llm**: Large Language Model configuration. This is the **S1 extraction model — prefer a small analysis model** (information extraction, scene classification and other closed-set tasks), e.g. `tongyi-xiaomi-analysis-flash`: called on every `add`, so speed and cost matter more than open-ended generation
+- **evolve**: L6 induction settings (model / maxTokens 8000 / schemaLimit 3 / schemaMinScore 0.4). **model is the S2 induction model — use a stronger general-purpose model** (e.g. `deepseek-v4.1-flash`): open-ended induction is make-or-break, and small analysis models cannot do it (measured: 7 completion tokens while self-reporting success). Leave empty to fall back to `llm.model` (i.e. no split). Entry points: `config set evolve.model=…` or the "沉淀模型" item in the `setup` panel (effective in ultra only)
 - **storage**: Storage path configuration
 - **user_id**: Current identity identifier
 - **search**: Retrieval parameters (min_score, etc.)
