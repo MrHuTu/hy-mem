@@ -59,7 +59,7 @@ The configuration file is located at `config.json`, supporting the following ite
 
 - **embedding**: Embedding model configuration (provider, model, api_key)
 - **llm**: Large Language Model configuration. This is the **S1 extraction model — prefer a small analysis model** (information extraction, scene classification and other closed-set tasks), e.g. `tongyi-xiaomi-analysis-flash`: called on every `add`, so speed and cost matter more than open-ended generation
-- **evolve**: L6 induction settings (model / maxTokens 8000 / schemaLimit 3 / schemaMinScore 0.4). **model is the S2 induction model — use a stronger general-purpose model** (e.g. `deepseek-v4.1-flash`): open-ended induction is make-or-break, and small analysis models cannot do it (measured: 7 completion tokens while self-reporting success). Leave empty to fall back to `llm.model` (i.e. no split). Entry points: `config set evolve.model=…` or the "沉淀模型" item in the `setup` panel (effective in ultra only)
+- **evolve**: L6 induction settings (model / maxTokens 8000 / schemaLimit 3 / schemaMinScore 0.25 — not the SDK default 0.4: induced schemas are written in English while Chinese queries score 0.17–0.34 against them, so 0.4 filters everything out). **model is the S2 induction model — use a stronger general-purpose model** (e.g. `deepseek-v4.1-flash`): open-ended induction is make-or-break, and small analysis models cannot do it (measured: 7 completion tokens while self-reporting success). Leave empty to fall back to `llm.model` (i.e. no split). Entry points: `config set evolve.model=…` or the "沉淀模型" item in the `setup` panel (effective in ultra only)
 - **storage**: Storage path configuration
 - **user_id**: Current identity identifier
 - **search**: Retrieval parameters (min_score, etc.)
