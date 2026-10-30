@@ -551,6 +551,93 @@ def step_llm(cfg: dict, _depth: int = 0, _in_first_wizard: bool = False) -> dict
 # --------------------------------------------------------------------------
 # 步骤 4/4：存储目录
 # --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 沉淀模型（L6 归纳，仅 ultra）
+# --------------------------------------------------------------------------
+def step_evolve(cfg: dict) -> dict:
+    """选 L6 归纳（`evolve`）用哪个模型。
+
+    只能填「**与 LLM 同一端点**下的另一个模型名」：`evolve` 只覆盖
+    `config.llm.model` 这一处，baseUrl / apiKey 仍走 llm 那套（见
+    core/evolveops.py）。所以这里不列跨厂商预设——选了也只会 404/401。
+    """
+    ev = dict(cfg.get("evolve") or {})
+    ev_def = cfgmod.DEFAULTS.get("evolve") or {}
+    llm = cfg.get("llm") or {}
+    base = str(llm.get("baseUrl") or "")
+    llm_model = str(llm.get("model") or "")
+    cur = str(ev.get("model") or "")
+
+    print()
+    print(tui.kv([
+        ("LLM 端点", base or "（未设，先配 LLM）"),
+        ("抽取模型（S1）", llm_model or "（未设）"),
+        ("沉淀模型（S2）", cur or f"沿用 {llm_model or '抽取模型'}"),
+        ("单轮输出上限", str(ev.get("maxTokens") or ev_def.get("maxTokens") or 8000)),
+    ]))
+    tui.note("抽取要求快、封闭判定；归纳是开放生成，要通用大模型——两者可以不是同一个。")
+    tui.note("实测：意图分类小模型（如 *-analysis-flash）做归纳只回 7 个 token、0 条结果。")
+
+    options = [
+        (f"沿用抽取模型（{llm_model or '未设'}）", "省事，但归纳质量取决于它", "1"),
+        (f"指定另一个模型（当前 {cur or '未指定'}）", "同一端点下换更强的通用大模型", "2"),
+    ]
+    idx = tui.select(
+        "沉淀模型（仅 ultra 用得到）",
+        options,
+        default=1 if cur else 0,
+        extra_hint="pro 模式下 evolve 不可用，这项配了也不生效",
+    )
+
+    if idx == 0:
+        ev["model"] = ""
+        if cur:
+            tui.ok(f"已改回沿用抽取模型（{llm_model or '未设'}）")
+        else:
+            tui.info("保持沿用抽取模型")
+        return ev
+
+    for attempt in range(3):
+        name = tui.ask(
+            "模型名",
+            default=cur or llm_model,
+            hint=f"必须与 LLM 端点同源（{base or '未设端点'}）；换厂商要连 baseUrl 一起改，本项做不到",
+        ).strip()
+        if not name:
+            raise tui.Aborted()
+        probe = dict(llm)
+        probe["model"] = name
+        print()
+        tui.spinner_line("正在真实调用一次，确认这个模型名在该端点上可用…")
+        ok, msg = probe_llm(probe)
+        if ok:
+            tui.ok(msg)
+            ev["model"] = name
+            tui.info("归纳能力要真跑一次 hy-mem evolve 才知道（能不能开放生成，探活看不出来）")
+            return ev
+
+        tui.err(msg)
+        if _is_auth_error(msg):
+            tui.note(f"端点 {base or '（未设）'} 不认这个 key/模型名；模型名拼错也会走到这里")
+        choice = tui.select(
+            "模型验证失败，怎么办？",
+            [
+                ("重新填写 retry", "再输一次模型名", "r"),
+                ("仍保存 save", "只是记下名字，真跑报错再说", "s"),
+                ("放弃本次设置 abort", "不写入任何改动", "x"),
+            ],
+            default=0 if attempt < 2 else 1,
+        )
+        if choice == 2:
+            raise tui.Aborted()
+        if choice == 1:
+            ev["model"] = name
+            tui.warn("已记下模型名，但没通过验证——真跑 evolve 大概率失败")
+            return ev
+    tui.warn("重试次数过多，保留原配置")
+    raise tui.Aborted()
+
+
 def _describe_dir(path: str) -> list[tuple[str, str]]:
     size, files = storage_ops.dir_usage(path)
     free = storage_ops.free_space(path)
@@ -685,6 +772,7 @@ STEPS = [
     ("embedding", "向量模型", step_embedding),
     ("mode", "运行模式 MEMORY_MODE", step_mode),
     ("llm", "LLM 模型", step_llm),
+    ("evolve", "沉淀模型（L6 归纳）", step_evolve),
     ("storage", "存储目录", step_storage),
     ("search", "检索阈值", step_search),
     ("queue", "队列参数", step_queue),
@@ -713,6 +801,12 @@ def _summary_rows(cfg: dict) -> list[tuple[str, str]]:
             ("LLM 密钥", (_mask(key) or "（未设置）") + src),
             ("TLS 校验", "跳过（insecure）" if llm.get("insecureTls") else "正常"),
         ]
+        ev = cfg.get("evolve") or {}
+        rows.append((
+            "沉淀模型",
+            str(ev.get("model") or f"沿用 {llm.get('model') or '抽取模型'}")
+            + ("" if cfg.get("mode") == "ultra" else "（仅 ultra 生效）"),
+        ))
     size, files = storage_ops.dir_usage(str((cfg.get("storage") or {}).get("dataDir") or ""))
     rows.append(("存储目录", str((cfg.get("storage") or {}).get("dataDir")) + (f"  ({files} 文件)" if files else "")))
     rows.append(("检索阈值", str((cfg.get("search") or {}).get("minScore"))))
@@ -722,7 +816,7 @@ def _summary_rows(cfg: dict) -> list[tuple[str, str]]:
 def _credential_diff(old_cfg: dict, cfg: dict) -> list[tuple[str, str, str]]:
     """新旧配置里「模型凭据」的差异行（旧值 → 新值），无差异返回空表。"""
     rows: list[tuple[str, str, str]] = []
-    for section, label in (("embedding", "向量模型"), ("llm", "LLM 模型")):
+    for section, label in (("embedding", "向量模型"), ("llm", "LLM 模型"), ("evolve", "沉淀模型")):
         old_s, new_s = old_cfg.get(section) or {}, cfg.get(section) or {}
         for field, name in (("baseUrl", "baseUrl"), ("model", "模型"), ("keyEnv", "密钥变量")):
             ov, nv = str(old_s.get(field) or ""), str(new_s.get(field) or "")
@@ -908,6 +1002,10 @@ def _apply_step(cfg: dict, key: str, value) -> dict:
             tui.warn(f"{value} 模式需要 LLM 抽取事实，现在就配（跳过则模式改动不保存）：")
             llm = step_llm(cfg, _in_first_wizard=True)
             cfg = {**cfg, "llm": llm}
+        if value == "ultra":
+            print()
+            tui.note("ultra 才有 L6 归纳（evolve）。归纳用哪个模型见「设置 → 沉淀模型」，"
+                     "默认沿用当前的抽取模型。")
     elif key == "search":
         cfg = {**cfg, "search": value}
     elif key == "queue":
@@ -961,25 +1059,33 @@ def _run_settings_menu(cfg: dict, old_cfg: dict) -> int:
     while True:
         emb = cfg.get("embedding") or {}
         llm = cfg.get("llm") or {}
-        rows = [
-            (f"向量模型 · {emb.get('model') or '（未设）'}", "baseUrl / 模型 / 密钥 / 实测维度", "e"),
-            (f"运行模式 · {cfg.get('mode') or 'pro'}", "lite 纯向量 / pro 加 LLM 抽取 / ultra 再加归纳", "m"),
+        ev = cfg.get("evolve") or {}
+        ev_label = str(ev.get("model") or ("沿用 %s" % (llm.get("model") or "LLM")))
+        # 第四列是 STEPS 的 key（或特殊项 v/x）——菜单行与 STEPS 的**顺序解耦**，
+        # 以后往中间插一项不用再挪索引（旧写法 idx==7 是硬编码的「退出」）。
+        menu = [
+            (f"向量模型 · {emb.get('model') or '（未设）'}", "baseUrl / 模型 / 密钥 / 实测维度", "e", "embedding"),
+            (f"运行模式 · {cfg.get('mode') or 'pro'}", "lite 纯向量 / pro 加 LLM 抽取 / ultra 再加归纳", "m", "mode"),
             (f"LLM 模型 · {llm.get('model') or '（未设）'}"
-             + ("（pro 必需）" if cfg.get("mode") in ("pro", "ultra") else ""), "事实抽取与自动标签", "l"),
-            (f"存储目录 · {(cfg.get('storage') or {}).get('dataDir') or '默认'}", "用量 / 迁移 / 备份", "s"),
-            (f"检索阈值 · {(cfg.get('storage') or {}).get('minScore') or (cfg.get('search') or {}).get('minScore') or 0.35}", "0.30 宽松 / 0.35 平衡 / 0.45 严格", "t"),
-            (f"队列参数 · 重试{(cfg.get('queue') or {}).get('maxRetries') or 3}次", "失败重试次数 / 锁超时", "q"),
-            ("查看当前配置", "打印全部生效配置", "v"),
-            ("完成，退出设置", "改动已保存，回到控制台", "x"),
+             + ("（pro 必需）" if cfg.get("mode") in ("pro", "ultra") else ""), "事实抽取与自动标签", "l", "llm"),
+            (f"沉淀模型 · {ev_label}"
+             + ("" if cfg.get("mode") == "ultra" else "（仅 ultra）"), "L6 归纳用哪个模型", "d", "evolve"),
+            (f"存储目录 · {(cfg.get('storage') or {}).get('dataDir') or '默认'}", "用量 / 迁移 / 备份", "s", "storage"),
+            (f"检索阈值 · {(cfg.get('storage') or {}).get('minScore') or (cfg.get('search') or {}).get('minScore') or 0.35}", "0.30 宽松 / 0.35 平衡 / 0.45 严格", "t", "search"),
+            (f"队列参数 · 重试{(cfg.get('queue') or {}).get('maxRetries') or 3}次", "失败重试次数 / 锁超时", "q", "queue"),
+            ("查看当前配置", "打印全部生效配置", "v", "v"),
+            ("完成，退出设置", "改动已保存，回到控制台", "x", "x"),
         ]
-        idx = tui.select("设置（选一项改一项，改完回这里）", rows, default=7)
-        if idx == 7:
+        rows = [(lab, det, hk) for lab, det, hk, _ in menu]
+        idx = tui.select("设置（选一项改一项，改完回这里）", rows, default=len(rows) - 1)
+        sel = menu[idx][3]
+        if sel == "x":
             return 0
-        if idx == 6:
+        if sel == "v":
             print()
             print(tui.kv(_summary_rows(cfg)))
             continue
-        key, _title, fn = STEPS[idx]
+        key, _title, fn = next(s for s in STEPS if s[0] == sel)
         print(tui.title(f"设置 · {_title}"))
         try:
             value = fn(cfg)

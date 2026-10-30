@@ -163,11 +163,19 @@ CMD_META: dict[str, dict] = {
     },
     "setup": {
         "group": "交互",
-        "when": "首次配置，或需要改向量模型/模式/LLM/存储目录时。agent 不要调用。",
+        "when": "首次配置，或需要改向量模型/模式/LLM/沉淀模型/存储目录时。agent 不要调用。",
         "mutates": True,
-        "examples": ["hy-mem setup", "hy-mem setup --step embedding", "hy-mem setup --step storage"],
+        "examples": [
+            "hy-mem setup",
+            "hy-mem setup --step embedding",
+            "hy-mem setup --step evolve",
+            "hy-mem setup --step storage",
+        ],
         "output": {"n/a": "写入 config.json 并打印自检结果"},
-        "notes": ["改嵌入模型会实测维度，并提示备份重建数据目录（旧向量与新模型不兼容）。"],
+        "notes": [
+            "改嵌入模型会实测维度，并提示备份重建数据目录（旧向量与新模型不兼容）。",
+            "「沉淀模型」= L6 归纳（evolve）用哪个模型，**只对 ultra 生效**；只能填与 LLM 同一端点下的另一个模型名，端点/密钥仍共用 LLM 那套。",
+        ],
     },
     "skill": {
         "group": "元信息",

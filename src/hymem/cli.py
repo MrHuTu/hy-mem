@@ -3515,11 +3515,11 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="输出 JSON 规格（同全局 --json）")
     ps.set_defaults(func=cmd_help)
     sub.add_parser("menu", help="交互式主界面（等价于不带参数运行）").set_defaults(func=cmd_menu)
-    ps = sub.add_parser("setup", help="交互式设置：向量模型 / 运行模式 / LLM / 存储目录")
+    ps = sub.add_parser("setup", help="交互式设置：向量模型 / 运行模式 / LLM / 沉淀模型 / 存储目录")
     ps.add_argument(
         "--step",
         default="all",
-        choices=["all", "embedding", "mode", "llm", "storage", "search", "queue"],
+        choices=["all", "embedding", "mode", "llm", "evolve", "storage", "search", "queue"],
         help="只改其中一项（默认 all=完整四步向导）",
     )
     ps.set_defaults(func=cmd_setup)

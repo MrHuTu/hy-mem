@@ -333,11 +333,14 @@ def scenario_settings_menu(base1: str) -> None:
     mkcfg(sb, base1)
     m = len(SEEN)
     # 1(向量) → 回车(自定义) → baseUrl/模型回车 → 三选一回车(存文件) → 探针
-    # → 覆盖(y) → 写入(y) → 回菜单 → 8(退出)
-    rc, out, cfg = drive("all", f"1\n\n\n\n\ny\ny\n8\n", sb,
+    # → 覆盖(y) → 写入(y) → 回菜单 → 9(退出)
+    # 菜单 2026-10-30 起多一行「沉淀模型」（插在 LLM 之后），退出从 8 变 9。
+    rc, out, cfg = drive("all", f"1\n\n\n\n\ny\ny\n9\n", sb,
                          {"MEMORY_EMBEDDER_API_KEY": EMB_KEY1})
     req = SEEN[m:]
     check("G1 设置菜单出现（每项带当前值）", "设置（选一项改一项" in out and "向量模型 · test-emb-1" in out, out[:400])
+    check("G0 菜单含「沉淀模型」项（L6 归纳，仅 ultra）",
+          "沉淀模型" in out and "（仅 ultra）" in out, out[:600])
     check("G2 key 固化进 config（apiKey=env 值、keyEnv 清空）",
           cfg.get("embedding", {}).get("apiKey") == EMB_KEY1
           and cfg.get("embedding", {}).get("keyEnv") == "",

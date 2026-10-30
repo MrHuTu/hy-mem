@@ -628,7 +628,7 @@ def cmd_stats(sh: Shell, items: list[str]) -> int:
 # --------------------------------------------------------------------------
 # 命令实现：设置
 # --------------------------------------------------------------------------
-_SCOPES = ("embedding", "mode", "llm", "storage", "search", "queue")
+_SCOPES = ("embedding", "mode", "llm", "evolve", "storage", "search", "queue")
 
 
 def cmd_setup(sh: Shell, items: list[str]) -> int:
@@ -678,6 +678,7 @@ def cmd_config(sh: Shell, items: list[str]) -> int:
     cfg = sh.reload()
     emb = cfg.get("embedding") or {}
     llm = cfg.get("llm") or {}
+    _ev_model = str((cfg.get("evolve") or {}).get("model") or "")
     pairs = [
         (tr("配置文件"), str(cfgmod.config_path())),
         (tr("首次设置"), tr("已完成") if cfg.get("setupComplete") else tr("未完成")),
@@ -693,6 +694,7 @@ def cmd_config(sh: Shell, items: list[str]) -> int:
          if cfgmod.resolve_llm_key(cfg) else tr("未设置")),
         (tr("存储目录"), str((cfg.get("storage") or {}).get("dataDir") or cfgmod.default_data_dir())),
         (tr("检索阈值"), str((cfg.get("search") or {}).get("minScore"))),
+        (tr("沉淀模型"), _ev_model or tr("沿用抽取模型（仅 ultra）")),
         (tr("队列"), tr("重试 {} 次 / 锁超时 {}s",
                        cfg.get("queue", {}).get("maxAttempts"),
                        cfg.get("queue", {}).get("lockTimeout"))),
@@ -988,7 +990,7 @@ COMMANDS: list[Command] = [
     Command("stats", "stats", "库体积 / 条数 / 写入延迟预期", cmd_stats, ("health",), (), "运维"),
     Command("doctor", "doctor", "环境自检：端到端连通性", cmd_doctor, ("doc",), (), "运维"),
     Command("log", "log [clear]", "最近 50 条操作记录", cmd_log, ("logs",), ("clear",), "运维"),
-    Command("setup", "setup [all|embedding|mode|llm|storage|search|queue]", "改配置；不带参数走完整向导",
+    Command("setup", "setup [all|embedding|mode|llm|evolve|storage|search|queue]", "改配置；不带参数走完整向导",
             cmd_setup, ("set", "model"), _SCOPES + ("all",), "设置"),
     Command("config", "config", "只读查看生效配置", cmd_config, ("cfg", "conf"), (), "设置"),
     Command("storage", "storage [backup|move <路径>|reset|wipe|vacuum]", "数据目录：用量 / 迁移 / 备份 / 重建",

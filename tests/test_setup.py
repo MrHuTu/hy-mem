@@ -681,6 +681,74 @@ def main() -> int:
     else:
         os.environ[ENV_NAME] = _saved_env
 
+    # ---- R. 沉淀模型（L6 归纳）：必须能从设置功能里换模型 ----
+    #
+    # 用户口径（2026-10-30）：「这个设置必须放到 CLI 的设置功能中去，不然用户无法更换模型」。
+    # 所以这里验的不是「有配置项」，而是「走 setup 面板/单步能改到并落盘」。
+    print("\n沉淀模型（evolve）· 两遍配置")
+    _saved_probe = setup_wizard.probe_llm
+    _probe_seen: list[str] = []
+
+    def _fake_probe(model_cfg, timeout=45):
+        _probe_seen.append(str(model_cfg.get("model") or ""))
+        return True, "stub ok"
+
+    setup_wizard.probe_llm = _fake_probe
+    _llm_base = {"preset": "custom", "baseUrl": "http://127.0.0.1:9/v1",
+                 "model": "small-extractor", "apiKey": "sk-x", "keyEnv": ""}
+    _cfg_r = {"mode": "ultra", "llm": dict(_llm_base),
+              "evolve": {"model": "", "maxTokens": 8000, "schemaLimit": 3, "schemaMinScore": 0.4}}
+
+    # 第一遍：选「指定另一个模型」（索引 1）+ 手填强模型名
+    tui.select = lambda q, options, default=0, **k: 1
+    tui.ask = lambda q, default="", **k: "strong-evolver"
+    _ev1 = setup_wizard.step_evolve(_cfg_r)
+    check("R1 首次能指定沉淀模型", _ev1.get("model") == "strong-evolver", repr(_ev1.get("model")))
+    check("R2 探针用的是新模型名", _probe_seen[-1:] == ["strong-evolver"], repr(_probe_seen[-1:]))
+    check("R3 其余 evolve 字段原样保留",
+          _ev1.get("maxTokens") == 8000 and _ev1.get("schemaLimit") == 3
+          and abs(float(_ev1.get("schemaMinScore") or 0) - 0.4) < 1e-9, str(_ev1))
+
+    # 第二遍（铁律：同一项至少测两遍）：已配过强模型 → 默认光标落在「指定」，改回沿用要清空
+    _defaults: list[int] = []
+
+    def _sel_track(q, options, default=0, **k):
+        _defaults.append(default)
+        return 0
+
+    tui.select = _sel_track
+    _ev2 = setup_wizard.step_evolve({**_cfg_r, "evolve": _ev1})
+    check("R4 第二次能改回「沿用抽取模型」", _ev2.get("model") == "", repr(_ev2.get("model")))
+    check("R5 已配过时默认光标落在「指定另一个模型」", _defaults[:1] == [1], str(_defaults[:1]))
+
+    # 验证失败分支：「仍保存」记下名字但不阻断；「放弃」必须抛 Aborted（不写配置）
+    setup_wizard.probe_llm = lambda m, timeout=45: (False, "✗ 401 unauthorized")
+    _seq = [1, 1]  # 选「指定」→ 验证失败菜单选「仍保存」
+    tui.select = lambda q, options, default=0, **k: _seq.pop(0)
+    tui.ask = lambda q, default="", **k: "bad-model"
+    _ev3 = setup_wizard.step_evolve(_cfg_r)
+    check("R6 验证失败仍保存会记下名字", _ev3.get("model") == "bad-model", repr(_ev3.get("model")))
+    _seq2 = [1, 2]  # 选「指定」→ 验证失败菜单选「放弃」
+    tui.select = lambda q, options, default=0, **k: _seq2.pop(0)
+    try:
+        setup_wizard.step_evolve(_cfg_r)
+        check("R7 验证失败选放弃 → Aborted", False, "没抛异常")
+    except tui.Aborted:
+        check("R7 验证失败选放弃 → Aborted", True)
+
+    # 走 run_setup(scope="evolve") 真落盘 —— 这才是用户按得到的路径
+    setup_wizard.probe_llm = _fake_probe
+    _seq3 = [1]
+    tui.select = lambda q, options, default=0, **k: _seq3.pop(0)
+    tui.ask = lambda q, default="", **k: "written-model"
+    setup_wizard.run_setup(scope="evolve")
+    _written = (cfgmod.load_raw().get("evolve") or {}).get("model")
+    check("R8 setup --step evolve 能落盘", _written == "written-model", repr(_written))
+    check("R9 没动 llm.model（沉淀模型是独立配置，不串到抽取）",
+          cfgmod.load_raw()["llm"]["model"] != "written-model",
+          cfgmod.load_raw()["llm"]["model"])
+    setup_wizard.probe_llm = _saved_probe
+
     bad = results.count(False)
     print(f"\n{'全部通过' if not bad else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")
     return 1 if bad else 0
