@@ -279,7 +279,8 @@ chroma 嵌入式库不支持多进程共享——0.9.8 及以前，长驻进程�
 ```
 
 - 协议：JSON-RPC 2.0 换行分隔（MCP stdio 标准），宿主按会话拉起、随会话退出，不常驻。
-- 工具：`add_memory`（默认异步毫秒返回）/ `queue_status`（查异步落库进度）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `update_memory`（改内容，走演化链，须 `confirm: true`）/ `get_version`。
+- 工具：`add_memory`（默认异步毫秒返回）/ `queue_status`（查异步落库进度）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `update_memory`（改内容，走演化链，须 `confirm: true`）/ `get_version` / `evolve`（**仅 ultra**，见下节）。
+- **工具集随模式变化**：`tools/list` 按当前模式生成——pro 下只有 8 个工具，`evolve` 根本不会出现。切模式后宿主需要**重连 MCP**（`tools/list` 是连接时快照）。`get_version` 返回 `memoryMode` / `capabilities`（`evolve` / `l6Search` / `scene` 三个布尔）可直接自检当前能不能用；pro 下硬调 `evolve` 会被拒并返回中文说明。
 - 异步写进度：`add_memory` 返回的 `job_ids` 交给 `queue_status`（可选 `wait_seconds` 0~60 短阻塞），拿到每条 job 的 `status`（pending/running/done/dead）、耗时、`error`，以及 `drained`（队列是否清空）与 `worker.live`。**别用「search 空结果」反推落库与否**——那大概是还在队列里；`search_memory` 返回的 `pending_jobs` 字段也是同一信号。
 - 写入附加参数（`add_memory`）：`metadata`（对象，附加元数据）、`memory_at`（补录记忆发生时间，`2026-03-01` 这类写法；时间过滤按它算）、`request_id`（幂等写 id，同一 id 重复提交只落一条）。
 - 时间过滤与翻页：`search_memory` 和 `list_memories` 都支持 `since` / `until`（两种写法：相对值 `30m`/`12h`/`7d`/`30d`/`1y`，或 ISO 日期 `2026-01-01`）与 `offset` 翻页；响应带 `has_more` / `next_offset`，还有更多就带 offset 接着翻。`list_memories` 另支持 `order`（`desc` 最新在前 / `asc` 最旧在前）。时间过滤优先按 `memory_at`（补录的发生时间），没有补录才按写入时间。
@@ -465,6 +466,25 @@ hy-mem stats --health --vacuum          # 顺带清理已完成 job 记录并 VA
 
 到达 WARN 后的处理顺序：`archive --by tag` 看分布 → `untag` 或 `delete` 收缩低频标签 → 必要时 `stats --health --vacuum`。
 
+## L6 认知层：把「做事风格」沉淀下来（仅 ultra）
+
+`add` 只做抽取 + 判重，产出一条条事实。要把一批同主题的事实归纳成**行为模式**（例如「本地数据主权 / 可逆操作」「严格边界 / 可审计写路径」），要显式跑 `evolve`：
+
+```bash
+hy-mem evolve                        # 用配置里的 evolve.model；没配就用 llm.model
+hy-mem evolve --model deepseek-v4.1-flash   # 本次临时换模型，不改配置
+hy-mem evolve --batches 2            # 最多跑几批（调试用）
+```
+
+四条硬事实（踩过坑）：
+
+1. **模型是成败关键。** 意图分类小模型（`*-analysis-flash` 这类）能抽取但做不了开放归纳——实测 3850 prompt tokens 只回 **7 个 token**、0 条 schema，还自报 success。换通用大模型同一批素材立刻出 2~3 条。所以 `evolve.model` 与 `llm.model` 分开配，能单独指一个强模型。
+2. **素材只能用一次。** 参与过归纳的事实会被标记排除，同一批再跑一次通常零产出（返回里会说明）。要新结果就 `add` 新内容。
+3. **不是每条事实都能成簇。** 需要「同主题、细节各异、≥4 条且没被判重合并」。太散 → 簇都成不了，LLM 根本不会被调用（`batches_completed: 0`）；太像 → 被 reconcile 合成一条。
+4. **返回 `idle: true` 别当成功。** 它表示模型被调了但 completion < 150 token——多半是模型做不了这件事。看 `schemas_before/after` 增量才算数。
+
+检索侧：ultra 下 `search` 会额外带 L6 schema（`schemas` 字段）。`--no-schema` 关掉，`--schema-limit N` 调条数（默认 3），`--schema` 强制开。schema 与事实**同尺度打分**（实测相关 query top1 均值 0.47、对照 0.25），所以按 `schemaMinScore=0.4` 卡真实相关，不带无关内容。
+
 ## 检索 / 读取
 
 ```bash
@@ -486,7 +506,7 @@ hy-mem --json stats
 
 ## 输出契约
 
-- `--json`：单行 JSON。检索返回 `{"count":n,"min_score":x,"tags_filter":[...],"results":[...]}`，条目含 `memory_id` / `content` / `score` / `layer` / `tags`（含合并后的 `_tags`）。
+- `--json`：单行 JSON。检索返回 `{"count":n,"min_score":x,"tags_filter":[...],"results":[...]}`，条目含 `memory_id` / `content` / `score` / `layer` / `tags`（含合并后的 `_tags`）。ultra 下另有 `schemas`（L6 行为模式，条目为 `content` / `score` / `layer: "l6_schema"`）、`schema_available`（布尔）与可选的 `schema_note`（为什么没带 schema）。
 - `add --json` 返回 `memory_id`（l1_raw 事件 id）、`memory_ids`（本次影响到的节点）、`tagged_ids`（真正打了标签的节点）。
 - exit code：`0` 成功，`1` 用法或环境错，`2` 运行时错（可修可重试），`3` 内部错误（程序缺陷，别重试），`130` 被 Ctrl+C 中断。
 - **全局选项位置无关**：`hy-mem search "x" --json` 与 `hy-mem --json search "x"` 等价（入口会先把 `--json/--quiet/--config/--fields/--mode/-u` 搬到前面），命令行怎么排都行。要传字面量 `--json` 当文本，用 `--` 隔开。

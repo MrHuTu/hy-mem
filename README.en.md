@@ -82,6 +82,8 @@ hy-mem/
 │   ├── check_secrets.py  # Pre-commit secret scan
 │   ├── test_cli.py       # CLI Testing
 │   └── ...
+├── tests/                 # 14 suites (cli / ui / menu / setup / setup_ui / mcp / queue / vdb /
+│                          #   oplog / i18n / encoding / concurrency / scene / evolve)
 ├── .local-test/           # Local scratch scripts (probes / experiments / repros), git-ignored
 ├── data/                  # Runtime data (git-ignored, auto-created)
 │   ├── data/             # Memory data (SQLite + Vector DB)
@@ -109,8 +111,11 @@ Distribution is in directory or archive format; using 'onefile' mode is not reco
 ### Testing
 
 ```bash
-python tests/test_cli.py
-python tests/test_ui.py
+python tests/test_cli.py          # CLI contract (97 cases)
+python tests/test_setup_ui.py     # Setup wizard, UI level (40 cases)
+# 14 suites / 772 cases total: cli / ui / menu / setup / setup_ui / mcp / queue / vdb /
+# oplog / i18n / encoding / concurrency / scene / evolve. mcp, concurrency, scene and
+# evolve call real models (they skip explicitly without keys instead of faking green).
 ```
 
 ## Notes

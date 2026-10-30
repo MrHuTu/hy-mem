@@ -16,7 +16,8 @@
 
 ## 功能特性
 
-- **MCP 服务**：内置 stdio MCP server（8 工具：add/search/get/update/delete/list + queue_status + get_version），任何支持 MCP 的客户端（WorkBuddy / Claude Desktop / Cursor 等）即插即用
+- **MCP 服务**：内置 stdio MCP server（9 工具：add/search/get/update/delete/list + queue_status + get_version + **evolve**），任何支持 MCP 的客户端（WorkBuddy / Claude Desktop / Cursor 等）即插即用。**pro 模式下 evolve 不出现在 `tools/list` 里**，客户端拿不到也就调不动
+- **L6 认知层（仅 ultra）**：`evolve` 把已有的一批事实归纳成「行为模式」，检索时与事实一起按语义返回；归纳用哪个模型与抽取/判重分开配（`config set evolve.model=…`），弱模型能抽取但做不了开放归纳
 - **语义检索**：基于向量相似度的记忆搜索，写入时 LLM 自动抽取事实与标签
 - **异步写入**：非阻塞式入队，自动拉起后台 worker 消费；队列状态全程可查（pending / dead / shadow）
 - **标签管理**：灵活的标签系统，支持归档与分类
@@ -59,8 +60,9 @@ python -m cli.hy_mem_cli menu
 | `mcp` / `serve` | 启动 MCP stdio 服务 / HTTP 服务 |
 | `setup` / `config` / `user` / `install` | 设置菜单 / 配置管理 / 身份切换 / 注册到 PATH |
 | `history` / `log` / `skill` / `migrate` / `version` | 操作历史 / 运行日志 / Skill 安装 / 数据迁移 / 版本 |
+| `evolve` | 归纳 L6 行为模式（**仅 ultra**；pro 下退 1 并给出切换提示） |
 
-完整 31 个子命令说明见 `hy-mem help`。
+完整 34 个子命令说明见 `hy-mem help`。
 
 ## 配置说明
 
@@ -91,11 +93,11 @@ hy-mem/
 │   │   ├── setup_wizard.py#   设置向导与设置菜单
 │   │   └── ...            #   helptext / i18n / skill_ops
 │   └── mcp/
-│       ├── server.py      # MCP 服务（8 工具，handle 协议无关）
+│       ├── server.py      # MCP 服务（9 工具，pro 下 8 个；evolve 仅 ultra 可见）
 │       └── transport_http.py  # HTTP transport（--transport http，默认 stdio 不变）
 ├── skill/                 # Skill 定义
 ├── scripts/               # 业务脚本（构建 / 闸门 / check_secrets / check_layering）
-├── tests/                 # 13 套测试（cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog / i18n / encoding / concurrency / scene）
+├── tests/                 # 14 套测试（cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog / i18n / encoding / concurrency / scene / evolve）
 ├── .local-test/           # 本地临时脚本（探针 / 实验 / bug 复现），整目录不入库
 ├── data/                  # 运行时数据（不入库，程序自建）
 └── AGENTS.md             # 项目交接文档
@@ -124,9 +126,9 @@ python scripts/build_exe.py
 ```bash
 python tests/test_cli.py        # CLI（97 项）
 python tests/test_setup_ui.py   # 设置向导 UI 级（40 项）
-# 共 13 套 726 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
-# i18n / encoding / concurrency / scene。其中 mcp、concurrency、scene 会真调模型
-# （缺密钥时显式跳过，不产出假绿）
+# 共 14 套 772 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
+# i18n / encoding / concurrency / scene / evolve。其中 mcp、concurrency、scene、evolve
+# 会真调模型（缺密钥时显式跳过，不产出假绿）
 ```
 
 ## 注意事项

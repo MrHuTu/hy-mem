@@ -28,7 +28,7 @@
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
 | 源码规模 | **35 个 py，16900 行**（`cli/` 20 个 12634 行 + `scripts/` 15 个 4266 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **633**（CLI 84 / UI 110 / setup 139 / setup_ui 40 / vdb 36 / MCP 25 / queue 21 / oplog 25 / i18n 31 / encoding 10 / menu 112） | 见 §8 |
+| 测试用例 | **772**（CLI 97 / UI 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / MCP 31 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 35） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 33 MB）；对外分发 `dist/hy-mem-0.9.13-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **160 s**（含压缩包 24 s） | 构建日志末行 |
@@ -77,7 +77,7 @@ D:\tools_open\agent-bridge\
 │   ├── check_secrets.py (260) ← 提交前密钥/隐私闸门（ERROR 挡提交，WARN 要人看一眼）
 │   ├── _secrets.py      (121) ← 密钥唯一入口：只读 `MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`
 │   ├── drive_setup.py    (90) ← **黑盒驱动**：真 CLI 子进程 + 管道喂键，复现/回归交互配置 bug（见 §8.1）
-├── tests\                     ← **13 套测试**（cli/ui/menu/setup/setup_ui/mcp/queue/vdb/oplog/i18n/encoding/concurrency/scene）
+├── tests\                     ← **14 套测试**（cli/ui/menu/setup/setup_ui/mcp/queue/vdb/oplog/i18n/encoding/concurrency/scene/evolve）
 │   ├── test_cli.py      (466) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
 │   ├── test_ui.py       (501) ← 按键与渲染 + 连续写入的循环语义（假终端，无需真 TTY）
 │   ├── test_setup.py    (690) ← 向导 / 存储运维 / 队列积压（不发网络请求）
@@ -88,7 +88,8 @@ D:\tools_open\agent-bridge\
 │   ├── test_queue.py    (190) ← 队列核心（旧库迁移 / claim 原子性 / 退避 / 死信）
 │   ├── test_mcp.py      (338) ← MCP stdio 八工具端到端
 │   ├── test_concurrency.py (192) ← 并发写 + 检索风暴（独立沙箱）
-│   └── test_scene.py    (359) ← scene 全量：schema/拦截/两轮编码写入+diff 链/chain_block/profile（真模型，缺密钥显式跳过）
+│   ├── test_scene.py    (359) ← scene 全量：schema/拦截/两轮编码写入+diff 链/chain_block/profile（真模型，缺密钥显式跳过）
+│   └── test_evolve.py   (281) ← L6 认知层：pro 拦截 / 空转检测 / 强模型归纳出 schema / --model 不改配置 / MCP 工具按 mode 过滤（真模型，缺密钥显式跳过）
 │
 ├── .local-test\               ← 临时/诊断脚本，**整目录 `.gitignore` 忽略、永不入库**
 │                                 probe_*（巡检/探针）、graph_ab_*（检索 A/B 实验）、
@@ -335,14 +336,20 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 
 ---
 
-## 7. 命令面（29 个）
+## 7. 命令面（34 个）
 
 | 分组 | 命令 |
 |---|---|
-| 元信息 / 交互 | `help` `menu` `setup` `config` `user` `doctor` `install` `skill` `tui-test` |
-| 写入 / 读取 | `add` `search` `list` `get` `delete` `update` `forget` `finalize` `history` |
-| 异步队列 | `worker` `queue` `drain` `retry` |
-| 标签 / 统计 | `tags` `untag` `archive` `stats` |
+| 元信息 | `help` `skill` `install` `version` |
+| 交互 | `menu` `setup` `tui-test` |
+| 配置 | `migrate` `config` `user` |
+| 诊断 | `doctor` `stats` `log` |
+| 写入 | `add` `delete` `forget` `update` `finalize` |
+| 读取 | `search` `list` `get` `outcome` `profile` `history` |
+| **维护 / 认知层** | `evolve`（**仅 ultra**；pro 下 exit 1 并在 `tools/list` 里隐藏） |
+| 队列 | `serve` `worker` `queue` `drain` `retry` |
+| 接入 | `mcp` |
+| 标签 | `tags` `untag` `archive` |
 
 **全局选项**（位置无关，`hoist_globals` 负责）：`--json` `--quiet` `--no-color` `--verbose` `--help-json` `--fields` `--config` `--mode` `--data-dir` `-u/--user` `-a/--agent` `-s/--session` `--version`。
 命令级：`delete --dry-run` / `forget --dry-run --yes`。
@@ -356,17 +363,18 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | 套件 | 用例 | 覆盖 | 跑法 |
 |---|---|---|---|
 | `tests/test_ui.py` | **110** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、**历史翻找 / Tab 补全 / Ctrl+R 反查 / Ctrl+D / Ctrl+K**、宽度裁剪、不折行、菜单导航、控制台连写连查 | `.venv/Scripts/python.exe tests/test_ui.py` |
-| `tests/test_setup.py` | **139** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）** | `.venv/Scripts/python.exe tests/test_setup.py` |
+| `tests/test_setup.py` | **148** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）**、**沉淀模型设置项两遍（R 节：首次指定 / 改回沿用 / 验证失败两分支 / 真落盘 / 不串 llm.model）** | `.venv/Scripts/python.exe tests/test_setup.py` |
 | `tests/test_cli.py` | **97** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
 | `tests/test_queue.py` | **21** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe tests/test_queue.py` |
 | `tests/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe tests/test_concurrency.py [exe]` |
-| `tests/test_mcp.py` | **31** | MCP stdio 八工具端到端：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe tests/test_mcp.py [exe]` |
+| `tests/test_mcp.py` | **31** | MCP stdio 工具端到端（pro 下 8 个；ultra 多一个 `evolve`）：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe tests/test_mcp.py [exe]` |
 | `tests/test_scene.py` | **43** | scene（working/coding）全量：tools/list schema、参数拦截（无轨迹/二选一/branch 缺 workspace/chat 传 messages·chain_block）、两轮同文件写入 → 独立 coding 库 + diff 链两版 → chain_block 两版、默认不注入、scope 不匹配零命中、config chainRepo 校验、profile 读 L0 画像、helptext 同步 | `.venv/Scripts/python.exe tests/test_scene.py [exe]` |
+| `tests/test_evolve.py` | **35** | L6 认知层四面向：A 离线（help/config/validate/exit）、B CLI（pro 拦截 exit 1）、C MCP（pro 下 tools/list 无 evolve、tools/call 被拒）、D ultra 真模型（弱模型空转 `completion<150` 判 idle / 强模型产出 schema / `--model` 跑完 `config.json` 不变 / 同素材二次无产出）；缺密钥 D 面显式跳过 | `.venv/Scripts/python.exe tests/test_evolve.py [exe]` |
 | `tests/test_vdb_endpoint.py` | **36** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe tests/test_vdb_endpoint.py` |
 | `tests/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe tests/test_encoding.py` |
 | `tests/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe tests/test_oplog.py` |
-| `tests/test_menu.py` | **112** | 控制台全覆盖：18 条命令逐个跑通、旧菜单 18 项逐一映射到命令、别名/补全/切词、未知命令给建议、真 `run_menu` 管道循环（命令后仍回到提示符、不「按任意键」、EOF 干净退出）、历史落盘与去重 | `.venv/Scripts/python.exe tests/test_menu.py` |
-| `tests/test_setup_ui.py` | **40** | 设置向导 UI 级：真 CLI 子进程 + 管道喂键 + 本地假 OpenAI 端点（只认自家 key）。覆盖首次/二次选当前项/自定义跨端点/换预设 EOF 中止/LLM 同型/同端点三选一显式换 key/设置菜单+key固化+pro联动/失败菜单分流+stdin中文修复；抓到并修掉 3 个「第二次配置」家族 bug（自定义 same_endpoint 写死、默认光标落预设、ask_secret 空回车放行） | `.venv/Scripts/python.exe tests/test_setup_ui.py`（不打真云厂商） |
+| `tests/test_menu.py` | **113** | 控制台全覆盖：18 条命令逐个跑通、旧菜单 18 项逐一映射到命令、别名/补全/切词、未知命令给建议、真 `run_menu` 管道循环（命令后仍回到提示符、不「按任意键」、EOF 干净退出）、历史落盘与去重 | `.venv/Scripts/python.exe tests/test_menu.py` |
+| `tests/test_setup_ui.py` | **41** | 设置向导 UI 级：真 CLI 子进程 + 管道喂键 + 本地假 OpenAI 端点（只认自家 key）。覆盖首次/二次选当前项/自定义跨端点/换预设 EOF 中止/LLM 同型/同端点三选一显式换 key/设置菜单+key固化+pro联动/失败菜单分流+stdin中文修复；抓到并修掉 3 个「第二次配置」家族 bug（自定义 same_endpoint 写死、默认光标落预设、ask_secret 空回车放行） | `.venv/Scripts/python.exe tests/test_setup_ui.py`（不打真云厂商） |
 | `tests/test_i18n.py` | **31** | 中英切换：默认 zh 逐字不变、`HY_MEM_LANG=en` 生效、缺译回落中文、`config set lang=en` 读到 en | `.venv/Scripts/python.exe tests/test_i18n.py` |
 
 ```bash
@@ -379,7 +387,7 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe tests/test_cli.p
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：十一套全绿（cli 84 / ui 110 / setup 139 / setup_ui 40 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 31 / encoding 10 / menu 112 = **633**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：十四套全绿（cli 97 / ui 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / mcp 31 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 35 / concurrency 场景 = **772**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
 
 ### 8.1 怎么测 CLI —— 四条铁律（2026-10-28 补，源自 401 事故）
 
@@ -807,7 +815,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 | 阶段 | 位置 | 入库 |
 |---|---|---|
 | 开发期红 → 绿 | `.local-test/repro_<slug>.py` / `case_<slug>.py` | ❌（整目录被忽略） |
-| 稳定后**转正** | `tests/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 633** | ✅ |
+| 稳定后**转正** | `tests/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 772** | ✅ |
 
 判据：这条用例是发版必跑的门禁吗？是 → 转正；只是一次性复现 → 留 `.local-test/`。
 
