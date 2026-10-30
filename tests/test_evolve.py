@@ -217,6 +217,9 @@ def main() -> int:
         check("C1 search_memory 有 schema 参数",
               "schema" in (tools.get("search_memory", {}).get("inputSchema", {})
                            .get("properties", {})), "")
+        check("C1 search_memory 有 schema_min_score 参数",
+              "schema_min_score" in (tools.get("search_memory", {}).get("inputSchema", {})
+                                     .get("properties", {})), "")
 
         data, is_err, text = mcp.tool("evolve", {})
         check("C2 硬调 evolve 被拒（isError）", is_err, text[:100])
@@ -261,6 +264,74 @@ def main() -> int:
         check("C4 切回后不含 evolve", "evolve" not in tools3, sorted(tools3))
     finally:
         mcp.close()
+
+    # ================= E L6 状态可见性（离线桩，R2/R3） =================
+    # 根因复盘（docs/specs/2026-10-30-l6-schema-empty/）：图库未就绪时 vector_search
+    # 静默返回 []，「有 schema 但被阈值滤空」与「库是空的」返回完全一致——调用方
+    # 无从分辨。E 节用桩 client 把四种 state 逐一钉住。
+    print("\n== E L6 状态可见性（离线桩）==")
+    import types
+
+    from hymem.core.searchops import fetch_l6_schemas, schema_state_meta
+
+    class _StubES:
+        async def embed(self, _q):
+            return [0.1] * 8
+
+    class _StubGS:
+        def __init__(self, available=True, rows=None, nodes=None):
+            self._available = available
+            self._rows = rows if rows is not None else []
+            self._nodes = nodes if nodes is not None else []
+
+        async def vector_search(self, **_kw):
+            return self._rows
+
+        async def get_all_nodes(self, **_kw):
+            return self._nodes
+
+    class _StubClient:
+        def __init__(self, gs):
+            self._mode = "ultra"
+            self._graph_store = gs
+            self._embed_service = _StubES()
+
+    def _node(emb):
+        return types.SimpleNamespace(embedding=emb, content="x")
+
+    _hit = [{"node_id": "n1", "content": "c", "score": 0.6}]
+    _two_nodes = [_node([0.1] * 8), _node([0.2] * 8)]
+    _no_emb_nodes = [_node(None), _node(None)]
+
+    rows, st = fetch_l6_schemas(_StubClient(_StubGS(available=False)), "q", user_id="u")
+    check("E1 图库未就绪 → graph_unavailable（不再谎报可用）",
+          rows == [] and st == "graph_unavailable", st)
+    rows, st = fetch_l6_schemas(_StubClient(_StubGS(nodes=_two_nodes)), "q", user_id="u")
+    check("E2 有料被阈值滤空 → empty:2",
+          rows == [] and st == "empty:2", st)
+    rows, st = fetch_l6_schemas(_StubClient(_StubGS(nodes=_no_emb_nodes)), "q", user_id="u")
+    check("E3 全缺 embedding → no_embedding:2",
+          rows == [] and st == "no_embedding:2", st)
+    rows, st = fetch_l6_schemas(_StubClient(_StubGS(rows=_hit)), "q", user_id="u")
+    check("E4 正常命中 → state 空且行数保持",
+          st == "" and len(rows) == 1 and rows[0]["content"] == "c", f"{st} {rows}")
+
+    _cases = {
+        "": (True, ""), "off": (False, ""),
+        "disabled": (False, "ultra"), "graph_unavailable": (False, "kuzu"),
+        "empty:2": (True, "2 条"), "no_embedding:3": (False, "3 条"),
+        "error: X": (False, "X"),
+    }
+    _bad = {k: v for k, v in
+            ((k, schema_state_meta(k, 0.25)) for k in _cases)
+            if v[0] != _cases[k][0] or _cases[k][1] not in v[1]}
+    check("E5 schema_state_meta 七种 state 映射口径", not _bad, str(_bad))
+
+    from hymem.core import config as _cfg_e
+
+    check("E6 schemaMinScore 默认 0.25（中文 query 对英文 schema 实测口径）",
+          float((_cfg_e.DEFAULTS.get("evolve") or {}).get("schemaMinScore") or 0) == 0.25,
+          repr((_cfg_e.DEFAULTS.get("evolve") or {}).get("schemaMinScore")))
 
     # ================= D ultra 面 =================
     print("\n== D ultra 面（真模型：写入 → evolve → 检索）==")

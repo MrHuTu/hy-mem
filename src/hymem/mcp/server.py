@@ -774,30 +774,35 @@ def _tool_search_memory(args: dict) -> str:
     want_schema = args.get("schema") is not False
     schemas: list[dict] = []
     schema_state = "off"
+    schema_min = 0.0
     if want_schema:
         from hymem.core import config as _cfgmod
 
-        from hymem.core.searchops import fetch_l6_schemas
+        from hymem.core.searchops import fetch_l6_schemas, schema_state_meta
 
         _ev = _cfgmod.load().get("evolve") or {}
+        # R4：调用方可临时降阈值排障（不改配置）；缺省走 config.evolve.schemaMinScore
+        _sms = args.get("schema_min_score")
+        schema_min = float(_sms) if _sms is not None else float(_ev.get("schemaMinScore") or 0.25)
         schemas, schema_state = fetch_l6_schemas(
             client,
             query,
             user_id=u,
             limit=max(0, min(int(args.get("schema_limit") or _ev.get("schemaLimit") or 3), 10)),
-            min_score=float(_ev.get("schemaMinScore") or 0.4),
+            min_score=schema_min,
         )
     resp["schemas"] = [
         {"content": s.get("content"), "score": s.get("score"), "layer": "l6_schema"}
         for s in schemas
     ]
-    resp["schema_available"] = schema_state == ""
-    if schema_state and schema_state != "off":
-        resp["schema_note"] = (
-            "L6 仅 ultra 模式提供（schema 存在 Kuzu 图库）——切 ultra 并跑过 evolve 才有模式可检索"
-            if schema_state == "disabled"
-            else f"L6 检索失败：{schema_state}"
-        )
+    if want_schema:
+        from hymem.core.searchops import schema_state_meta
+
+        resp["schema_available"], _note = schema_state_meta(schema_state, schema_min)
+        if _note:
+            resp["schema_note"] = _note
+    else:
+        resp["schema_available"] = False
     if has_more:
         resp["has_more"] = True
         resp["next_offset"] = offset + limit
@@ -1163,6 +1168,14 @@ TOOLS = [
                 "schema_limit": {
                     "type": "integer",
                     "description": "L6 条数，默认取 config.evolve.schemaLimit（3），上限 10",
+                },
+                "schema_min_score": {
+                    "type": "number",
+                    "description": (
+                        "L6 语义分阈值（0~1），默认取 config.evolve.schemaMinScore（0.25）。"
+                        "evolve 归纳的 schema 是英文，中文 query 对它的分数常在 0.2~0.35；"
+                        "schemas 为空且 schema_note 提示「阈值下无命中」时，传 0.2 或 0 重试"
+                    ),
                 },
             },
             "required": ["query"],

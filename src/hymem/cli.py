@@ -1570,7 +1570,7 @@ def cmd_search(args) -> int:
             or _ev.get("schemaLimit")
             or 3
         )
-        schema_min = float(_ev.get("schemaMinScore") or 0.4)
+        schema_min = float(_ev.get("schemaMinScore") or 0.25)
 
         r = client.search(
             args.query,
@@ -1620,17 +1620,15 @@ def cmd_search(args) -> int:
                 "tags_filter": want_tags,
                 "results": items,
                 "schemas": schemas,
-                "schema_available": schema_state == "",
             }
-            if schema_state and schema_state != "off":
-                # disabled：pro/lite 没这条通道；error：图库/嵌入调用失败。
-                # 两种都不该让调用方以为「没有相关模式」，必须说清是「没有这条路」。
-                _payload["schema_note"] = (
-                    "L6 仅 ultra 模式提供（schema 存在 Kuzu 图库里）——"
-                    "切到 ultra 并跑过 evolve 才有模式可检索"
-                    if schema_state == "disabled"
-                    else f"L6 检索失败：{schema_state}"
-                )
+            # state → (available, note) 的唯一口径在 searchops.schema_state_meta：
+            # disabled（非 ultra）/ graph_unavailable（kuzu 锁被抢）/ empty（有料被
+            # 阈值滤空，available 保持 true）/ no_embedding / error。这里不再各写各的。
+            from hymem.core.searchops import schema_state_meta
+
+            _payload["schema_available"], _snote = schema_state_meta(schema_state, schema_min)
+            if _snote:
+                _payload["schema_note"] = _snote
             if not items:
                 # agent 只看 JSON，这条线索必须进结构体，否则它只会得出
                 # 「没有相关记忆」的结论，而真相是「还没落库」。
@@ -1673,12 +1671,13 @@ def cmd_search(args) -> int:
             for i, s in enumerate(schemas, 1):
                 txt = str(s.get("content") or "").replace("\n", " ")
                 lines.append(f"{i:>2}. [{s.get('score'):.3f}] {txt}")
-        elif want_schema and schema_state == "disabled":
-            lines.append("")
-            lines.append(c.dim("（L6 行为模式不可用：仅 ultra 模式提供，且需先跑过 evolve）"))
-        elif schema_state.startswith("error"):
-            lines.append("")
-            lines.append(c.dim(f"（L6 行为模式检索失败：{schema_state}）"))
+        elif want_schema:
+            from hymem.core.searchops import schema_state_meta
+
+            _avail, _note = schema_state_meta(schema_state, schema_min)
+            if _note:
+                lines.append("")
+                lines.append(c.dim(f"（{_note}）"))
         return ok(items, False, "\n".join(lines))
     finally:
         client.close()

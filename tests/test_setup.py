@@ -697,7 +697,7 @@ def main() -> int:
     _llm_base = {"preset": "custom", "baseUrl": "http://127.0.0.1:9/v1",
                  "model": "small-extractor", "apiKey": "sk-x", "keyEnv": ""}
     _cfg_r = {"mode": "ultra", "llm": dict(_llm_base),
-              "evolve": {"model": "", "maxTokens": 8000, "schemaLimit": 3, "schemaMinScore": 0.4}}
+              "evolve": {"model": "", "maxTokens": 8000, "schemaLimit": 3, "schemaMinScore": 0.25}}
 
     # 第一遍：选「指定另一个模型」（索引 1）+ 手填强模型名
     tui.select = lambda q, options, default=0, **k: 1
@@ -707,7 +707,7 @@ def main() -> int:
     check("R2 探针用的是新模型名", _probe_seen[-1:] == ["strong-evolver"], repr(_probe_seen[-1:]))
     check("R3 其余 evolve 字段原样保留",
           _ev1.get("maxTokens") == 8000 and _ev1.get("schemaLimit") == 3
-          and abs(float(_ev1.get("schemaMinScore") or 0) - 0.4) < 1e-9, str(_ev1))
+          and abs(float(_ev1.get("schemaMinScore") or 0) - 0.25) < 1e-9, str(_ev1))
 
     # 第二遍（铁律：同一项至少测两遍）：已配过强模型 → 默认光标落在「指定」，改回沿用要清空
     _defaults: list[int] = []

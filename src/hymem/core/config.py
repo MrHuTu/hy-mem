@@ -111,12 +111,15 @@ DEFAULTS: dict[str, Any] = {
     # model 留空表示沿用 llm.model（但强烈建议填强模型——意图分类模型做不了
     # 开放生成，实测只回 7 个 token 就放弃）；maxTokens 是 agent 单轮输出上限，
     # SDK 默认 2000 会把 schema JSON 截断；schemaLimit/MinScore 只作用于检索
-    # 正路的语义通道（反路首版不做）。
+    # 正路的语义通道（反路首版不做）。schemaMinScore=0.25 的依据：evolve 归纳的
+    # schema 是英文（SDK 提示词决定），中文 query 对它的语义分实测 0.17~0.34，
+    # 0.4（SDK 面向英文场景的默认）会全部滤空——真实库 4 条 schema × 4 个中文
+    # query 实测最高 0.3445，全被 0.4 挡掉（docs/specs/2026-10-30-l6-schema-empty/）。
     "evolve": {
         "model": "",
         "maxTokens": 8000,
         "schemaLimit": 3,
-        "schemaMinScore": 0.4,
+        "schemaMinScore": 0.25,
     },
     "queue": {
         "maxAttempts": 3,
@@ -557,7 +560,12 @@ def validate(cfg: dict) -> list[tuple[str, bool, str]]:
         if ev.get("schemaMinScore") is not None
         else float(ev_def["schemaMinScore"])
     )
-    out.append(("evolve.schemaMinScore", 0.0 < sms <= 1.0, f"{sms}（实测 0.4 落在相关/无关空档里）"))
+    out.append((
+        "evolve.schemaMinScore",
+        0.0 < sms <= 1.0,
+        f"{sms}（中文 query 对英文 schema 实测 0.17~0.34，0.25 落在相关/无关空档；"
+        "过高会静默滤空，过低会放进无关归纳）",
+    ))
     # 注意：这条恒为 True。pro/lite 下 L6 不可用是**预期状态**不是配置错误，
     # 标红会让用户以为配坏了。想用 L6 的人看到提示就知道该切 ultra。
     if mode != "ultra":

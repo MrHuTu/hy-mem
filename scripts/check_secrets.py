@@ -52,6 +52,10 @@ SKIP_DIRS = {
     # 本地临时脚本区：整目录被 .gitignore 忽略，永不入库，扫它只会刷屏
     # （里面的探针/实验本来就带本机路径和内部主机名，那是允许的）
     ".local-test",
+    # vendor 是上游 SDK 原样源码（hy-memory / memhub），里面的“密钥”全是上游
+    # 测试夹具的合成假钥匙（sk-never-trust / SYNTHETIC_KEY 这类）。扫它 46 个
+    # 全是误报；我们的密钥纪律约束的是 hy-mem 自己的代码（2026-10-30 实测）。
+    "vendor",
 }
 # 不扫的扩展名：二进制/产物不可能是源码泄漏，读进来只有噪声
 SKIP_SUFFIXES = {

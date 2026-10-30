@@ -167,6 +167,11 @@ def fetch_l6_schemas(
     es = getattr(client, "_embed_service", None)
     if gs is None or es is None:
         return [], "disabled"
+    # R2（2026-10-30）：图库未就绪时 vector_search 会静默返回 []——多会话并发下
+    # 抢不到 kuzu 独占锁的 MCP 进程 _available=False，调用方拿到的是
+    # 「schema_available=true 但恒空」的假象（实测复现）。必须在这里显式拦下。
+    if getattr(gs, "_available", True) is False:
+        return [], "graph_unavailable"
 
     async def _run():
         from hy_memory.models.memory import MemoryLayer
@@ -210,7 +215,82 @@ def fetch_l6_schemas(
             }
         )
     out.sort(key=lambda x: x["score"], reverse=True)
+    if not out:
+        # R3（2026-10-30）：空结果必须区分「库里真的没有」和「有但被阈值滤空 /
+        # 根本没写进 embedding」。实测根因：evolve 归纳的 schema 是英文（SDK 提示
+        # 词决定），中文 query 对它的语义分 0.17~0.34，被 schemaMinScore=0.4 全部
+        # 滤掉后调用方只看到 schemas=[]，无从自救。
+        total, with_emb = _l6_schema_stats(client, user_id)
+        if total > 0 and with_emb == 0:
+            return [], f"no_embedding:{total}"
+        if total > 0:
+            return [], f"empty:{total}"
     return out[:limit], ""
+
+
+def _l6_schema_stats(client, user_id: str = "default") -> tuple[int, int]:
+    """(该 user 的 ACTIVE L6 schema 总数, 其中带 embedding 的条数)。失败 (-1, -1)。
+
+    isolation 口径与 evolveops._schema_count 一致：SDK evolve 写 schema 用
+    `MemoryNode.build_isolation_key(user_id, "default_agent")`，传空串数出来恒 0
+    （实测踩过）。只数不动库，失败绝不阻断检索主路径。
+    """
+    try:
+        import asyncio
+
+        from hy_memory.models.memory import MemoryLayer, MemoryNode, MemoryStatus
+
+        gs = getattr(client, "_graph_store", None)
+        if gs is None:
+            return -1, -1
+        iso = MemoryNode.build_isolation_key(user_id, "default_agent")
+        rows = asyncio.run(
+            gs.get_all_nodes(
+                isolation_key=iso,
+                layer=MemoryLayer.L6_SCHEMA,
+                status=MemoryStatus.ACTIVE,
+                limit=1000,
+            )
+        ) or []
+        total = len(rows)
+        with_emb = sum(1 for r in rows if getattr(r, "embedding", None))
+        return total, with_emb
+    except Exception:  # noqa: BLE001
+        return -1, -1
+
+
+def schema_state_meta(state: str, min_score: float) -> tuple[bool, str]:
+    """schema 检索的 state → (schema_available, note)。
+
+    两处调用点（cli cmd_search / mcp search_memory）共用这一份口径，禁止各写
+    各的文案——B2/C3 的断言只锁「ultra」字样与 available 布尔，具体句子改这里。
+    note 为空串表示无需解释（正常命中或调用方主动关掉）。
+    """
+    if not state or state == "off":
+        return state == "", ""
+    if state == "disabled":
+        return False, (
+            "L6 仅 ultra 模式提供（schema 存在 Kuzu 图库）——切 ultra 并跑过 evolve 才有模式可检索"
+        )
+    if state == "graph_unavailable":
+        return False, (
+            "L6 图库未就绪：kuzu 独占锁被其它 hy-mem 进程占用或初始化失败，"
+            "本进程的 schema 检索不可用（关掉占锁的进程后重连 MCP）"
+        )
+    if state.startswith("no_embedding:"):
+        n = state.split(":", 1)[1]
+        return False, (
+            f"库里有 {n} 条 L6 schema，但全部缺 embedding（evolve 写入时嵌入调用失败，"
+            "向量检索永远查不到它们）——重跑 evolve（schema 被修订时会补写）或检查嵌入端点"
+        )
+    if state.startswith("empty:"):
+        n = state.split(":", 1)[1]
+        return True, (
+            f"库里有 {n} 条 L6 schema，但阈值 {min_score} 下无命中——"
+            "中文 query 对英文 schema（evolve 归纳默认英文）的语义分常在 0.2~0.35。"
+            "出路：传 schema_min_score 降阈值试一次，或 hy-mem config set evolve.schemaMinScore=0.25"
+        )
+    return False, f"L6 检索失败：{state}"
 
 
 def _pending_jobs() -> int:
