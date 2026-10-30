@@ -1438,6 +1438,82 @@ def cmd_profile(args) -> int:
     return ok(payload, args.json, "\n".join(lines))
 
 
+def cmd_evolve(args) -> int:
+    """L6 认知层：把全量事实归纳成行为模式（System 2，ultra 专属）。
+
+    与 add 的关系：add 只跑 S1（抽事实/判重），S2 不自动触发。典型用法是
+    「批量 add → evolve 一次」，evolve 每次扫的还是当前全量 VDB，因此非幂等、
+    连续跑有意义，但不是「跑一次就一直有效」。
+
+    为什么先拦 mode：SDK 在非 ultra 下抛的是英文 RuntimeError
+    （client.py:2118），直接冒到宿主智能体那里既看不懂也找不到出路。
+    这里提前拦，并把「怎么切」写在提示里。
+    """
+    rc = require_ready("运行 L6 认知归纳")
+    if rc is not None:
+        return rc
+    from hymem.core import config as cfgmod
+    from hymem.core import evolveops
+
+    cfg = cfgmod.load()
+    mode = str(cfg.get("mode") or "pro")
+    if mode != "ultra":
+        return fail(
+            f"evolve 需要 mode=ultra，当前 mode={mode}。L6 认知层是 ultra 独占："
+            "归纳出的 schema 要落 Kuzu 图库，pro/lite 里没有这条存储，"
+            "检索侧也没有 L6 通道。",
+            EXIT_USAGE,
+            hint=(
+                "切换：hy-mem config set mode=ultra"
+                "（首次会在数据目录建 graph 库，启动约 +4s；切回 pro 用 config set mode=pro）"
+            ),
+        )
+
+    uid = identity(args).get("user_id") or config_defaults_user()
+    model = getattr(args, "model", "") or ""
+    batches = getattr(args, "batches", None)
+    if not getattr(args, "json", False):
+        eff = model or (cfg.get("evolve") or {}).get("model") or (cfg.get("llm") or {}).get("model")
+        print(
+            f"hy-mem: 正在对 {uid} 的全量记忆做 schema 归纳（模型 {eff}），可能耗时数十秒…",
+            file=sys.stderr,
+        )
+
+    res = evolveops.evolve(model_override=model, max_batches=batches, user_id=uid)
+
+    if not res.get("ok"):
+        return fail(
+            str(res.get("error") or "evolve 失败"),
+            EXIT_RUNTIME,
+            hint=res.get("error_hint") or "排查：hy-mem config validate；确认 mode=ultra 且图库未被占用",
+        )
+
+    if args.json:
+        return ok(res, True)
+
+    lines = []
+    if res.get("idle"):
+        lines.append(f"[!] {res.get('idle_note')}")
+        lines.append(res.get("idle_hint") or "")
+    planned = res.get("batches_planned")
+    done = res.get("batches_completed")
+    lines.append(
+        f"批次  {done} 批完成" + (f"（计划 {planned}）" if planned is not None else "")
+        + (f"，失败 {res.get('batches_failed')}" if res.get("batches_failed") else "")
+    )
+    lines.append(f"归纳  处理 {res.get('tasks_processed') or 0} 个簇")
+    if res.get("schemas_added") is not None:
+        sign = "+" if res["schemas_added"] >= 0 else ""
+        lines.append(f"schema  {sign}{res['schemas_added']} 条（现有 {res.get('schemas_after')} 条）")
+    lines.append(
+        f"tokens  输入 {res.get('prompt_tokens')} / 输出 {res.get('completion_tokens')}"
+        f"　耗时 {round((res.get('elapsed_ms') or 0) / 1000, 1)}s"
+    )
+    if res.get("note"):
+        lines.append(f"提示  {res['note']}")
+    return ok(res, False, "\n".join(x for x in lines if x))
+
+
 def cmd_search(args) -> int:
     rc = require_ready("检索记忆")
     if rc is not None:
@@ -3472,6 +3548,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     ps = sub.add_parser("profile", help="查看 L0 用户画像（基础信息，如姓名/职业）")
     ps.set_defaults(func=cmd_profile)
+
+    ps = sub.add_parser(
+        "evolve",
+        help="L6 认知归纳（ultra 专属）：把全量事实归纳成行为模式",
+    )
+    ps.add_argument(
+        "--model",
+        default="",
+        help="本次使用的归纳模型（不改配置）；不填用 evolve.model，再退到 llm.model",
+    )
+    ps.add_argument("--batches", type=int, default=None, help="最多跑几批（调试用）")
+    ps.set_defaults(func=cmd_evolve)
 
     ps = sub.add_parser("list", help="列出记忆")
     ps.add_argument("-n", "--limit", type=int, default=20)

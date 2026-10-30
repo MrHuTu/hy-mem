@@ -376,6 +376,27 @@ CMD_META: dict[str, dict] = {
             "身份由 -u / HY_MEM_USER_ID / config.identity.userId 决定，与 search 同口径。",
         ],
     },
+    "evolve": {
+        "group": "维护",
+        "when": "想把一堆零散事实归纳成「行为模式」（L6）。add 只跑 S1（抽事实/判重），不会自动归纳；evolve 扫当前全量 VDB 做一次 System 2。",
+        "mutates": True,
+        "examples": [
+            "hy-mem evolve",
+            "hy-mem evolve --model deepseek-v4.1-flash-1017",
+            "hy-mem --json evolve --batches 2",
+            "hy-mem config set evolve.model=deepseek-v4.1-flash-1017",
+        ],
+        "output": "{ok, idle, batches_completed, tasks_processed, prompt_tokens, completion_tokens, schemas_before, schemas_after, schemas_added, model, note?, idle_hint?}",
+        "notes": [
+            "仅 ultra 可用。pro/lite 下直接拒（exit 1），因为 schema 要落 Kuzu 图库，这两个模式没有这条存储。切换：hy-mem config set mode=ultra。",
+            "非幂等：每次扫当前全量 VDB，add 一批再 evolve 一次才有新意义。",
+            "素材要求「同主题、细节各异、≥4 条且没被 reconcile 合并」。太散不成簇（LLM 根本不会被调用），太像会被判重合并成一条。",
+            "同一批事实只会被归纳一次：参与过的会被标成已用（evidenced_excluded），所以「用弱模型跑空转了，再换强模型重跑」通常仍然没产出——要么 add 新内容，要么一开始就用 --model 指定强模型。",
+            "模型选择很关键：意图分类模型（如 tongyi-*-analysis-flash）抽取很快但做不了开放归纳，实测 3850 prompt tokens 只回 7 个 token。这种空转会被标成 idle=true，框架仍报 success——别被 success 骗了。",
+            "kuzu 是独占锁：MCP 服务长驻会一直持有图库，CLI 的 evolve 会失败。先停 MCP，或改用 MCP 里的 evolve 工具（跑在持有进程内）。",
+            "--model 只影响本次，不改 config.json；想长期生效写 evolve.model。",
+        ],
+    },
     "delete": {
         "notes": [
             "不可恢复。拿不准先加 --dry-run 看一眼要删的东西。",
