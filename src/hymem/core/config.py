@@ -107,6 +107,17 @@ DEFAULTS: dict[str, Any] = {
     "coding": {
         "chainRepo": "",
     },
+    # L6 认知层（ultra 专属，2026-10-30）。evolve 会现造一个只用于归纳的 client：
+    # model 留空表示沿用 llm.model（但强烈建议填强模型——意图分类模型做不了
+    # 开放生成，实测只回 7 个 token 就放弃）；maxTokens 是 agent 单轮输出上限，
+    # SDK 默认 2000 会把 schema JSON 截断；schemaLimit/MinScore 只作用于检索
+    # 正路的语义通道（反路首版不做）。
+    "evolve": {
+        "model": "",
+        "maxTokens": 8000,
+        "schemaLimit": 3,
+        "schemaMinScore": 0.4,
+    },
     "queue": {
         "maxAttempts": 3,
         "lockTimeout": 180,
@@ -453,6 +464,11 @@ def to_env(cfg: dict) -> dict[str, str]:
 
     env["MEMORY_LLM_BASE_URL"] = str(llm.get("baseUrl") or "")
     env["MEMORY_LLM_MODEL"] = str(llm.get("model") or "")
+    # agent 单轮输出上限（2026-10-30 L6 实测）：SDK 默认 2000，而 S2 归纳一轮要
+    # 输出上千 token，撞上限后 JSON 不闭合 → "Failed to parse operations JSON"，
+    # 表现为「deepseek 时好时坏」，其实是截断。max_tokens 只是上限，放宽不会让
+    # S1 抽取多写内容（它本来就输出很短）。
+    env["MEMORY_AGENT_MAX_TOKENS"] = str((cfg.get("evolve") or {}).get("maxTokens", 8000))
     # coding diff 链（S4）：只在填了仓库根时注入，空值不写——SDK 拿不到这个
     # 变量就退回「只认工具轨迹里的 path/old/new」，不会去猜仓库。
     chain_repo = str((cfg.get("coding") or {}).get("chainRepo") or "")
@@ -518,6 +534,38 @@ def validate(cfg: dict) -> list[tuple[str, bool, str]]:
         p = Path(cr).expanduser()
         ok = p.is_dir() and (p / ".git").exists()
         out.append(("coding.chainRepo", ok, cr if ok else f"{cr} 不是 Git 仓库根目录"))
+
+    # L6 认知层（ultra 专属）。model 留空合法（沿用 llm.model），但要提示：
+    # 意图分类模型做不了开放归纳，实测只回 7 个 token 就放弃，等于白跑。
+    # 取值一律回落 DEFAULTS：老配置/部分配置里没有这一段，直接 .get(...) or 0
+    # 会把「缺省」误判成「填了非法值」，setup 的校验就会莫名报红。
+    # 注意 schemaLimit 的 0 是合法值（= 关检索），不能用 or 兜底。
+    ev = cfg.get("evolve") or {}
+    ev_def = DEFAULTS["evolve"]
+    ev_model = str(ev.get("model") or "")
+    out.append((
+        "evolve.model",
+        True,
+        f"{ev_model}" if ev_model else f"未设置，沿用 llm.model={llm.get('model') or '未设置'}",
+    ))
+    mt = int(ev["maxTokens"]) if ev.get("maxTokens") is not None else int(ev_def["maxTokens"])
+    out.append(("evolve.maxTokens", mt >= 2000, f"{mt}（低于 2000 会截断 schema JSON）"))
+    sl = int(ev["schemaLimit"]) if ev.get("schemaLimit") is not None else int(ev_def["schemaLimit"])
+    out.append(("evolve.schemaLimit", 0 <= sl <= 10, f"{sl}（0 关检索，上限 10）"))
+    sms = (
+        float(ev["schemaMinScore"])
+        if ev.get("schemaMinScore") is not None
+        else float(ev_def["schemaMinScore"])
+    )
+    out.append(("evolve.schemaMinScore", 0.0 < sms <= 1.0, f"{sms}（实测 0.4 落在相关/无关空档里）"))
+    # 注意：这条恒为 True。pro/lite 下 L6 不可用是**预期状态**不是配置错误，
+    # 标红会让用户以为配坏了。想用 L6 的人看到提示就知道该切 ultra。
+    if mode != "ultra":
+        out.append((
+            "evolve.mode",
+            True,
+            f"mode={mode}，L6 不启用（evolve 会被拒；要归纳先 config set mode=ultra）",
+        ))
     return out
 
 

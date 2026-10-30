@@ -3125,6 +3125,16 @@ def cmd_config(args) -> int:
                 bad = _check_chain_repo(str((merged.get("coding") or {}).get("chainRepo") or ""))
                 if bad:
                     return fail(bad, EXIT_USAGE)
+        # L6：mode 只认三值。写错一个字母，SDK 会按 pro 处理却不报错，
+        # 用户以为切了 ultra、evolve 却一直拒——这类静默降级必须当场拦。
+        # 只在显式改 mode 时校验：否则历史配置里 mode 拼错会让所有 set 都失败。
+        if any(p.split("=", 1)[0].strip() == "mode" for p in args.pairs):
+            mode_val = str(merged.get("mode") or "")
+            if mode_val not in ("lite", "pro", "ultra"):
+                return fail(
+                    f"mode 只能是 lite / pro / ultra，得到 {mode_val!r}；L6 认知层需要 ultra",
+                    EXIT_USAGE,
+                )
         p = cfgmod.save(merged)
         if changed:
             print(
@@ -3156,6 +3166,16 @@ def cmd_config(args) -> int:
         "dataDir": (cfg.get("storage") or {}).get("dataDir"),
         "minScore": (cfg.get("search") or {}).get("minScore"),
         "coding": {"chainRepo": (cfg.get("coding") or {}).get("chainRepo") or ""},
+        # L6 认知层：model 空 = 沿用 llm.model。pro/lite 下这一段存在但不可用，
+        # 显式给 enabled 让用户一眼看懂，不用去猜「为什么 evolve 报错」。
+        "evolve": {
+            "enabled": cfg.get("mode") == "ultra",
+            "model": (cfg.get("evolve") or {}).get("model") or "",
+            "effectiveModel": (cfg.get("evolve") or {}).get("model") or llm.get("model"),
+            "maxTokens": (cfg.get("evolve") or {}).get("maxTokens"),
+            "schemaLimit": (cfg.get("evolve") or {}).get("schemaLimit"),
+            "schemaMinScore": (cfg.get("evolve") or {}).get("schemaMinScore"),
+        },
         "identity": {
             "userId": cfgmod.identity_defaults(cfg),
             "label": cfgmod.identity_label(cfgmod.identity_defaults(cfg)),
@@ -3185,6 +3205,11 @@ def cmd_config(args) -> int:
         t("存储目录  {}", payload["dataDir"]),
         t("检索阈值  {}", payload["minScore"]),
         t("diff 链仓库  {}", payload["coding"]["chainRepo"] or t("（未设置，只认工具轨迹里的 path/old/new）")),
+        t("L6 认知层  {}",
+          (t("已启用（ultra）") + t("，归纳模型 {}，检索 {} 条/阈值 {}", payload["evolve"]["effectiveModel"],
+                                   payload["evolve"]["schemaLimit"], payload["evolve"]["schemaMinScore"]))
+          if payload["evolve"]["enabled"]
+          else t("未启用（mode={}，L6 仅 ultra 可用）", payload["mode"])),
     ]
     return ok(payload, False, "\n".join(lines))
 
