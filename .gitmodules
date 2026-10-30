@@ -1,0 +1,4 @@
+[submodule "vendor/hy-memory"]
+	path = vendor/hy-memory
+	url = https://github.com/Tencent-Hunyuan/Hy-Memory.git
+	shallow = true
