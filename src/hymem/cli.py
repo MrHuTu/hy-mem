@@ -1055,10 +1055,101 @@ def cmd_serve(args) -> int:
               f"向量库服务退出（{reason}，运行 {time.time() - t0:.0f}s）")
 
 
+def _cmd_add_scene(args, scene: str) -> int:
+    """S1：生产力场景写入（working/coding）。SDK client.add(messages, scene=...) 整段。
+
+    与 chat 管线完全独立（coding_memory*.db + 专用向量集合），不复用两段式/合批。
+    CLI 在门口预检轨迹：SDK 对「显式 scene 但无 tool 轨迹」会静默回退 chat——
+    那是陷阱（用户以为写了 coding 库实际进了 chat），这里拦住并明确报 E_NO_TRACE。
+    """
+    import json as _json
+
+    trace_path = getattr(args, "trace", None)
+    if not trace_path:
+        return fail(
+            f"--scene {scene} 需要 --trace <messages.json>（含 tool_calls/role=tool 的 OpenAI messages 数组，- 为 stdin）",
+            hint="生产力写入必须带工具调用轨迹；纯文本请去掉 --scene 走 chat",
+            err_code="E_NO_TRACE",
+        )
+    raw = None
+    if trace_path == "-":
+        buf = getattr(sys.stdin, "buffer", None)
+        raw = _decode_stdin(buf.read())[0] if buf else sys.stdin.read()
+    else:
+        from pathlib import Path as _P
+
+        tp = _P(trace_path)
+        if not tp.is_file():
+            return fail(f"--trace 文件不存在：{trace_path}", err_code="E_NO_TRACE")
+        raw = tp.read_text(encoding="utf-8")
+    if not raw or not raw.strip():
+        return fail("--trace 文件为空或不存在", err_code="E_NO_TRACE")
+    try:
+        messages = _json.loads(raw)
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("不是 messages 数组")
+    except ValueError as e:
+        return fail(f"--trace 不是合法的 messages JSON 数组：{e}", err_code="E_NO_TRACE")
+    has_trace = any(
+        m.get("tool_calls") or m.get("role") == "tool" for m in messages if isinstance(m, dict)
+    )
+    if not has_trace:
+        return fail(
+            f"轨迹中没有 tool_calls / role=tool——SDK 会静默回退 chat 管线，已拦截（零写入）",
+            hint="生产力记忆的价值在工具轨迹；确认 trace 文件含 assistant.tool_calls 或 tool 消息，"
+                 "或去掉 --scene 走 chat",
+            err_code="E_NO_TRACE",
+        )
+    ws = getattr(args, "workspace", None)
+    branch = getattr(args, "branch", None)
+    if branch and not ws:
+        return fail("--branch 需要同时传 --workspace（SDK 作用域契约）", EXIT_USAGE)
+
+    ident = identity(args)
+    lock_timeout = float(os.getenv("HY_MEM_ADD_LOCK_TIMEOUT") or 30)
+    client = make_client(args.mode)
+    try:
+        # 生产力管线独立于 chat 两段式；首版保守持锁（§0 约束 2），
+        # 后续实测与 chat WriteLock 无竞争再评估出锁。
+        with store.WriteLock(timeout=lock_timeout):
+            r = client.add(
+                messages,
+                scene=scene,
+                workspace_id=ws or None,
+                branch=branch or None,
+                source=getattr(args, "source", None) or "cli",
+                **ident,
+            )
+    except Exception as e:  # noqa: BLE001
+        return fail(f"scene 写入失败：{type(e).__name__}: {e}",
+                    hint=f"SDK {scene} 管线报错；检查 trace 格式与 LLM 配置（doctor）")
+    if r.get("success") is not True:
+        return fail(f"scene 写入失败：{r.get('error') or r.get('error_message') or r}")
+    payload = {
+        "ok": True, "scene": r.get("scene"), "request_id": r.get("request_id"),
+        "fact_ids": r.get("fact_ids") or [], "experience_ids": r.get("experience_ids") or [],
+        "ops_summary": r.get("ops_summary") or {},
+        "fact_ops_summary": r.get("fact_ops_summary") or {},
+        "chain_rounds": r.get("chain_rounds"),
+        "workspace": ws or None, "branch": branch or None,
+    }
+    n_fact = len(payload["fact_ids"])
+    n_exp = len(payload["experience_ids"])
+    human = (f"[{scene}] 事实 {n_fact} 条、经验 {n_exp} 条"
+             + (f"、diff 链 {payload['chain_rounds']} 轮" if payload.get("chain_rounds") else "")
+             + (f"（workspace={ws}）" if ws else ""))
+    return ok(payload, args.json, human)
+
+
 def cmd_add(args) -> int:
     rc = require_ready("写入记忆")
     if rc is not None:
         return rc
+    # S1 scene 分流（2026-10-30 scene spec）：--scene working/coding 走生产力
+    # 管线（独立存储，SDK client.add(messages, scene=...) 整段）；缺省 chat 不变。
+    scene = getattr(args, "scene", None)
+    if scene in ("working", "coding"):
+        return _cmd_add_scene(args, scene)
     text = _read_text(args.text)
     if not text:
         return fail("没有输入内容（参数或 stdin）", EXIT_USAGE)
@@ -3163,6 +3254,13 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--source", default="cli", help="来源标记")
     ps.add_argument("--split", action="store_true", help="按行拆成多条独立写入（提升检索粒度）")
     ps.add_argument("--tag", action="append", default=None, help="绑定标签，可重复：--tag work --tag apollo")
+    ps.add_argument("--scene", choices=["working", "coding"], default=None,
+                    help="生产力场景（coding=编码/调试/SQL；working=文档/研究/操作）。需配 --trace 工具轨迹")
+    ps.add_argument("--trace", default=None,
+                    help="messages JSON 文件路径（含 tool_calls/role=tool 的 OpenAI 数组，- 为 stdin），--scene 时必填")
+    ps.add_argument("--workspace", default=None,
+                    help="按仓库/项目隔离（建议 git remote URL），--scene 时可选")
+    ps.add_argument("--branch", default=None, help="分支名（需同时传 --workspace）")
     ps.add_argument(
         "--async",
         dest="async_mode",
