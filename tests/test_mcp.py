@@ -9,7 +9,7 @@ get_version → 全链路 JSON-RPC 无 error、结果互相印证。
 queue stats 带 delayed 字段。
 
 跑法：
-    .venv/Scripts/python.exe scripts/test_mcp.py [exe路径]
+    .venv/Scripts/python.exe tests/test_mcp.py [exe路径]
 判定：全部检查 PASS。
 """
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PY = str(REPO / ".venv" / "Scripts" / "python.exe")
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import _secrets  # noqa: E402  密钥只从环境变量取，见 scripts/_secrets.py
 EXPECTED_TOOLS = {
     "add_memory", "queue_status", "search_memory", "list_memories", "get_memory",

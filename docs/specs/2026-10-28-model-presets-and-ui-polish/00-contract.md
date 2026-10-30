@@ -24,7 +24,7 @@
 | C5 | 401 要说清是谁的 key | 探针拿到 401/403 且密钥来自环境变量时，错误信息必须带「$VAR 里的 key 可能属于旧端点（X）」 | `cli/setup_wizard.py` |
 | C6 | 轮次不带计数标题 | 任何一次写记忆 / 检索**都不得**打印「写记忆（第 N 条）」「检索（第 N 次）」之类的计数标题。控制台里两条结果之间只隔一个空行 —— 结果本身就在滚动区，接着往上滚就能对照 | `cli/menu.py` |
 | C7 | 不确认已自动发生的事 | `add --async` 已经自动拉起消费进程，交互层**不得**再问「现在就跑一次 worker 落库？」，改为直接告知「后台会自动落库，此刻检索不到是正常的」 | `cli/menu.py::cmd_add` |
-| C8 | 菜单全覆盖 | 新增 `scripts/test_menu.py`：旧菜单 18 个功能项（主菜单 10 + 设置中心 8）逐项映射到命令并**真跑**，缺一条即失败；`storage`/`lang`/`delete`/`get` 另有一条覆盖断言；另有 1 条真实 `run_menu` 管道循环与 1 条 `setup` 路由校验 | `scripts/test_menu.py` |
+| C8 | 菜单全覆盖 | 新增 `tests/test_menu.py`：旧菜单 18 个功能项（主菜单 10 + 设置中心 8）逐项映射到命令并**真跑**，缺一条即失败；`storage`/`lang`/`delete`/`get` 另有一条覆盖断言；另有 1 条真实 `run_menu` 管道循环与 1 条 `setup` 路由校验 | `tests/test_menu.py` |
 | C9 | 命令名即子命令名 | 交互层不再自造一套菜单动作名。每条命令 `Command.name` 与 `hy-mem <name>` 子命令同名（`add` / `search` / `setup` …），别名只做输入便利（`a`、`s`、`ls`）。旧菜单 18 个功能项必须有明确承接，见 `S6-menu-sweep.md` 映射表 | `cli/menu.py::COMMANDS` |
 | C10 | 结果留在滚动区 | 一次操作结束即回到提示符，**不清屏、不「按任意键继续」、不重画表头**。只有 `clear` 命令自己清屏 | `cli/menu.py` |
 | C11 | 非 TTY 可管道驱动 | `hy-mem menu` 在 stdin 非 TTY 时逐行读命令、逐条执行，不降级成编号菜单；stdin EOF 等价 `Ctrl+D` 退出并打印「退出。」，**不得**在 EOF 上原地打转 | `cli/menu.py::run_menu`、`cli/tui.py::line(eof_is_exit=True)` |
@@ -40,8 +40,8 @@
 | S3 | 第 2 次起打「写记忆（第 2 条）」标题；入队后又问「现在就跑一次 worker？」 | `S3-round-title.md` | `cli/menu.py`、`cli/i18n.py` | 已实现（随 S4 重构） | e50f141 |
 | S4 | 箭头菜单一次操作要按 4~6 次键，「按任意键继续」打断流；`tui.clear()` 擦掉上一次结果 | `S4-shell.md` | `cli/menu.py`（整体重写）、`cli/hy_mem_cli.py`、`cli/i18n.py` | 已实现 | e50f141 |
 | S5 | 控制台没有历史 / 补全 / 反查，按错一个字只能整行重打 | `S5-line-editing.md` | `cli/tui.py` | 已实现 | e50f141 |
-| S7 | 函数级桩测复现不了真实按键流（401 事故发生在「设置→选当前项→按 N」的 UI 流里）；且 C13 落地后需要 UI 级验证 | `S7-setup-ui-test.md` | `scripts/test_setup_ui.py` | 已实现 | 216545e |
-| S6 | 没有一条测试保证"每个菜单都能进去再出来" | `S6-menu-sweep.md` | `scripts/test_menu.py` | 已实现 | e50f141 |
+| S7 | 函数级桩测复现不了真实按键流（401 事故发生在「设置→选当前项→按 N」的 UI 流里）；且 C13 落地后需要 UI 级验证 | `S7-setup-ui-test.md` | `tests/test_setup_ui.py` | 已实现 | 216545e |
+| S6 | 没有一条测试保证"每个菜单都能进去再出来" | `S6-menu-sweep.md` | `tests/test_menu.py` | 已实现 | e50f141 |
 
 ## 3. 变更记录（只追加）
 

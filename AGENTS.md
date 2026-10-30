@@ -119,7 +119,7 @@ D:\tools_open\agent-bridge\
 
 - 排查 bug 时新写的脚本一律落 `.local-test/`，不要往 `scripts/` 里塞——仓库要公开，这类脚本最容易带上本机路径、内部主机名、测试数据。
 - `.local-test/` 脚本要 key 就加一行路径后 `import _secrets`（只读环境变量），**不许明文**；也不许指向真实库，跑前自己设 `HY_MEM_CONFIG` + `MEMORY_DATA_DIR` 沙箱。
-- 某个探针一旦成为发版必跑的门禁，就**转正**成 `scripts/test_*.py` 的用例并计入套件总数，别继续躺在 `.local-test/`。详见 `.local-test/README.md`。
+- 某个探针一旦成为发版必跑的门禁，就**转正**成 `tests/test_*.py` 的用例并计入套件总数，别继续躺在 `.local-test/`。详见 `.local-test/README.md`。
 
 ---
 
@@ -200,7 +200,7 @@ chroma embedded 是单进程嵌入式库，**不支持跨进程共享**：worker
 | 控制台（`menu.py`） | 内容/说明列宽 = `term_width()` − 固定列 − 分隔符，`max(24, …)` 兜底；检索结果底部给 `看全文：get <id>` |
 | 非交互（`cmd_search` / `cmd_list` / `cmd_history`） | 多行正文按原始缩进对齐展开（`pad = len(head)`），不再压平、不再按字符截断 |
 
-判定标准：管道或窄终端下逐行宽度 ≤ `term_width()`，且**任何一条记忆的 History 都能完整看到**（`scripts/test_ui.py` 的宽度裁剪用例守着这条）。
+判定标准：管道或窄终端下逐行宽度 ≤ `term_width()`，且**任何一条记忆的 History 都能完整看到**（`tests/test_ui.py` 的宽度裁剪用例守着这条）。
 
 ### 3.4 stdin 编码：一律按字节读（0.9.11，改任何「从 stdin 收正文」的路径前必读）
 
@@ -217,7 +217,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | 读 | `hy_mem_cli._read_text` 读 `sys.stdin.buffer`，用 `_decode_stdin` 显式解：BOM → UTF-8 → GBK → `replace` 兜底；GBK 命中时 stderr 告警（猜错会写乱码，不能静默） |
 | 闸 | `_strip_surrogates` 在拼请求体之前剔除孤立代理项并告警，保证「无论如何都能 utf-8 编码」 |
 | 报 | `errors.classify_error` 按消息分流：含 `surrogate` → `E_ENCODING` 指向输入侧；`latin-1`/position N → 才是密钥/地址 |
-| 验 | `scripts/test_encoding.py`（含**复刻事故环境**的子进程用例：`PYTHONIOENCODING=gbk:surrogateescape` 下 `_read_text` 必须逐字正确） |
+| 验 | `tests/test_encoding.py`（含**复刻事故环境**的子进程用例：`PYTHONIOENCODING=gbk:surrogateescape` 下 `_read_text` 必须逐字正确） |
 
 反面教材：不要改成「把 stdin reconfigure 成 utf-8」——那样 `cmd.exe` 的 GBK 管道会变成一堆替换字符，静默乱码比报错更糟。
 
@@ -353,25 +353,25 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 
 | 套件 | 用例 | 覆盖 | 跑法 |
 |---|---|---|---|
-| `scripts/test_ui.py` | **110** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、**历史翻找 / Tab 补全 / Ctrl+R 反查 / Ctrl+D / Ctrl+K**、宽度裁剪、不折行、菜单导航、控制台连写连查 | `.venv/Scripts/python.exe scripts/test_ui.py` |
-| `scripts/test_setup.py` | **139** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）** | `.venv/Scripts/python.exe scripts/test_setup.py` |
-| `scripts/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
-| `scripts/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe scripts/test_queue.py` |
-| `scripts/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe scripts/test_concurrency.py [exe]` |
-| `scripts/test_mcp.py` | **22** | MCP stdio 八工具端到端：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe scripts/test_mcp.py [exe]` |
-| `scripts/test_vdb_endpoint.py` | **36** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe scripts/test_vdb_endpoint.py` |
-| `scripts/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe scripts/test_encoding.py` |
-| `scripts/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe scripts/test_oplog.py` |
-| `scripts/test_menu.py` | **112** | 控制台全覆盖：18 条命令逐个跑通、旧菜单 18 项逐一映射到命令、别名/补全/切词、未知命令给建议、真 `run_menu` 管道循环（命令后仍回到提示符、不「按任意键」、EOF 干净退出）、历史落盘与去重 | `.venv/Scripts/python.exe scripts/test_menu.py` |
-| `scripts/test_setup_ui.py` | **40** | 设置向导 UI 级：真 CLI 子进程 + 管道喂键 + 本地假 OpenAI 端点（只认自家 key）。覆盖首次/二次选当前项/自定义跨端点/换预设 EOF 中止/LLM 同型/同端点三选一显式换 key/设置菜单+key固化+pro联动/失败菜单分流+stdin中文修复；抓到并修掉 3 个「第二次配置」家族 bug（自定义 same_endpoint 写死、默认光标落预设、ask_secret 空回车放行） | `.venv/Scripts/python.exe scripts/test_setup_ui.py`（不打真云厂商） |
-| `scripts/test_i18n.py` | **31** | 中英切换：默认 zh 逐字不变、`HY_MEM_LANG=en` 生效、缺译回落中文、`config set lang=en` 读到 en | `.venv/Scripts/python.exe scripts/test_i18n.py` |
+| `tests/test_ui.py` | **110** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、**历史翻找 / Tab 补全 / Ctrl+R 反查 / Ctrl+D / Ctrl+K**、宽度裁剪、不折行、菜单导航、控制台连写连查 | `.venv/Scripts/python.exe tests/test_ui.py` |
+| `tests/test_setup.py` | **139** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）** | `.venv/Scripts/python.exe tests/test_setup.py` |
+| `tests/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
+| `tests/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe tests/test_queue.py` |
+| `tests/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe tests/test_concurrency.py [exe]` |
+| `tests/test_mcp.py` | **22** | MCP stdio 八工具端到端：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe tests/test_mcp.py [exe]` |
+| `tests/test_vdb_endpoint.py` | **36** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe tests/test_vdb_endpoint.py` |
+| `tests/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe tests/test_encoding.py` |
+| `tests/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe tests/test_oplog.py` |
+| `tests/test_menu.py` | **112** | 控制台全覆盖：18 条命令逐个跑通、旧菜单 18 项逐一映射到命令、别名/补全/切词、未知命令给建议、真 `run_menu` 管道循环（命令后仍回到提示符、不「按任意键」、EOF 干净退出）、历史落盘与去重 | `.venv/Scripts/python.exe tests/test_menu.py` |
+| `tests/test_setup_ui.py` | **40** | 设置向导 UI 级：真 CLI 子进程 + 管道喂键 + 本地假 OpenAI 端点（只认自家 key）。覆盖首次/二次选当前项/自定义跨端点/换预设 EOF 中止/LLM 同型/同端点三选一显式换 key/设置菜单+key固化+pro联动/失败菜单分流+stdin中文修复；抓到并修掉 3 个「第二次配置」家族 bug（自定义 same_endpoint 写死、默认光标落预设、ask_secret 空回车放行） | `.venv/Scripts/python.exe tests/test_setup_ui.py`（不打真云厂商） |
+| `tests/test_i18n.py` | **31** | 中英切换：默认 zh 逐字不变、`HY_MEM_LANG=en` 生效、缺译回落中文、`config set lang=en` 读到 en | `.venv/Scripts/python.exe tests/test_i18n.py` |
 
 ```bash
 # 源码模式
-.venv/Scripts/python.exe scripts/test_cli.py
+.venv/Scripts/python.exe tests/test_cli.py
 
 # 打 exe 模式（打包后必须再跑一遍，同一个脚本）
-HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe scripts/test_cli.py
+HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe tests/test_cli.py
 ```
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
@@ -448,9 +448,9 @@ rm -f /c/Users/Administrator/.hy-mem-data-backup/write.lock
 
 **Step 3 · 跑三套测试**
 ```bash
-.venv/Scripts/python.exe scripts/test_ui.py
-.venv/Scripts/python.exe scripts/test_setup.py
-.venv/Scripts/python.exe scripts/test_cli.py
+.venv/Scripts/python.exe tests/test_ui.py
+.venv/Scripts/python.exe tests/test_setup.py
+.venv/Scripts/python.exe tests/test_cli.py
 ```
 
 **Step 4 · 构建到旁路目录**（避免直接覆盖正在用的产物）
@@ -488,7 +488,7 @@ dist-next/hy-mem/hy-mem.exe doctor          # 期望：环境可用 + 11 项 PAS
 
 **Step 7 · 契约测试打 exe**
 ```bash
-HY_MEM_TEST_EXE=dist-next/hy-mem/hy-mem.exe .venv/Scripts/python.exe scripts/test_cli.py
+HY_MEM_TEST_EXE=dist-next/hy-mem/hy-mem.exe .venv/Scripts/python.exe tests/test_cli.py
 ```
 
 **Step 8 · 替换到位 + 收尾**
@@ -690,9 +690,9 @@ ls -lt cli/ scripts/ | head
 ls -1 dist/ | grep -E "hy-mem|zip"
 
 # 6. 测试基线（确认没有既存失败，再动手）
-.venv/Scripts/python.exe scripts/test_ui.py
-.venv/Scripts/python.exe scripts/test_setup.py
-.venv/Scripts/python.exe scripts/test_cli.py
+.venv/Scripts/python.exe tests/test_ui.py
+.venv/Scripts/python.exe tests/test_setup.py
+.venv/Scripts/python.exe tests/test_cli.py
 ```
 
 **读代码的顺序**（省时间）：`helptext.py`（命令全貌）→ `hy_mem_cli.py` 的 `main()` 与 `readiness()` → `config.py` → `store.py` → `menu.py` / `tui.py`（只在动 UI 时）→ `scripts/build_exe.py`（只在打包时）。
@@ -804,7 +804,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 | 阶段 | 位置 | 入库 |
 |---|---|---|
 | 开发期红 → 绿 | `.local-test/repro_<slug>.py` / `case_<slug>.py` | ❌（整目录被忽略） |
-| 稳定后**转正** | `scripts/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 633** | ✅ |
+| 稳定后**转正** | `tests/test_*.py`，并入语义最近的套件或新增 `test_<域>.py`，**计入 633** | ✅ |
 
 判据：这条用例是发版必跑的门禁吗？是 → 转正；只是一次性复现 → 留 `.local-test/`。
 

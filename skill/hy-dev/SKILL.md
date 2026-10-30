@@ -1,6 +1,6 @@
 ---
 name: hy-dev
-description: hy-mem 项目的开发与修复流水线规范（只给开发用，不进产物、不铺到宿主）。改 cli/*.py、修用户报的 bug、准备发版打包时必读。规定三件事：① 开工先按改动类型分道（L0 文档 / L1 修复 / L2 功能 / L3 发版），避免每次都跑一遍全量；② 动手前先写「契约文档」（docs/specs/<日期>-<slug>/00-contract.md，唯一事实源），再按序号拆「分片文档」S1/R1…，每片一个 commit，完成后把状态与 commit 回写契约；③ 红测试一律先落 .local-test/，稳定后转正到 scripts/test_*.py 计入 443 项验收。含九套回归一条龙命令、提交纪律、打包五坑。
+description: hy-mem 项目的开发与修复流水线规范（只给开发用，不进产物、不铺到宿主）。改 cli/*.py、修用户报的 bug、准备发版打包时必读。规定三件事：① 开工先按改动类型分道（L0 文档 / L1 修复 / L2 功能 / L3 发版），避免每次都跑一遍全量；② 动手前先写「契约文档」（docs/specs/<日期>-<slug>/00-contract.md，唯一事实源），再按序号拆「分片文档」S1/R1…，每片一个 commit，完成后把状态与 commit 回写契约；③ 红测试一律先落 .local-test/，稳定后转正到 tests/test_*.py 计入 443 项验收。含九套回归一条龙命令、提交纪律、打包五坑。
 ---
 
 # hy-dev · 开发与修复流水线
@@ -118,7 +118,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 | 阶段 | 位置 | 命名 | 是否入库 |
 |---|---|---|---|
 | 开发期（红 → 绿） | `.local-test/` | `repro_<slug>.py`（修 bug）/ `case_<slug>.py`（功能） | 否（整目录被 `.gitignore` 忽略） |
-| 稳定后**转正** | `scripts/test_*.py` | 并入现有九套中语义最近的一套，或新增 `test_<域>.py` | 是，计入 443 |
+| 稳定后**转正** | `tests/test_*.py` | 并入现有九套中语义最近的一套，或新增 `test_<域>.py` | 是，计入 443 |
 
 **转正判据**：这条用例是发版必跑的门禁吗？是 → 转正；只是一次性复现 → 留在 `.local-test/`。
 
@@ -150,7 +150,7 @@ done
 import winreg, os, runpy
 k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment')
 for n in ('MEMORY_EMBEDDER_API_KEY','MEMORY_LLM_API_KEY'): os.environ[n] = winreg.QueryValueEx(k, n)[0]
-runpy.run_path('scripts/test_mcp.py', run_name='__main__')
+runpy.run_path('tests/test_mcp.py', run_name='__main__')
 "
 .venv/Scripts/python.exe scripts/check_secrets.py      # 必须 0 ERROR；WARN 逐条确认
 ```

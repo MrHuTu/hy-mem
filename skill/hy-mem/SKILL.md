@@ -168,7 +168,7 @@ API Key 最终进 HTTP 头 `Authorization: Bearer <key>`，而 `http.client` 用
 - `status = 0` 这个约定被**彻底删除**：`Sent.__post_init__` 拒绝 `< 100` 的值，想构造一个「状态码 0 的成功结果」会直接抛 `ValueError`。
 - 发送前 `precheck()` 先查 key 与 URL 的字符集（复用 `config.secret_charset_problem`，只一处判定），**不等异常发生**。`NotSent.cause` 取值：`precheck / encoding / dns / proxy / refused / tls / timeout / network / other`。
 - 看到 `请求没有发出` **先去查 `cause`**：`precheck` / `encoding` 是输入内容问题（key、baseUrl 里的中文/全角/零宽），`dns` / `proxy` / `refused` / `tls` / `timeout` 才是网络。
-- `scripts/test_setup.py` 有源码守卫：除 `netprobe.py` 外，`cli/` 下不许出现 `urlopen(` / `import urllib.request` / `requests` / `httpx`，也不许再写 `status == 0`。新加调用点只能复用 `netprobe.post_json()`。
+- `tests/test_setup.py` 有源码守卫：除 `netprobe.py` 外，`cli/` 下不许出现 `urlopen(` / `import urllib.request` / `requests` / `httpx`，也不许再写 `status == 0`。新加调用点只能复用 `netprobe.post_json()`。
 
 ## 写入
 
@@ -597,9 +597,9 @@ D://tools_open//agent-bridge//
 ├── skill\hy-mem\SKILL.md # 本文件（打包时会复制进产物 skill\hy-mem\）
 ├── hy-mem.cmd            # 启动器（源码模式）
 ├── scripts\build_exe.py  # 打包（消毒 + SKILL.md + 启动器/说明 + 压缩包 + 清历史）
-├── scripts\test_cli.py   # 接口契约自测：退出码 / 输出分流 / 全局选项位置
-├── scripts\test_ui.py    # 按键 / 鼠标 / 行编辑自测（无需真终端）
-├── scripts\test_setup.py # 向导 / 存储运维 / 运行环境自检 自测（不发网络请求）
+├── tests/test_cli.py   # 接口契约自测：退出码 / 输出分流 / 全局选项位置
+├── tests/test_ui.py    # 按键 / 鼠标 / 行编辑自测（无需真终端）
+├── tests/test_setup.py # 向导 / 存储运维 / 运行环境自检 自测（不发网络请求）
 ├── dist\hy-mem\          # 产物目录（351MB，含 _internal\，整个拷走）
 ├── dist\hy-mem-*-win64.zip # 对外分发物（152MB，解压即完整目录）
 └── data\                 # 记忆库 + hy_mem_queue.db，整体备份
@@ -682,4 +682,4 @@ hy-mem.exe config show      # exe 自己那份
 还有一条：`dist\hy-mem\` 是构建输出目录，**重新打包会按发布纪律删掉里面的 `config.json` 与 `data`**。自用配置请放在拷贝出去的目录里，别指望它留在 `dist` 下。
 
 
-> 全 PASS ≠ 功能可用。验收必须在**打包后的 exe** 上跑一遍：`--version` → `help` → `help --json` → 无参非 TTY → `add` + `search`。`HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe python scripts/test_cli.py` 可以一次跑完接口契约。
+> 全 PASS ≠ 功能可用。验收必须在**打包后的 exe** 上跑一遍：`--version` → `help` → `help --json` → 无参非 TTY → `add` + `search`。`HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe python tests/test_cli.py` 可以一次跑完接口契约。

@@ -7,7 +7,7 @@
 - WriteLock 跨进程排他写锁（msvcrt/flock，180s 超时降级）；
 - worker 心跳去重：并发 add --async 只拉起一个 worker。
 
-用法：python scripts/test_concurrency.py [exe路径]（缺省用源码口径）
+用法：python tests/test_concurrency.py [exe路径]（缺省用源码口径）
 判定：全部进程退出码 0、无锁超时、drain 后队列无死信 → PASS
 隔离：临时沙箱数据目录（HY_MEM_CONFIG + MEMORY_DATA_DIR），绝不打真实库。
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PY = str(REPO / ".venv" / "Scripts" / "python.exe")
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import _secrets  # noqa: E402  密钥只从环境变量取，见 scripts/_secrets.py
 
 

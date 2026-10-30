@@ -6,7 +6,7 @@
    + mark_failed 退避曲线 + retry/requeue_stale 清 not_before。
 2. 拉起闸门：detached supervisor 恒 1 个（cap=1 串行化）。
 
-跑法：.venv/Scripts/python.exe scripts/test_queue.py
+跑法：.venv/Scripts/python.exe tests/test_queue.py
 隔离：沙箱 MEMORY_DATA_DIR，绝不碰真实队列库。
 """
 from __future__ import annotations
