@@ -100,6 +100,13 @@ DEFAULTS: dict[str, Any] = {
     "search": {
         "minScore": 0.35,
     },
+    # coding 场景专属（2026-10-30 S4）：diff 版本链的仓库根。留空则链层只从
+    # 工具轨迹里的 path/old/new 确定性替换动作识别改动；填了本地 Git 仓库路径
+    # 才会去读工作区 diff。检索侧是否注入 diff 块不在这里——那是按次的
+    # --chain-block 开关（默认关，省 token）。
+    "coding": {
+        "chainRepo": "",
+    },
     "queue": {
         "maxAttempts": 3,
         "lockTimeout": 180,
@@ -446,6 +453,11 @@ def to_env(cfg: dict) -> dict[str, str]:
 
     env["MEMORY_LLM_BASE_URL"] = str(llm.get("baseUrl") or "")
     env["MEMORY_LLM_MODEL"] = str(llm.get("model") or "")
+    # coding diff 链（S4）：只在填了仓库根时注入，空值不写——SDK 拿不到这个
+    # 变量就退回「只认工具轨迹里的 path/old/new」，不会去猜仓库。
+    chain_repo = str((cfg.get("coding") or {}).get("chainRepo") or "")
+    if chain_repo:
+        env["MEMORY_CODING_CHAIN_REPO_ROOT"] = chain_repo
     key = resolve_llm_key(cfg)
     if key:
         env["MEMORY_LLM_API_KEY"] = key
@@ -495,6 +507,17 @@ def validate(cfg: dict) -> list[tuple[str, bool, str]]:
     dd = str((cfg.get("storage") or {}).get("dataDir") or "")
     looks_ok = bool(dd) and (os.path.isabs(dd) or "\\" in dd or "/" in dd)
     out.append(("storage.dataDir", looks_ok, dd if looks_ok else f"{dd!r} 不像绝对路径"))
+
+    # coding diff 链仓库根：留空合法（只认工具轨迹里的 path/old/new），
+    # 填了就必须是带 .git 的真实目录——否则链层 best-effort 静默跳过 diff，
+    # 用户会以为链开着。
+    cr = str((cfg.get("coding") or {}).get("chainRepo") or "")
+    if not cr:
+        out.append(("coding.chainRepo", True, "未设置（只认工具轨迹里的 path/old/new）"))
+    else:
+        p = Path(cr).expanduser()
+        ok = p.is_dir() and (p / ".git").exists()
+        out.append(("coding.chainRepo", ok, cr if ok else f"{cr} 不是 Git 仓库根目录"))
     return out
 
 

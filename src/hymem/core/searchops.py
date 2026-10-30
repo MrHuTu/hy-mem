@@ -153,6 +153,44 @@ def _pending_jobs() -> int:
             conn.close()
     except Exception:  # noqa: BLE001
         return 0
+def fill_chain_block(client, resp: dict, query: str, *, user_id: str,
+                     workspace_id: str | None) -> dict:
+    """补齐 scene=coding 检索的 diff 链块（SDK 在 workspace 作用域下会滤空）。
+
+    上游缺陷（2026-10-30 S4 实测，hy-memory 2.0.5）：search(scene="coding",
+    workspace_id=...) 内部把 `scope=workspace_id` 传给 chain_store.decorate，
+    而 decorate 的 `_in_scope` 是拿 scope 去比**文件相对路径的段**
+    （`src/client.py` → {src, client.py}）。编码场景的 workspace_id 通常是仓库
+    URL（`github.com/org/repo`），一个段都对不上 → 全部 thread 被滤掉 →
+    chain_block 恒空。链库本身写得没问题（thread/round 都在）。
+
+    这里用同一份链库补一次 scope=None 的 decorate：只补块、不动 facts，
+    并在 chain_note 里说明是兜底补的（不假装是 SDK 原样输出）。
+
+    失败一律静默返回原 resp —— 链层是增量，拿不到就退回纯向量双层。
+    """
+    if resp.get("chain_block"):
+        return resp
+    try:
+        owner = "%s|%s" % (str(user_id or "").strip(), str(workspace_id or "").strip())
+        if owner == "|":
+            owner = ""
+        store = client._get_chain_store(owner)  # SDK 内部接口，见上（版本变更需回归）
+        if store is None:
+            return resp
+        blk, used = store.decorate(resp.get("facts") or [], instruction=query) or ("", [])
+        if blk:
+            resp["chain_block"] = blk
+            resp["chain_used"] = used
+            resp["chain_note"] = (
+                "diff 链块由 hy-mem 兜底补齐：SDK 在带 workspace_id 时会用仓库标识"
+                "去匹配文件相对路径，匹配不上就把链全滤掉（上游行为）。"
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return resp
+
+
 def _embedding_unhealthy() -> str:
     """空结果时的自证：嵌入端点到底通不通。通就返回 ""（真没命中）。
 

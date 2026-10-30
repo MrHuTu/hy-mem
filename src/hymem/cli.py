@@ -1347,6 +1347,16 @@ def _cmd_search_scene(args, scene: str) -> int:
         )
     except Exception as e:  # noqa: BLE001
         return fail(f"scene 检索失败：{type(e).__name__}: {e}")
+    if chain_block:
+        # SDK 在带 workspace_id 时会把链全滤掉（上游 _in_scope 拿仓名比文件相对
+        # 路径），这里用同一份链库兜底补块；无 workspace 时 SDK 自己就出了块。
+        from hymem.core.searchops import fill_chain_block
+
+        r = fill_chain_block(
+            client, r, args.query,
+            user_id=identity(args).get("user_id") or config_defaults_user(),
+            workspace_id=ws,
+        )
     facts = r.get("facts") or []
     experiences = r.get("experiences") or []
     payload = {
@@ -1354,6 +1364,7 @@ def _cmd_search_scene(args, scene: str) -> int:
         "facts": facts, "experiences": experiences,
         "chain_used": r.get("chain_used") or [],
         "chain_block": (r.get("chain_block") or "")[:2000] or None,
+        "chain_note": r.get("chain_note"),
         "elapsed_ms": r.get("elapsed_ms"),
     }
     human_parts = [f"[{scene}] 事实 {len(facts)} 条、经验 {len(experiences)} 条"]
@@ -2978,6 +2989,26 @@ def cmd_menu(args) -> int:
     return menu.run_menu(menu.subprocess_dispatch)
 
 
+def _check_chain_repo(path: str) -> str | None:
+    """校验 coding diff 链仓库根。返回 None 表示可用，否则给错误文案。
+
+    只做本地文件系统判定（不跑 git 子进程）：目录要存在，且带 .git
+    （普通仓库是目录，worktree/submodule 是文件，两者都算）。
+    """
+    from pathlib import Path as _P
+
+    if not path.strip():
+        return None  # 清空 = 关闭链读取，合法
+    p = _P(path).expanduser()
+    if not p.exists():
+        return f"coding.chainRepo 路径不存在：{path}（diff 链会静默拿不到 diff，先确认真实路径）"
+    if not p.is_dir():
+        return f"coding.chainRepo 需要仓库根目录，不是文件：{path}"
+    if not (p / ".git").exists():
+        return f"coding.chainRepo 不是 Git 仓库（缺 .git）：{path}"
+    return None
+
+
 def cmd_config(args) -> int:
     from hymem.core import config as cfgmod
 
@@ -3053,6 +3084,13 @@ def cmd_config(args) -> int:
         changed, why = cfgmod.probe_dim_change(before, merged)
         if changed and not args.yes:
             return fail(f"嵌入模型变化（{why}），需要 --yes 确认；建议改用 hy-mem setup 走完整流程", EXIT_USAGE)
+        # S4：diff 链仓库根先校验再落盘——写个不存在的路径，SDK 只会静默
+        # 拿不到 diff（best-effort），用户却以为链开好了，这种假配置最难查。
+        for pair in args.pairs:
+            if pair.split("=", 1)[0].strip() == "coding.chainRepo":
+                bad = _check_chain_repo(str((merged.get("coding") or {}).get("chainRepo") or ""))
+                if bad:
+                    return fail(bad, EXIT_USAGE)
         p = cfgmod.save(merged)
         if changed:
             print(
@@ -3083,6 +3121,7 @@ def cmd_config(args) -> int:
         },
         "dataDir": (cfg.get("storage") or {}).get("dataDir"),
         "minScore": (cfg.get("search") or {}).get("minScore"),
+        "coding": {"chainRepo": (cfg.get("coding") or {}).get("chainRepo") or ""},
         "identity": {
             "userId": cfgmod.identity_defaults(cfg),
             "label": cfgmod.identity_label(cfgmod.identity_defaults(cfg)),
@@ -3111,6 +3150,7 @@ def cmd_config(args) -> int:
         + (t("（来自 ${}）", llm.get("keyEnv")) if llm.get("keyEnv") and not llm.get("apiKey") else ""),
         t("存储目录  {}", payload["dataDir"]),
         t("检索阈值  {}", payload["minScore"]),
+        t("diff 链仓库  {}", payload["coding"]["chainRepo"] or t("（未设置，只认工具轨迹里的 path/old/new）")),
     ]
     return ok(payload, False, "\n".join(lines))
 

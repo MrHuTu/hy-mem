@@ -593,8 +593,20 @@ def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
         kw["include_sources"] = inc
     if exc:
         kw["exclude_sources"] = exc
-    client = _client()
+    # S4：diff 块按次开。MCP 是长驻进程——env 必须用后即焚（finally 还原），
+    # 否则一次 chain_block=true 会污染后续所有检索（多烧 token 且结果变样）。
+    chain_block = args.get("chain_block") is True
+    if chain_block and scene != "coding":
+        raise ParamError(
+            f"chain_block 只对 scene=coding 生效（{scene} 没有版本演进链）：去掉它或改 scene=coding"
+        )
+    _prev_cb = os.environ.get("MEMORY_CODING_CHAIN_BLOCK_ENABLED")
+    if chain_block:
+        os.environ["MEMORY_CODING_CHAIN_BLOCK_ENABLED"] = "true"
     try:
+        # client 必须在开关设好之后构造：CodingConfig 在 client 初始化时读 env，
+        # 先造 client 再设 env 等于开关没生效。
+        client = _client()
         r = client.search(
             query, scene=scene, workspace_id=ws, branch=branch, **kw
         )
@@ -612,6 +624,19 @@ def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
             },
             ensure_ascii=False,
         )
+    finally:
+        if chain_block:
+            if _prev_cb is None:
+                os.environ.pop("MEMORY_CODING_CHAIN_BLOCK_ENABLED", None)
+            else:
+                os.environ["MEMORY_CODING_CHAIN_BLOCK_ENABLED"] = _prev_cb
+    if chain_block:
+        # SDK 带 workspace_id 时会把链全滤掉（上游 _in_scope 拿仓名比文件相对路径），
+        # 用同一份链库兜底补块；无 workspace 时 SDK 自己就出了块，这里空转。
+        from hymem.core.searchops import fill_chain_block
+
+        r = fill_chain_block(client, r, query,
+                             user_id=_identity()["user_id"], workspace_id=ws)
     facts = r.get("facts") or []
     experiences = r.get("experiences") or []
     out = {
@@ -622,6 +647,7 @@ def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
         "experiences": experiences,
         "chain_used": r.get("chain_used") or [],
         "chain_block": (r.get("chain_block") or "")[:2000] or None,
+        "chain_note": r.get("chain_note"),
         "elapsed_ms": r.get("elapsed_ms"),
     }
     if ws:
@@ -648,6 +674,8 @@ def _tool_search_memory(args: dict) -> str:
         raise ParamError(
             "workspace_id / branch 只对 scene=working/coding 生效：chat 记忆没有仓库作用域"
         )
+    if args.get("chain_block"):
+        raise ParamError("chain_block 只对 scene=coding 生效：chat 记忆没有 diff 演进链")
     query = str(args.get("query") or "").strip()
     if not query:
         raise ParamError("query 不能为空：检索必须提供查询词")
@@ -985,6 +1013,13 @@ TOOLS = [
                 },
                 "workspace_id": {"type": "string", "description": "按仓库/项目过滤（须与写入时一致）；仅 scene=working/coding"},
                 "branch": {"type": "string", "description": "按分支过滤（须与写入时一致），必须同时传 workspace_id"},
+                "chain_block": {
+                    "type": "boolean",
+                    "description": (
+                        "只在 scene=coding 生效：额外返回该文件的 diff 版本演进块（chain_block）。"
+                        "默认 false——注入 diff 会显著增加返回体量，只在「这段代码改过几版/怎么演进」时才开"
+                    ),
+                },
                 "include_sources": {
                     "type": "array",
                     "items": {"type": "string"},
