@@ -110,6 +110,9 @@ def _in_range(ts: float | None, since: float | None, until: float | None) -> boo
 # --------------------------------------------------------------------------
 # 工具实现：进程内直调 SDK，不走子进程（省 ~1s 冷启动/次）
 # --------------------------------------------------------------------------
+_PRODUCTIVITY_SCENES = ("working", "coding")
+
+
 def _identity() -> dict:
     """MCP 会话统一用默认身份（与 CLI 不传 -u 时同口径）。"""
     try:
@@ -127,11 +130,157 @@ def _client():
     return make_client(None)
 
 
+def _str_list(v, name: str) -> list[str] | None:
+    """筛选参数归一：单字符串 -> [s]；空列表 -> None（等同不筛）。"""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list):
+        raise ParamError(f"{name} 必须是字符串或字符串数组")
+    out = [str(x).strip() for x in v if str(x).strip()]
+    return out or None
+
+
+def _parse_scene_scope(args: dict) -> tuple[str | None, str | None, str | None]:
+    """解析 scene 三件套并校验（与 CLI --scene/--workspace/--branch 同口径）。
+
+    省略 scene = chat（现有行为零变化）；显式 working/coding 才走生产力管线。
+    """
+    raw = args.get("scene")
+    scene = None
+    if raw is not None and str(raw).strip():
+        scene = str(raw).strip().lower()
+        if scene not in ("chat",) + _PRODUCTIVITY_SCENES:
+            raise ParamError("scene 只能是 chat / working / coding（省略即 chat）")
+    ws = str(args.get("workspace_id") or "").strip() or None
+    branch = str(args.get("branch") or "").strip() or None
+    if branch and not ws:
+        raise ParamError("branch 必须和 workspace_id 一起传（SDK 作用域契约）")
+    return scene, ws, branch
+
+
+def _add_productivity(args: dict, scene: str, ws: str | None, branch: str | None) -> str:
+    """生产力场景写入：SDK client.add(messages, scene=...) 整段，同步落库。
+
+    与 chat 完全不同的管线（独立 SQLite + 独立向量集合），复用不了两段式/合批；
+    也不进异步队列——队列 payload 是按 text 单条设计的，worker 无 scene 分流。
+    """
+    import os as _os
+
+    from hymem.core import store
+
+    raw = args.get("messages")
+    if raw is None:
+        raise ParamError(
+            f"scene={scene} 需要 messages（OpenAI messages 数组，含 assistant.tool_calls "
+            "或 role=tool 的工具轨迹）；纯文本记忆请省略 scene 走 chat"
+        )
+    if isinstance(raw, str):
+        raise ParamError("messages 必须是数组，不是字符串：请传 OpenAI messages 对象数组")
+    if not isinstance(raw, list) or not raw:
+        raise ParamError("messages 必须是非空数组")
+    if any(not isinstance(m, dict) for m in raw):
+        raise ParamError("messages 每个元素都必须是对象（role/content 等字段）")
+    if str(args.get("text") or "").strip():
+        raise ParamError(
+            "text 与 messages 二选一：scene 写入的内容就是这份工具轨迹，别再叠一段 text"
+        )
+    # SDK 对「显式 scene 但无工具轨迹」静默回退 chat 管线——那是陷阱
+    # （调用方以为写了 coding 库，实际进了 chat）。门口拦住，零写入。
+    if not any((m.get("tool_calls") or m.get("role") == "tool") for m in raw):
+        raise ParamError(
+            "messages 里没有 tool_calls / role=tool：SDK 会静默把这次写入回退到 chat 管线，"
+            "已拦截（零写入）。生产力记忆的价值在工具轨迹——确认轨迹含 assistant.tool_calls "
+            "或 role=tool 的消息，或省略 scene 改贴纯文本"
+        )
+    request_id = str(args.get("request_id") or "").strip() or None
+    lock_timeout = float(_os.getenv("HY_MEM_ADD_LOCK_TIMEOUT") or 30)
+    client = _client()
+    add_kw = {"request_id": request_id} if request_id else {}
+    try:
+        # 首版保守持锁（独立管线与 chat WriteLock 理论无冲突，实测无竞争再出锁）
+        with store.WriteLock(timeout=lock_timeout):
+            r = client.add(
+                raw,
+                scene=scene,
+                workspace_id=ws,
+                branch=branch,
+                source="mcp",
+                **add_kw,
+                **_identity(),
+            )
+    except TimeoutError:
+        return json.dumps(
+            {
+                "mode": scene,
+                "ok": False,
+                "error": "lock_timeout",
+                "guidance": (
+                    f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入），可直接重试。"
+                ),
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:  # noqa: BLE001
+        return json.dumps(
+            {
+                "mode": scene,
+                "ok": False,
+                "error": "scene_write_failed",
+                "message": f"{type(e).__name__}: {e}",
+                "guidance": (
+                    f"SDK {scene} 管线报错（未入库）。常见原因：轨迹格式不合规、"
+                    "LLM 抽取失败、向量端点不可用；排查用 hy-mem doctor。"
+                ),
+            },
+            ensure_ascii=False,
+        )
+    if r.get("success") is not True:
+        return json.dumps(
+            {
+                "mode": scene,
+                "ok": False,
+                "error": "scene_write_failed",
+                "sdk_result": r,
+                "guidance": "SDK 返回 success!=true，本条大概率未落库；换措辞或检查 LLM 配置后重试。",
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    return json.dumps(
+        {
+            "mode": scene,
+            "ok": True,
+            "request_id": r.get("request_id") or request_id,
+            "fact_ids": r.get("fact_ids") or [],
+            "experience_ids": r.get("experience_ids") or [],
+            "chain_rounds": r.get("chain_rounds"),
+            "workspace_id": ws,
+            "branch": branch,
+            "note": (
+                "生产力管线是同步写入（与 chat 的异步队列不同）：返回时已落库，"
+                f"可直接用 search_memory(query, scene={scene}) 验证。"
+            ),
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+
+
 def _tool_add_memory(args: dict) -> str:
     """写入记忆。默认走异步队列（毫秒返回，worker 自动拉起落库）。"""
     from hymem.core.procs import _spawn_detached_worker
     from hymem.core.searchops import _parse_memory_at
 
+    scene, ws, branch = _parse_scene_scope(args)
+    if scene in _PRODUCTIVITY_SCENES:
+        return _add_productivity(args, scene, ws, branch)
+    if args.get("messages"):
+        raise ParamError(
+            "messages 只在 scene=working/coding 时有效：chat 记忆请用 text；"
+            "要写工具轨迹请同时传 scene"
+        )
     text = str(args.get("text") or "").strip()
     if not text:
         raise ParamError("text 不能为空：写入记忆必须提供要记的内容")
@@ -421,7 +570,84 @@ def _tool_queue_status(args: dict) -> str:
     }, ensure_ascii=False)
 
 
+def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
+                  inc: list[str] | None, exc: list[str] | None) -> str:
+    """生产力场景检索：facts / experiences 分路返回（与 chat 单路 hit 列表不同）。"""
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ParamError("query 不能为空：检索必须提供查询词")
+    try:
+        limit = max(1, min(int(args.get("limit") or 5), 20))
+    except (TypeError, ValueError):
+        raise ParamError("limit 必须是整数（1~20）")
+    min_score = args.get("min_score")
+    if min_score is not None:
+        try:
+            min_score = float(min_score)
+        except (TypeError, ValueError):
+            raise ParamError("min_score 必须是数字（0~1）")
+    kw = {"limit": limit, "user_ids": [_identity()["user_id"]]}
+    if min_score is not None:
+        kw["min_score"] = min_score
+    if inc:
+        kw["include_sources"] = inc
+    if exc:
+        kw["exclude_sources"] = exc
+    client = _client()
+    try:
+        r = client.search(
+            query, scene=scene, workspace_id=ws, branch=branch, **kw
+        )
+    except Exception as e:  # noqa: BLE001
+        return json.dumps(
+            {
+                "scene": scene,
+                "ok": False,
+                "error": "scene_search_failed",
+                "message": f"{type(e).__name__}: {e}",
+                "guidance": (
+                    f"{scene} 库检索报错。scope 不匹配（workspace/branch 传错）会查不到，"
+                    "workspace/branch 只在写入时用过才传。"
+                ),
+            },
+            ensure_ascii=False,
+        )
+    facts = r.get("facts") or []
+    experiences = r.get("experiences") or []
+    out = {
+        "scene": r.get("scene") or scene,
+        "query": query,
+        "count": len(facts) + len(experiences),
+        "facts": facts,
+        "experiences": experiences,
+        "chain_used": r.get("chain_used") or [],
+        "chain_block": (r.get("chain_block") or "")[:2000] or None,
+        "elapsed_ms": r.get("elapsed_ms"),
+    }
+    if ws:
+        out["workspace_id"] = ws
+        out["branch"] = branch
+    if not facts and not experiences:
+        out["hint"] = (
+            f"{scene} 库没命中。两点常见原因：①这个主题根本没写过 {scene} 记忆"
+            "（chat 记忆不在这里——去掉 scene 再搜）；②写入时带了 workspace_id/branch，"
+            "检索要用同样的 scope 才看得见。"
+        )
+    return json.dumps(out, ensure_ascii=False, default=str)
+
+
 def _tool_search_memory(args: dict) -> str:
+    scene, ws, branch = _parse_scene_scope(args)
+    inc = _str_list(args.get("include_sources"), "include_sources")
+    exc = _str_list(args.get("exclude_sources"), "exclude_sources")
+    if inc and exc:
+        raise ParamError("include_sources 与 exclude_sources 不能同时用（选一个）")
+    if scene in _PRODUCTIVITY_SCENES:
+        return _search_scene(args, scene, ws, branch, inc, exc)
+    if ws or branch:
+        raise ParamError(
+            "workspace_id / branch 只对 scene=working/coding 生效：chat 记忆没有仓库作用域"
+        )
     query = str(args.get("query") or "").strip()
     if not query:
         raise ParamError("query 不能为空：检索必须提供查询词")
@@ -440,6 +666,10 @@ def _tool_search_memory(args: dict) -> str:
     # 拉取上限 200 防深翻页拖慢——语义检索翻到 200 名开外本来就没有意义
     fetch = min(offset + limit, 200)
     kw = {"created_after": since} if since is not None else {}  # SDK 原生时间下限
+    if inc:
+        kw["include_sources"] = inc
+    if exc:
+        kw["exclude_sources"] = exc
     r = client.search(query, limit=fetch, min_score=min_score, user_ids=[u], **kw)
     items = _flatten_search(r)
     if not items:
@@ -670,13 +900,33 @@ TOOLS = [
             "（「今天做了 A」这类改投日志类工具）——时间流水检索价值低，事实才可复用。"
             "默认异步：立即返回，后台落库（lite 秒级；pro 模式单条可长达 2 分钟，"
             "确认落库用 queue_status，别按固定秒数等）。"
+            "**三场景**：省略 scene 走 chat（闲聊/偏好/一般事实，异步队列）；"
+            "scene=working 记文档/表格/研究/电脑操作等生产力活；scene=coding 记改码/调试/"
+            "测试/SQL 等软件工程活。后两者必须传 messages（含 tool_calls/role=tool 的工具"
+            "轨迹），是同步写入——独立存储，与 chat 记忆互不可见，检索也需带同样的 scene。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "记忆正文，一条一个主题"},
-                "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签"},
-                "async": {"type": "boolean", "description": "默认 true（入队即返回，3 车道消费）。false 时同步等待落库：两段式设计——LLM 抽取在锁外可并行，锁内只做 SDK 标准提交段（约 3~15s，reconcile 判重主导），抢不到写锁 5s 返回 lock_timeout（本条零写入，可重试或改用 async）；多条/并发务必用默认 true"},
+                "text": {"type": "string", "description": "记忆正文，一条一个主题（chat 用；与 messages 二选一）"},
+                "messages": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "工具轨迹：OpenAI messages 对象数组，须含 assistant.tool_calls 或 role=tool 的消息。"
+                        "仅 scene=working/coding 用（与 text 二选一）。没有工具轨迹会被拒——"
+                        "SDK 对无轨迹的显式 scene 会静默回退 chat，hy-mem 在门口拦成明确错误"
+                    ),
+                },
+                "scene": {
+                    "type": "string",
+                    "enum": ["chat", "working", "coding"],
+                    "description": "省略=chat（现有行为）。working=生产力记忆，coding=编码记忆（带 diff 演进链）。working/coding 写入是同步的，返回即已落库",
+                },
+                "workspace_id": {"type": "string", "description": "仓库/项目隔离（建议 git remote URL）；仅 scene=working/coding 且通常只对 coding 有意义"},
+                "branch": {"type": "string", "description": "分支隔离，必须同时传 workspace_id"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签（仅 chat 路径生效）"},
+                "async": {"type": "boolean", "description": "默认 true（入队即返回，3 车道消费）。false 时同步等待落库：两段式设计——LLM 抽取在锁外可并行，锁内只做 SDK 标准提交段（约 3~15s，reconcile 判重主导），抢不到写锁 5s 返回 lock_timeout（本条零写入，可重试或改用 async）；多条/并发务必用默认 true。scene=working/coding 恒同步，此参数忽略"},
                 "metadata": {"type": "object", "description": "附加元数据对象，如 {\"project\": \"iisw\"}"},
                 "memory_at": {
                     "type": "string",
@@ -684,7 +934,6 @@ TOOLS = [
                 },
                 "request_id": {"type": "string", "description": "幂等写 id：同一 id 重复提交只落一条"},
             },
-            "required": ["text"],
         },
     },
     {
@@ -719,6 +968,9 @@ TOOLS = [
             "语义检索匹配内容相似度，与时间问法天然不沾边，必空手；这类问题改用 "
             "list_memories + since/until 时间窗。查不到不代表没有，可换措辞再试。"
             "支持时间范围（since/until）与翻页（offset/has_more）。"
+            "**默认只搜 chat 记忆**：working/coding 记忆在独立库，必须带 scene 才搜得到"
+            "（返回 facts 事实段 + experiences 经验段两路）；"
+            "编码类问题（某段代码怎么改的、某 bug 怎么修的）先试 scene=coding。"
         ),
         "inputSchema": {
             "type": "object",
@@ -726,6 +978,23 @@ TOOLS = [
                 "query": {"type": "string", "description": "检索词（语义匹配，不是关键词精确匹配）"},
                 "limit": {"type": "integer", "description": "返回条数，默认 5，上限 20"},
                 "min_score": {"type": "number", "description": "相似度阈值，默认用配置值（0.35）"},
+                "scene": {
+                    "type": "string",
+                    "enum": ["working", "coding"],
+                    "description": "搜生产力记忆（working）或编码记忆（coding）。省略=只搜 chat 记忆；两者互不覆盖，要跨库得搜两次",
+                },
+                "workspace_id": {"type": "string", "description": "按仓库/项目过滤（须与写入时一致）；仅 scene=working/coding"},
+                "branch": {"type": "string", "description": "按分支过滤（须与写入时一致），必须同时传 workspace_id"},
+                "include_sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "只保留这些来源的记忆（如 [\"mcp\"]）；与 exclude_sources 二选一",
+                },
+                "exclude_sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "排除这些来源的记忆（如 [\"cli\"]）；与 include_sources 二选一",
+                },
                 "since": {
                     "type": "string",
                     "description": "只要这段时间之后：相对值（30m/12h/7d/30d/1y）或 ISO 日期（2026-01-01）",
