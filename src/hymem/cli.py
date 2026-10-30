@@ -1501,7 +1501,20 @@ def cmd_evolve(args) -> int:
         f"批次  {done} 批完成" + (f"（计划 {planned}）" if planned is not None else "")
         + (f"，失败 {res.get('batches_failed')}" if res.get("batches_failed") else "")
     )
-    lines.append(f"归纳  处理 {res.get('tasks_processed') or 0} 个簇")
+    # 「处理 N 个簇」在 0 批时是误导——实测 tasks_processed=1 而 batches_planned=0、
+    # continuation_reason=no_clusters，一个簇都没成却显示「处理 1 个簇」。
+    reason = str(res.get("continuation_reason") or "")
+    fresh = res.get("fresh_facts_remaining")
+    if done:
+        lines.append(f"归纳  处理 {res.get('tasks_processed') or 0} 个簇")
+    else:
+        why = {
+            "no_clusters": "未成簇（素材太散或已被判重合并）",
+            "no_facts": "无新事实",
+            "no_fresh_facts": "新事实已消费完",
+        }.get(reason, "未开批")
+        tail = f"，剩 {fresh} 条未消费" if fresh else ""
+        lines.append(f"归纳  {why}　{reason or 'unknown'}{tail}")
     if res.get("schemas_added") is not None:
         sign = "+" if res["schemas_added"] >= 0 else ""
         lines.append(f"schema  {sign}{res['schemas_added']} 条（现有 {res.get('schemas_after')} 条）")

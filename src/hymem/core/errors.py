@@ -104,8 +104,17 @@ def classify_error(e: BaseException) -> tuple[int, str, str]:
             "记忆库正被并发写入瞬态占用（SQLite WAL 重建窗口）：稍等重跑本命令即可；"
             "反复出现跑 `hy-mem doctor` 自检。这与密钥无关"
         )
-    if name == "EndpointUnavailable":
-        # 向量库服务活着却连不上：明确失败，绝不静默回落嵌入式读旧索引
+    if "graphstore (kuzu) init failed" in _msg:
+        # ultra 的 L6 图库是 kuzu 独占锁（`kuzu.Database(path)` 无 read_only），
+        # 同一数据目录第二个进程必失败。实测 2 进程并发 add → 1 成 1 败。
+        # 这条错误以前落进 _RUNTIME_TYPES，给的是「嵌入密钥无效」，纯误导。
+        return EXIT_RUNTIME, "E_RUNTIME", _tr(
+            "L6 图库（kuzu）初始化失败。最常见原因是另一个 hy-mem 进程正占着同一数据目录"
+            "——kuzu 是独占锁，ultra 属单写者模式：停掉 MCP 服务或其它 hy-mem 进程后重试；"
+            "需要多进程/多子代理并发写入，请用 mode=pro。"
+            "若确认无其它进程占用，再跑 `hy-mem doctor` 看 kuzu 依赖与日志"
+        )
+    if name == "EndpointUnavailable":        # 向量库服务活着却连不上：明确失败，绝不静默回落嵌入式读旧索引
         return (
             EXIT_RUNTIME,
             "E_ENDPOINT",

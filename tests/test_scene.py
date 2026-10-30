@@ -148,6 +148,14 @@ def main() -> int:
     sb = Path(tempfile.mkdtemp(prefix="hymem-scene-"))
     (sb / "data").mkdir()
     base_cfg = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
+    # 沙箱必须同时固定 dataDir 与 mode：
+    #   * dataDir —— config 里的绝对路径不会因为设了 MEMORY_DATA_DIR 就失效？
+    #     会失效（env 优先），但显式写死更保险，避免误触真实库；
+    #   * mode=pro —— 本套同时起 MCP 与 CLI 两个进程，ultra 下 kuzu 图库独占，
+    #     后起的那个必定 `GraphStore (kuzu) init failed`（2026-10-30 实测 D2/D3 四连红）。
+    #     scene 编码链与 mode 无关，固定 pro 才能稳定复现。
+    base_cfg["storage"]["dataDir"] = str(sb / "data")
+    base_cfg["mode"] = "pro"
     (sb / "config.json").write_text(
         json.dumps(_secrets.sandbox_config(base_cfg), ensure_ascii=False), encoding="utf-8"
     )

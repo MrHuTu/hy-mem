@@ -33,6 +33,11 @@ def _make_sandbox() -> tuple[Path, dict]:
     cfg = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
     cfg["storage"]["dataDir"] = str(sandbox / "data")
     cfg = _secrets.sandbox_config(cfg)   # 沙箱配置不留密钥，靠环境变量
+    # 固定 pro：本套测的是「多进程并发写同一库」，而 ultra 的 kuzu 图库是独占锁，
+    # 第二个进程必然 `GraphStore (kuzu) init failed`（2026-10-30 实测：2 进程并发
+    # 1 成 1 败；8 进程风暴全灭）。并发能力本身就是 pro/lite 的语义，与用户真实
+    # mode 无关——跟随真实 mode 会让本套在本地切 ultra 后必红。
+    cfg["mode"] = "pro"
     (sandbox / "cfg.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     env = {
         **os.environ,

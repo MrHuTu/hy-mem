@@ -262,17 +262,33 @@ def evolve(
         if before >= 0 and after >= 0:
             res["schemas_added"] = after - before
             ran = int(res.get("batches_completed") or 0)
-            if res.get("ok") and ran == 0 and not int(res.get("tasks_processed") or 0):
-                # 一批都没开 + 没有簇：SDK 判定「没有可归纳的新素材」。库里已经有
-                # schema 时这是最正常的结果（该归纳的都归纳过了），不说清楚用户
-                # 会以为 evolve 坏了。
-                res["note"] = (
-                    f"没有可归纳的新素材（库中现有 {after} 条 schema）。"
-                    "L6 只对「同主题但细节各异、且未被判重合并」的事实簇做归纳；"
-                    "继续 add 新内容后再跑即可。"
-                    if after > 0
-                    else "没有可归纳的素材：库里还没有成簇的事实，先 add 一批同主题内容。"
-                )
+            reason = str(res.get("continuation_reason") or "")
+            fresh = int(res.get("fresh_facts_remaining") or 0)
+            if res.get("ok") and ran == 0:
+                # 实测（2026-10-30 真实库）：tasks_processed=1、batches_planned=0、
+                # continuation_reason=no_clusters、fresh_facts_remaining=32。
+                # 旧条件要求 tasks_processed==0 才给 note，于是「有 32 条新事实却
+                # 一条簇都没成」这种最需要解释的情况反而静默——CLI 只显示「+0 条」，
+                # 用户会以为 evolve 坏了或模型不行。
+                if reason == "no_clusters" and fresh > 0:
+                    res["note"] = (
+                        f"有 {fresh} 条未消费事实，但一条簇都没成：L6 只归纳「同主题、"
+                        "细节各异、≥4 条且未被判重合并」的事实簇。当前素材主题太散"
+                        "（或太像、已被判重合并），所以 S2 连 LLM 都没调（tokens=0）。"
+                        "这不是 evolve 坏了、也不是模型不行——继续 add 同一主题的具体细节再跑。"
+                    )
+                elif fresh == 0:
+                    res["note"] = (
+                        f"没有未消费的新事实（库中现有 {after} 条 schema）。"
+                        "参与过归纳的事实会被标记排除，要新结果就得 add 新内容。"
+                        if after > 0
+                        else "没有可归纳的素材：库里还没有可成簇的事实，先 add 一批同主题内容。"
+                    )
+                else:
+                    res["note"] = (
+                        f"本次没开出批次（continuation_reason={reason or 'unknown'}，"
+                        f"剩 {fresh} 条未消费事实）。"
+                    )
             # 模型真吐了一大堆 token、却一条 schema 没新增：不是空转，是归纳出的
             # 模式与已有 schema 重复被丢弃。这个区别要给用户讲清楚，否则会以为
             # 白跑一趟就想换模型。

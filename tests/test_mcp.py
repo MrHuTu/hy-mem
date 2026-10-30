@@ -94,6 +94,10 @@ def main() -> int:
     sandbox = Path(tempfile.mkdtemp(prefix="hymem-mcp-"))
     cfg = json.loads((REPO / "config.json").read_text(encoding="utf-8"))
     cfg["storage"]["dataDir"] = str(sandbox / "data")
+    # 固定 pro：本套只验 MCP 协议全链路（8 工具）。若跟随用户真实 mode，
+    # 一旦本地切到 ultra 就会多出 evolve 工具，「8 工具齐全」必然误报失败——
+    # 2026-10-30 踩过（11 项连锁失败）。ultra 的工具集差异由 test_evolve C 面覆盖。
+    cfg["mode"] = "pro"
     # 沙箱配置里不留密钥：真 key 由环境变量提供，临时目录被贴出来也不泄漏
     cfg = _secrets.sandbox_config(cfg)
     (sandbox / "cfg.json").write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
