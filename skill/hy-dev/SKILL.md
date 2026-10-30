@@ -1,6 +1,6 @@
 ---
 name: hy-dev
-description: hy-mem 项目的开发与修复流水线规范（只给开发用，不进产物、不铺到宿主）。改 cli/*.py、修用户报的 bug、准备发版打包时必读。规定三件事：① 开工先按改动类型分道（L0 文档 / L1 修复 / L2 功能 / L3 发版），避免每次都跑一遍全量；② 动手前先写「契约文档」（docs/specs/<日期>-<slug>/00-contract.md，唯一事实源），再按序号拆「分片文档」S1/R1…，每片一个 commit，完成后把状态与 commit 回写契约；③ 红测试一律先落 .local-test/，稳定后转正到 tests/test_*.py 计入 443 项验收。含九套回归一条龙命令、提交纪律、打包五坑。
+description: hy-mem 项目的开发与修复流水线规范（只给开发用，不进产物、不铺到宿主）。改 cli/*.py、修用户报的 bug、准备发版打包时必读。规定三件事：① 开工先按改动类型分道（L0 文档 / L1 修复 / L2 功能 / L3 发版），避免每次都跑一遍全量；② 动手前先写「契约文档」（docs/specs/<日期>-<slug>/00-contract.md，唯一事实源），再按序号拆「分片文档」S1/R1…，每片一个 commit，完成后把状态与 commit 回写契约；③ 红测试一律先落 .local-test/，稳定后转正到 tests/test_*.py 计入 726 项验收。含十三条套件回归一条龙命令、提交纪律、打包五坑。
 ---
 
 # hy-dev · 开发与修复流水线
@@ -24,8 +24,8 @@ description: hy-mem 项目的开发与修复流水线规范（只给开发用，
 | Lane | 判定（改了什么） | 必做 | 可跳 |
 |---|---|---|---|
 | **L0 文档** | 只有 `*.md` / 注释 / `.gitignore` | `check_secrets` → 1 个 `docs:` commit | 全部测试、契约文档 |
-| **L1 修复** | `cli/*.py` 的逻辑（不改接口） | 复现 → 契约(根因表) → 红测试 → 改 → 同路径复跑 → 九套 → 双 commit | PRD 评审 |
-| **L2 功能** | 新命令 / 改交互 / 改配置结构 / 动数据结构 | 澄清 → 契约(条款) → 分片 → 红测试 → 九套 → 双 commit | — |
+| **L1 修复** | `cli/*.py` 的逻辑（不改接口） | 复现 → 契约(根因表) → 红测试 → 改 → 同路径复跑 → 全量 13 套 → 双 commit | PRD 评审 |
+| **L2 功能** | 新命令 / 改交互 / 改配置结构 / 动数据结构 | 澄清 → 契约(条款) → 分片 → 红测试 → 全量 13 套 → 双 commit | — |
 | **L3 发版** | 要产出 `dist/hy-mem-<ver>-win64.zip` | L1/L2 全流程 + `AGENTS.md §9` 七条 + `§10` 八步 | — |
 
 判不准就按高一档走。**改配置结构（如"密钥只留变量名"）永远算 L2**，它必然波及多处判断逻辑。
@@ -38,7 +38,7 @@ description: hy-mem 项目的开发与修复流水线规范（只给开发用，
 | **1 契约** | 写 `00-contract.md` §1 契约条款 + §2 分片表 | 写 `00-contract.md`，主体是**现象 + 复现命令 + 根因表** | `docs/specs/<日期>-<slug>/00-contract.md` |
 | **2 切片** | 按分片表逐片实现，**每片一个 commit**（可分多次提交，但一片只对应一个 commit） | 一个根因 = 一片 | 代码 + 分片文档 |
 | **3 测试** | 红测试落 `.local-test/`，绿后再转正 | 同左 | `repro_<slug>.py` / `case_<slug>.py` |
-| **4 回归** | 九套 443 项 + `check_secrets` | 同左 + **同一路径修前/修后证据** | 全绿日志 |
+| **4 回归** | 全量 13 套 726 项 + `check_secrets` | 同左 + **同一路径修前/修后证据** | 全绿日志 |
 | **5 回写** | 分片表填 `✓` + commit hash + 验证证据 | 同左 | 契约文档更新 |
 | **6 提交** | `code` 与 `docs` 两个 commit，不 push | 同左 | — |
 
@@ -118,7 +118,7 @@ docs/specs/<YYYY-MM-DD>-<slug>/
 | 阶段 | 位置 | 命名 | 是否入库 |
 |---|---|---|---|
 | 开发期（红 → 绿） | `.local-test/` | `repro_<slug>.py`（修 bug）/ `case_<slug>.py`（功能） | 否（整目录被 `.gitignore` 忽略） |
-| 稳定后**转正** | `tests/test_*.py` | 并入现有九套中语义最近的一套，或新增 `test_<域>.py` | 是，计入 443 |
+| 稳定后**转正** | `tests/test_*.py` | 并入现有 13 套中语义最近的一套，或新增 `test_<域>.py` | 是，计入 726 |
 
 **转正判据**：这条用例是发版必跑的门禁吗？是 → 转正；只是一次性复现 → 留在 `.local-test/`。
 
@@ -142,21 +142,24 @@ import _secrets                       # 密钥只从环境变量读，不许写�
 
 ```bash
 cd /d/tools_open/agent-bridge
-for t in test_cli test_ui test_setup test_vdb_endpoint test_queue test_oplog test_i18n test_encoding; do
-  printf "%-20s" $t; .venv/Scripts/python.exe scripts/$t.py 2>&1 | tail -1
+for t in test_cli test_ui test_menu test_setup test_setup_ui test_vdb_endpoint test_queue test_oplog test_i18n test_encoding; do
+  printf "%-20s" $t; .venv/Scripts/python.exe tests/$t.py 2>&1 | tail -1
 done
-# test_mcp 要真实密钥：从注册表取，不落盘
+# 以下三套要真实密钥：从注册表取，不落盘
 .venv/Scripts/python.exe -c "
 import winreg, os, runpy
 k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 'Environment')
 for n in ('MEMORY_EMBEDDER_API_KEY','MEMORY_LLM_API_KEY'): os.environ[n] = winreg.QueryValueEx(k, n)[0]
-runpy.run_path('tests/test_mcp.py', run_name='__main__')
+for t in ('test_mcp', 'test_concurrency', 'test_scene'):
+    runpy.run_path(f'tests/{t}.py', run_name='__main__')
 "
 .venv/Scripts/python.exe scripts/check_secrets.py      # 必须 0 ERROR；WARN 逐条确认
 ```
 
-期望：九套 **443** 项全绿（cli 84 / ui 94 / setup 125 / vdb 36 / mcp 22 / queue 18 / oplog 25 / i18n 29 / encoding 10）。
-数字对不上 = 有人加了用例没同步 `AGENTS.md §8`，先对齐再继续。
+期望：13 套 **726** 项全绿（cli 97 / ui 110 / menu 112 / setup 139 / setup_ui 40 / vdb 36 /
+queue 21 / oplog 25 / i18n 31 / encoding 10 = 离线 621；mcp 31 / concurrency 31 / scene 43
+= 真模型 105）。
+数字对不上 = 有人加了用例没同步本行与 `README.md` 测试段，先对齐再继续。
 
 ## 5. 提交纪律
 

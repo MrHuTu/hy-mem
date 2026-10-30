@@ -27,7 +27,7 @@ if emb.get("apiKey"):
 |---|---|---|
 | 红 | `.venv/Scripts/python.exe .local-test/repro_<slug>.py` | 失败，错误信息与现象一致 |
 | 绿 | 同上 | 通过 |
-| 回归 | `scripts/test_<域>.py` | 全绿，用例数 +N 并已同步 `AGENTS.md §8` |
+| 回归 | `tests/test_<域>.py` | 全绿，用例数 +N 并已同步 `AGENTS.md §8` |
 
 **修前 / 修后证据**（缺陷分片必填，同一串按键）：
 

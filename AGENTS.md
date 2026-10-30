@@ -72,21 +72,23 @@ D:\tools_open\agent-bridge\
 │   ├── presets.py       (239) ← 向量/LLM/模式预设（数字全部实测，别凭想象改 dims）
 │   └── local_embedder.py (112) ← 本地 ONNX 嵌入（零 key 备选，512 维，fastembed）
 │
-├── scripts\                   ← **只放业务相关**：构建 / 提交闸门 / 密钥入口 / 产品测试套件（不进产物）
+├── scripts\                   ← **只放业务相关**：构建 / 提交闸门 / 密钥入口 / 驱动脚本（不进产物）
 │   ├── build_exe.py     (507) ← 打包主脚本：消毒 → SKILL.md → 启动器/说明 → 压缩包 → 清历史
 │   ├── check_secrets.py (260) ← 提交前密钥/隐私闸门（ERROR 挡提交，WARN 要人看一眼）
 │   ├── _secrets.py      (121) ← 密钥唯一入口：只读 `MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`
 │   ├── drive_setup.py    (90) ← **黑盒驱动**：真 CLI 子进程 + 管道喂键，复现/回归交互配置 bug（见 §8.1）
-│   ├── test_cli.py      (367) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
-│   ├── test_ui.py       (417) ← 按键与渲染 + 连续写入的循环语义（假终端，无需真 TTY）
-│   ├── test_setup.py    (471) ← 向导 / 存储运维 / 队列积压（不发网络请求）
+├── tests\                     ← **13 套测试**（cli/ui/menu/setup/setup_ui/mcp/queue/vdb/oplog/i18n/encoding/concurrency/scene）
+│   ├── test_cli.py      (466) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
+│   ├── test_ui.py       (501) ← 按键与渲染 + 连续写入的循环语义（假终端，无需真 TTY）
+│   ├── test_setup.py    (690) ← 向导 / 存储运维 / 队列积压（不发网络请求）
 │   ├── test_vdb_endpoint.py (282) ← 端点层：归属校验 / 六个 ensure 分支 / pid 复用 / 真实 chroma 线程
 │   ├── test_encoding.py (118) ← stdin 解码链 + 代理项闸门 + **复刻事故环境**（PYTHONIOENCODING=gbk:surrogateescape）
 │   ├── test_oplog.py    (151) ← 操作日志：只留 50 条 / 脱敏 / 写不进去也不影响命令
-│   ├── test_i18n.py     (144) ← 中英切换：默认 zh 逐字不变 / en 生效 / 缺译回落
-│   ├── test_queue.py    (163) ← 队列核心（旧库迁移 / claim 原子性 / 退避 / 死信）
-│   ├── test_mcp.py      (252) ← MCP stdio 八工具端到端
-│   └── test_concurrency.py (150) ← 并发写 + 检索风暴（独立沙箱）
+│   ├── test_i18n.py     (141) ← 中英切换：默认 zh 逐字不变 / en 生效 / 缺译回落
+│   ├── test_queue.py    (190) ← 队列核心（旧库迁移 / claim 原子性 / 退避 / 死信）
+│   ├── test_mcp.py      (338) ← MCP stdio 八工具端到端
+│   ├── test_concurrency.py (192) ← 并发写 + 检索风暴（独立沙箱）
+│   └── test_scene.py    (359) ← scene 全量：schema/拦截/两轮编码写入+diff 链/chain_block/profile（真模型，缺密钥显式跳过）
 │
 ├── .local-test\               ← 临时/诊断脚本，**整目录 `.gitignore` 忽略、永不入库**
 │                                 probe_*（巡检/探针）、graph_ab_*（检索 A/B 实验）、
@@ -355,10 +357,11 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 |---|---|---|---|
 | `tests/test_ui.py` | **110** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、**历史翻找 / Tab 补全 / Ctrl+R 反查 / Ctrl+D / Ctrl+K**、宽度裁剪、不折行、菜单导航、控制台连写连查 | `.venv/Scripts/python.exe tests/test_ui.py` |
 | `tests/test_setup.py` | **139** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）** | `.venv/Scripts/python.exe tests/test_setup.py` |
-| `tests/test_cli.py` | **84** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
-| `tests/test_queue.py` | **18** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe tests/test_queue.py` |
+| `tests/test_cli.py` | **97** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
+| `tests/test_queue.py` | **21** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe tests/test_queue.py` |
 | `tests/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe tests/test_concurrency.py [exe]` |
-| `tests/test_mcp.py` | **22** | MCP stdio 八工具端到端：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe tests/test_mcp.py [exe]` |
+| `tests/test_mcp.py` | **31** | MCP stdio 八工具端到端：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe tests/test_mcp.py [exe]` |
+| `tests/test_scene.py` | **43** | scene（working/coding）全量：tools/list schema、参数拦截（无轨迹/二选一/branch 缺 workspace/chat 传 messages·chain_block）、两轮同文件写入 → 独立 coding 库 + diff 链两版 → chain_block 两版、默认不注入、scope 不匹配零命中、config chainRepo 校验、profile 读 L0 画像、helptext 同步 | `.venv/Scripts/python.exe tests/test_scene.py [exe]` |
 | `tests/test_vdb_endpoint.py` | **36** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe tests/test_vdb_endpoint.py` |
 | `tests/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe tests/test_encoding.py` |
 | `tests/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe tests/test_oplog.py` |

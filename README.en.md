@@ -109,8 +109,8 @@ Distribution is in directory or archive format; using 'onefile' mode is not reco
 ### Testing
 
 ```bash
-python scripts/test_cli.py
-python scripts/test_ui.py
+python tests/test_cli.py
+python tests/test_ui.py
 ```
 
 ## Notes

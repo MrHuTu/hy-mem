@@ -94,7 +94,8 @@ hy-mem/
 │       ├── server.py      # MCP 服务（8 工具，handle 协议无关）
 │       └── transport_http.py  # HTTP transport（--transport http，默认 stdio 不变）
 ├── skill/                 # Skill 定义
-├── scripts/               # 业务脚本（构建 / 闸门 / 12 套测试 / check_layering）
+├── scripts/               # 业务脚本（构建 / 闸门 / check_secrets / check_layering）
+├── tests/                 # 13 套测试（cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog / i18n / encoding / concurrency / scene）
 ├── .local-test/           # 本地临时脚本（探针 / 实验 / bug 复现），整目录不入库
 ├── data/                  # 运行时数据（不入库，程序自建）
 └── AGENTS.md             # 项目交接文档
@@ -121,9 +122,11 @@ python scripts/build_exe.py
 ### 测试
 
 ```bash
-python scripts/test_cli.py        # CLI（84 项）
-python scripts/test_setup_ui.py   # 设置向导 UI 级（40 项）
-# 共 11 套 633 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog / i18n / encoding
+python tests/test_cli.py        # CLI（97 项）
+python tests/test_setup_ui.py   # 设置向导 UI 级（40 项）
+# 共 13 套 726 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
+# i18n / encoding / concurrency / scene。其中 mcp、concurrency、scene 会真调模型
+# （缺密钥时显式跳过，不产出假绿）
 ```
 
 ## 注意事项

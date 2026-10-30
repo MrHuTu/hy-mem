@@ -206,7 +206,12 @@ hy-mem search "..." --source mcp --exclude-source cli    # sources 过滤
 
 六个分片 S0–S6 全部完成（S5 为评估档）。代码 commit：`a85ea13`(S1) / `5b8c6e3`(S2) / `356658b`(S3) / `7b0ca9b`(S4) / `23a2840`(S6)。
 
+### 收尾：repro 转正（2026-10-30，commit `29773d0`）
+
+- 四个 repro（add / mcp / chain / profile）合并转正为 **`tests/test_scene.py`（43 项，79s）**，共享一个沙箱
+- 套件总数 12 → **13 套 726 项**（离线 621 + 真模型 105）；`AGENTS.md §8` 测试矩阵、`README.md`/`README.en.md` 测试段、`skill/hy-dev/SKILL.md` 回归命令与数字已同步（顺手修掉 SKILL 里 `scripts/$t.py` 的过时路径——目录早迁到 `tests/`）
+- 两个踩坑写进测试注释：MCP 子进程 stderr 必须落文件（PIPE 满 64KB 会死锁）；`notifications/initialized` 是通知无响应，等它就是死锁
+
 ### 待办
 
-- 四个 scene repro（`repro_scene_add` / `repro_scene_mcp` / `repro_scene_chain` / `repro_scene_profile`）待统一转正进 `tests/`（真模型那部分并入 `test_mcp` 或独立 `tests/test_scene.py`），并计入套件总数
 - 版本号与打包：本批改动未发版（rc.2 之后的累积），下次发版时统一走 `build_exe` + Release
