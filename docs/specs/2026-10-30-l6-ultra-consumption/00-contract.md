@@ -45,6 +45,9 @@
 | C14 | `search_memory` 新增 `schema` 参数（默认 `true`）：ultra 下带 L6 结果，pro 下传 `true` 不报错但 `schemas=[]`，返回体带 `schema_available=false` 说明原因 | `mcp/server.py` | pro 下返回 `schema_available=false` + `note` |
 | C15 | 全部工具描述与 helptext 声明「evolve / L6 仅 ultra」 | `mcp/server.py`、`ui/helptext.py` | `hy-mem help search`、`help evolve` 含 ultra 说明 |
 | C16 | **沉淀模型必须能从「设置功能」里换**：`setup` 新增 `evolve` 项（面板一行 + `setup --step evolve` 单步）；只能填与 LLM 同一端点下的模型名（端点/密钥共用 llm），选完实测一次连通性，失败给「重填 / 仍保存 / 放弃」 | `ui/setup_wizard.py`、`ui/menu.py`、`ui/i18n.py` | `tests/test_setup.py` R 节 9 例（含两遍配置与落盘）；控制台 `setup evolve` 路由通 |
+| C17 | **零产出必须给解释，不得只报 +0**：`batches_completed == 0` 时按 `continuation_reason` 分支给话——`no_clusters` + 仍有未消费事实要说「素材太散/太像，S2 连 LLM 都没调」；`fresh=0` 说「素材已消费完，要 add 新内容」。CLI 在 0 批时**不得**用 `tasks_processed` 冒充簇数（实测 `tasks_processed=1` 而批次数 0，显示「处理 1 个簇」是误导） | `core/evolveops.py`、`cli.py cmd_evolve` | 真实库（32 条 fact、`no_clusters`）跑 `evolve` 输出「未成簇（素材太散或已被判重合并）　no_clusters，剩 32 条未消费」+ 提示段，不再只有 `schema +0 条` |
+| C18 | MCP `evolve` 工具描述必须覆盖 agent 实际会用错的四件事：**①** 不传 `model` 时用 `config.evolve.model`（未配回落 `llm.model`）；**②** 耗时数十秒到数分钟，别中途重试/并发重复调；**③** ultra 下 MCP 长驻持有图库（kuzu 独占），**这是唯一可行路径**，不能让用户改去 CLI；**④** 返回只看 `schemas_added`，`idle=true` 不等于故障、`note` 解释零增量 | `mcp/server.py` `ULTRA_TOOLS`、`skill/hy-mem/SKILL.md` | `tools/list` 里 evolve 描述含「唯一可行路径」「schemas_added」「耗时」；SKILL 有 MCP 场景段 |
+| C19 | **ultra 是单写者模式，必须在文档与错误提示里讲明**：kuzu 图库独占（`kuzu.Database(path)` 无 read_only），同一数据目录**第二进程必失败**（实测 2 进程并发 add → 1 成 1 败 `GraphStore (kuzu) init failed`；8 进程风暴全灭）。需并发写入的用户应留 pro/lite。hy-mem 不改 SDK，但错误提示不得只给泛化的 `doctor` 建议 | `README.md`、`skill/hy-mem/SKILL.md`、`core/clientops.py` 错误 hint | 并发双进程实测复现；文档写清「ultra 不支持多进程并发」 |
 
 ### 1.4 不改的边界
 
@@ -66,6 +69,7 @@
 | S4 | MCP 模式感知 | `S4-mcp.md` | `mcp/server.py` | S2、S3 | ✓ | `8d89c1e` |
 | S5 | 测试转正 | `S5-test.md` | `tests/test_evolve.py`(新) | S1–S4 | ✓ | `3354f7a` |
 | S6 | 设置功能入口（换沉淀模型） | `S6-setup.md` | `ui/setup_wizard.py`、`ui/menu.py`、`ui/i18n.py`、`ui/helptext.py`、`tests/test_setup.py` | S1、S2 | ✓ | `04e83a9` |
+| S7 | 零产出解释 + MCP 描述补全（C17/C18） | `S7-observe.md` | `core/evolveops.py`、`cli.py`、`mcp/server.py`、`skill/hy-mem/SKILL.md`、`tests/test_mcp.py` | S2、S4 | ✓ | 见 §4 |
 
 状态：`☐ 未开始` / `◐ 进行中` / `✓ 完成` / `✗ 废弃`
 
@@ -82,6 +86,7 @@
 | 2026-10-30 | 修正 C1：删除「to_env 注入 evolve.model」 | 执行前发现该做法会把 `MEMORY_LLM_MODEL` 全局改成强模型，S1 抽取（add）也一起变慢，违背 C5「不改环境变量」；改为只在 evolve 的 client config 对象上覆盖 | S1、S2 | 否（同向收紧，未改目标） |
 | 2026-10-30 | 修正 C4 退出码 3 → 1 | `EXIT_INTERNAL(3)` 表示内部错误，而 pro 下调 evolve 是「当前配置下不支持」，与 `E_NO_TRACE` 同属用法类，应为 `EXIT_USAGE(1)` | S2 | 否 |
 | 2026-10-30 | 补记 C16（新增 S6） | 用户最初就要求「这个设置必须放到 CLI 的设置功能中去，不然用户无法更换模型」，初版契约漏写成条款（S1 只做了 `config set evolve.model`）。S1–S5 完成后补齐 `setup evolve` | S6 | 否（补记既有要求） |
+| 2026-10-30 | 补记 C17/C18（新增 S7） | 实际切 ultra 后跑真实库才暴露：32 条事实一条簇都没成，CLI 只输出「schema +0 条」，还把 `tasks_processed=1` 显示成「处理 1 个簇」——用户无从判断是素材问题还是坏了。同时 MCP 工具描述没写「不传 model 用哪个模型 / 耗时 / MCP 是唯一路径 / 返回看哪个字段」，agent 极易误用 | S7 | 否（可观测性与文档缺口） |
 
 ---
 
@@ -96,3 +101,4 @@
 | C14–C15 | S4 | `8d89c1e` | 同上 | `search_memory` 收 `schema`/`schema_limit`，pro 返回 `schema_available=false` + note；`help evolve` / `help search` 含 ultra 说明 |
 | 全部 | S5 | `3354f7a` | `tests/test_evolve.py` 35 项 78s | 14 套 **772** 项全绿（离线 632 + 真模型 140） |
 | C16 | S6 | `04e83a9` | 同上 | `test_setup` R1–R9（首次指定 / 改回沿用 / 失败两分支 / `run_setup(scope=evolve)` 真落盘 / 不串 `llm.model`）；`test_setup_ui` G0 菜单含该行 |
+| C17–C18 | S7 | 见 `S7-observe.md` | 1.0.0-rc.3（待打包） | 真实库 32 条 fact：`hy-mem evolve` → 「未成簇（素材太散或已被判重合并）　no_clusters，剩 32 条未消费」+ 提示段；沙箱走配置链路 `.local-test/verify_evolve_config.py` 7/7（`model=deepseek-v4.1-flash` / `schemas_added=3` / completion 3214 / `llm.model` 跑完不变）；`test_mcp` 31/31 |

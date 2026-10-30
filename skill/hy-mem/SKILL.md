@@ -476,12 +476,15 @@ hy-mem evolve --model deepseek-v4.1-flash   # 本次临时换模型，不改配�
 hy-mem evolve --batches 2            # 最多跑几批（调试用）
 ```
 
-四条硬事实（踩过坑）：
+**MCP 场景只能走工具，不能走 CLI。** ultra 下 MCP 服务长驻就持有图库（kuzu 独占锁），此时在终端跑 `hy-mem evolve` 必然报 `Could not set lock on file` —— 要用 MCP 的 `evolve` 工具（它跑在持有进程内）。工具不传 `model` 时用配置里的 `evolve.model`；耗时数十秒到数分钟，别中途重试。一次调用结束看 `schemas_added`，正数才是真产出。
+
+五条硬事实（踩过坑）：
 
 1. **模型是成败关键。** 意图分类小模型（`*-analysis-flash` 这类）能抽取但做不了开放归纳——实测 3850 prompt tokens 只回 **7 个 token**、0 条 schema，还自报 success。换通用大模型同一批素材立刻出 2~3 条。所以 `evolve.model` 与 `llm.model` 分开配，能单独指一个强模型。
 2. **素材只能用一次。** 参与过归纳的事实会被标记排除，同一批再跑一次通常零产出（返回里会说明）。要新结果就 `add` 新内容。
-3. **不是每条事实都能成簇。** 需要「同主题、细节各异、≥4 条且没被判重合并」。太散 → 簇都成不了，LLM 根本不会被调用（`batches_completed: 0`）；太像 → 被 reconcile 合成一条。
+3. **不是每条事实都能成簇。** 需要「同主题、细节各异、≥4 条且没被判重合并」。太散 → 簇都成不了，LLM 根本不会被调用（`batches_completed: 0`）；太像 → 被 reconcile 合成一条。零产出时会打印**剩余未消费事实数**与原因（`no_clusters` / `no_facts`），据此判断是「素材太散」还是「已消费完」，别当成故障。
 4. **返回 `idle: true` 别当成功。** 它表示模型被调了但 completion < 150 token——多半是模型做不了这件事。看 `schemas_before/after` 增量才算数。
+5. **ultra 是单写者模式，不能多进程并发。** L6 图库用 kuzu（`kuzu.Database(path)` 无 read_only），**同一数据目录第二个进程必失败**：实测 2 进程并发 `add` → 1 成 1 败 `GraphStore (kuzu) init failed`，8 进程风暴全灭。所以 ultra 下 CLI 与 MCP 不能同时用同一库；需要多子代理并发写入就留在 pro。MCP 长驻持有图库时，`evolve` 只能用 MCP 工具跑（见下），CLI 的 `hy-mem evolve` 会撞锁。
 
 检索侧：ultra 下 `search` 会额外带 L6 schema（`schemas` 字段）。`--no-schema` 关掉，`--schema-limit N` 调条数（默认 3），`--schema` 强制开。schema 与事实**同尺度打分**（实测相关 query top1 均值 0.47、对照 0.25），所以按 `schemaMinScore=0.4` 卡真实相关，不带无关内容。
 

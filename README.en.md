@@ -9,6 +9,8 @@ Local long-term memory service providing cross-session memory storage and semant
 - **Tag Management**: Flexible tag system supporting archiving and classification
 - **Interactive Configuration**: Visual setup wizard and health check
 - **Multi-Identity Support**: Distinguish different Agent memory spaces via `user_id`
+- **L6 Cognitive Layer (ultra only)**: `evolve` condenses a batch of facts into "behavior patterns" that are retrieved semantically alongside facts. Its model is configured separately (`config set evolve.model=…`) — small intent-classification models can extract but cannot do open-ended induction
+- ⚠️ **ultra is single-writer**: the L6 graph store uses kuzu (exclusive lock, no `read_only`), so a **second process on the same data directory always fails** (measured: 2 concurrent `add` → 1 ok / 1 fail). Do not run CLI and MCP against the same store in ultra; stay on **pro** if you need multi-process / multi-subagent concurrent writes. While MCP holds the graph, `evolve` only works through the MCP tool — the CLI `hy-mem evolve` will hit the lock
 
 ## Quick Start
 
