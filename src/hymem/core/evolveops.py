@@ -209,11 +209,67 @@ def _schema_count(client, user_id: str = "default") -> int:
         return -1
 
 
+# ---------------------------------------------------------------- language
+# SDK 2.0.5 的 System2 归纳语言靠 _detect_language 自动检测（zh_ratio≥0.7），
+# 对技术型中文记忆结构性失灵（路径/时间戳/术语把分母灌成 ASCII，实测 0.318
+# 判 en → 英文 schema → 中文 query 检索 0.17~0.34）。已提上游 issue；SDK
+# 修复前在这里打运行时补丁：给 _build_single_call_system_prompt 的返回值尾部
+# 追加一句输出语言指令。不改 vendor、SDK 升级改名时软降级。
+_LANG_DIRECTIVES = {
+    "zh": "\n\n【输出语言要求】所有 create_schema / revise_schema 操作的 "
+          "content 与 retrieval_text 必须用简体中文书写；专有名词与技术标识"
+          "（路径、命令、产品名、术语）可保留英文。",
+    "en": "\n\n[Language requirement] All content and retrieval_text in "
+          "create_schema / revise_schema operations MUST be written in English.",
+}
+_LANG_STATE = {"language": ""}  # 当前生效语言（幂等切换用，进程级）
+
+
+def apply_language_directive(language: str) -> str:
+    """按给定语言给 SDK System2 系统提示词装输出语言指令。
+
+    返回 warning（成功为空串）。语义：
+    - ""（auto）：不注入，完全跟随 SDK 行为；
+    - "zh"/"en"：**无视检测结果**强制追加（en 提示词选中也追加 zh 指令——
+      检测不可靠正是需要强制的原因）；
+    - 重复调用幂等（切换语言只换指令，不叠加）。
+    SDK 升级若函数改名/缺失，返回 warning 且 evolve 照常跑（退回默认行为）。
+    """
+    language = str(language or "").strip().lower()
+    if language not in _LANG_DIRECTIVES:
+        if language:
+            return f"evolve.language={language!r} 不是 zh/en/auto，忽略（按 auto 处理）"
+        _LANG_STATE["language"] = ""
+        return ""
+    try:
+        from hy_memory.pipelines import system2_agent as _s2
+    except Exception as e:  # noqa: BLE001
+        return f"语言指令补丁失败：无法导入 SDK system2_agent（{e}），按 SDK 默认行为继续"
+    orig = getattr(_s2, "_build_single_call_system_prompt", None)
+    if orig is None:
+        return "语言指令补丁失败：SDK 无 _build_single_call_system_prompt（版本不兼容），按默认行为继续"
+    if getattr(orig, "_hymem_lang_patched", False):
+        # 已装过补丁：只切语言，不重复包一层
+        _LANG_STATE["language"] = language
+        return ""
+    base_fn = orig
+
+    def _patched(lang: str) -> str:
+        out = base_fn(lang)
+        return out + (_LANG_DIRECTIVES.get(_LANG_STATE["language"]) or "")
+
+    _patched._hymem_lang_patched = True  # type: ignore[attr-defined]
+    _s2._build_single_call_system_prompt = _patched
+    _LANG_STATE["language"] = language
+    return ""
+
+
 def evolve(
     model_override: str = "",
     max_batches: int | None = None,
     user_id: str = "default",
     client=None,
+    language: str = "",
 ) -> dict:
     """跑一次 S2 归纳。返回 summarize() 的结构（含 idle 判定与 schema 增量）。
 
@@ -227,6 +283,10 @@ def evolve(
 
     ev = cfgmod.load().get("evolve") or {}
     model = str(model_override or ev.get("model") or "").strip()
+    # 语言：显式参数 > config > auto。装补丁可能软降级（SDK 改名），warning
+    # 随结果带出去（CLI 的「提示」行 / MCP 的 language_note 字段）。
+    lang_eff = str(language or ev.get("language") or "").strip().lower()
+    lang_note = apply_language_directive(lang_eff)
     own = client is None
     old_model = ""
     old_mt = None
@@ -251,11 +311,15 @@ def evolve(
                 "idle": False,
                 "error": msg,
                 "error_hint": _error_hint(msg),
+                "language": lang_eff or "(auto)",
+                "language_note": lang_note,
                 "schemas_before": before,
                 "schemas_after": _schema_count(client, user_id),
             }
         after = _schema_count(client, user_id)
         res = summarize(out)
+        res["language"] = lang_eff or "(auto)"
+        res["language_note"] = lang_note
         res["model"] = _effective_model(model_override)
         res["schemas_before"] = before
         res["schemas_after"] = after

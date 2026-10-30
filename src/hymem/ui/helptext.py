@@ -264,6 +264,7 @@ CMD_META: dict[str, dict] = {
         },
         "notes": ["set 用点路径，例如 embedding.model=xxx；改嵌入相关字段后要自己确认维度一致。",
                   "模型怎么选：llm.model（S1 抽取/分类）推荐分析类小模型（如 tongyi-xiaomi-analysis-flash），evolve.model（S2 归纳，仅 ultra）推荐更强的通用大模型（如 deepseek-v4.1-flash）；evolve.model 留空回落 llm.model。",
+                  "evolve.language：归纳输出语言。auto（空）跟随 SDK 检测——它对技术型中文记忆失灵（实测 32 条中文事实被判 en）；中文 schema 打不上中文检索分就 set evolve.language=zh，下次 evolve 起生效。",
                   "界面语言：hy-mem config set lang=en（或设置页的「界面语言」），立即生效。"],
     },
     "user": {
@@ -407,6 +408,7 @@ CMD_META: dict[str, dict] = {
             "模型怎么选：llm.model（S1）服务抽取/分类等封闭判定，推荐分析类小模型（快、便宜）；evolve.model（S2）做开放归纳，推荐更强的通用大模型。意图分类模型（如 tongyi-*-analysis-flash）做归纳实测 3850 prompt tokens 只回 7 个 token。这种空转会被标成 idle=true，框架仍报 success——别被 success 骗了。",
             "kuzu 是独占锁：MCP 服务长驻会一直持有图库，CLI 的 evolve 会失败。先停 MCP，或改用 MCP 里的 evolve 工具（跑在持有进程内）。",
             "--model 只影响本次，不改 config.json；想长期生效写 evolve.model。",
+            "--language zh/en 只影响本次归纳的输出语言；想长期生效写 evolve.language。技术型中文记忆被归纳成英文 schema（中文检索打不上分）时用它强制中文。",
         ],
     },
     "delete": {

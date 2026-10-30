@@ -333,6 +333,61 @@ def main() -> int:
           float((_cfg_e.DEFAULTS.get("evolve") or {}).get("schemaMinScore") or 0) == 0.25,
           repr((_cfg_e.DEFAULTS.get("evolve") or {}).get("schemaMinScore")))
 
+    # ================= F 归纳语言可控（离线桩，R1/R2） =================
+    print("\n== F evolve.language 语言指令补丁（离线桩）==")
+    from hy_memory.pipelines import system2_agent as _s2_f
+
+    from hymem.core import evolveops as _evo_f
+
+    _orig_prompt_f = _s2_f._build_single_call_system_prompt
+
+    # F1 auto（""）：不改行为（SDK 原生输出，逐字一致）
+    _w = _evo_f.apply_language_directive("")
+    _out = _s2_f._build_single_call_system_prompt("en")
+    check("F1 auto 不注入（输出与 SDK 原生一致）",
+          _out == _orig_prompt_f("en") and not _w, _w)
+
+    # F2 强制 zh：SDK 判 en 也追加（技术型中文记忆实测 zh_ratio=0.318 的场景）
+    _w = _evo_f.apply_language_directive("zh")
+    _out = _s2_f._build_single_call_system_prompt("en")
+    check("F2 强制 zh 时 en 提示词也追加中文输出指令",
+          _w == "" and _out.startswith(_orig_prompt_f("en"))
+          and "简体中文" in _out[len(_orig_prompt_f("en")):],
+          _w or _out[-80:])
+
+    # F3 强制 en：对偶指令（zh 提示词上也要生效）
+    _w = _evo_f.apply_language_directive("en")
+    _out = _s2_f._build_single_call_system_prompt("zh")
+    check("F3 强制 en 时 zh 提示词追加英文指令",
+          _out.startswith(_orig_prompt_f("zh"))
+          and "MUST be written in English" in _out[len(_orig_prompt_f("zh")):],
+          _w or _out[-80:])
+
+    # F4 幂等：切换后单次追加不叠加
+    _evo_f.apply_language_directive("zh")
+    _out2 = _s2_f._build_single_call_system_prompt("zh")
+    check("F4 切换语言后单次追加不叠加",
+          _out2.count("【输出语言要求】") == 1, _out2[-60:])
+
+    # F5 非法值：no-op + warning，不抛异常
+    _w = _evo_f.apply_language_directive("fr")
+    check("F5 非法语言 no-op 且给 warning", bool(_w), _w)
+    _evo_f.apply_language_directive("")  # 还原 auto，别影响 D 面
+
+    # F6 配置默认值：language=""（auto），key 必须显式存在
+    _ev_f = _cfg_e.DEFAULTS.get("evolve") or {}
+    check("F6 evolve.language 默认 auto（空串）",
+          "language" in _ev_f and _ev_f.get("language") == "",
+          repr(_ev_f.get("language")))
+
+    # F7 MCP evolve 工具声明 language 参数（离线查 ULTRA_TOOLS 注册表）
+    from hymem.mcp import server as _srv_f
+
+    _ev_tool = next((t for t in _srv_f.ULTRA_TOOLS if t.get("name") == "evolve"), {})
+    check("F7 evolve 工具 inputSchema 含 language 参数",
+          "language" in (_ev_tool.get("inputSchema", {}).get("properties", {})),
+          str(list((_ev_tool.get("inputSchema", {}).get("properties", {})).keys())))
+
     # ================= D ultra 面 =================
     print("\n== D ultra 面（真模型：写入 → evolve → 检索）==")
     uid = "l6_test"
@@ -346,9 +401,10 @@ def main() -> int:
 
     ev = jload(run(env_ultra, ["--json", "--user", uid, "evolve", "--batches", "1"], timeout=900))
     check("D2 evolve 跑通", ev.get("ok") is True, str(ev.get("error"))[:100])
-    check("D2 返回结构齐全（批次/token/schema 计数）",
+    check("D2 返回结构齐全（批次/token/schema 计数/语言）",
           all(k in ev for k in ("batches_completed", "prompt_tokens", "completion_tokens",
-                                "schemas_before", "schemas_after")), sorted(ev))
+                                "schemas_before", "schemas_after", "language", "language_note")),
+          sorted(ev))
     check("D2 记录了使用的模型", bool(ev.get("model")), ev.get("model"))
     # 7 条素材多半够不到聚簇门槛（L6 要「同主题且细节各异、≥4 条不被判重合并」），
     # 这时 SDK 直接返回 no_clusters/facts，LLM 根本不会被调用。两种情况要分开断言，

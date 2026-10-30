@@ -963,6 +963,7 @@ def _tool_evolve(args: dict) -> str:
         max_batches=int(batches) if batches is not None else None,
         user_id=uid,
         client=_client(),
+        language=str(args.get("language") or "").strip(),
     )
     res["user_id"] = uid
     return json.dumps(res, ensure_ascii=False)
@@ -1289,6 +1290,15 @@ ULTRA_TOOLS = [
                 "batches": {
                     "type": "integer",
                     "description": "最多跑几批（调试用）；不填由 SDK 按簇数决定",
+                },
+                "language": {
+                    "type": "string",
+                    "enum": ["zh", "en"],
+                    "description": (
+                        "归纳输出语言。中文记忆被归纳成英文 schema（中文检索打不上分）时传 zh："
+                        "会给归纳模型注入「content/retrieval_text 必须用中文」的指令，无视 SDK 自动检测"
+                        "（它对技术型中文记忆失灵，实测 32 条中文事实被判 en）。不传走 evolve.language 配置（默认 auto）"
+                    ),
                 },
                 "user_id": {
                     "type": "string",

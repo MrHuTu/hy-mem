@@ -1479,7 +1479,10 @@ def cmd_evolve(args) -> int:
             file=sys.stderr,
         )
 
-    res = evolveops.evolve(model_override=model, max_batches=batches, user_id=uid)
+    res = evolveops.evolve(
+        model_override=model, max_batches=batches, user_id=uid,
+        language=getattr(args, "language", "") or "",
+    )
 
     if not res.get("ok"):
         return fail(
@@ -1522,8 +1525,12 @@ def cmd_evolve(args) -> int:
         f"tokens  输入 {res.get('prompt_tokens')} / 输出 {res.get('completion_tokens')}"
         f"　耗时 {round((res.get('elapsed_ms') or 0) / 1000, 1)}s"
     )
+    if str(res.get("language") or "") not in ("", "(auto)"):
+        lines.append(f"语言  {res['language']}（已注入输出语言指令）")
     if res.get("note"):
         lines.append(f"提示  {res['note']}")
+    if res.get("language_note"):
+        lines.append(f"提示  {res['language_note']}")
     return ok(res, False, "\n".join(x for x in lines if x))
 
 
@@ -3635,6 +3642,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="本次使用的归纳模型（不改配置）；不填用 evolve.model，再退到 llm.model",
     )
     ps.add_argument("--batches", type=int, default=None, help="最多跑几批（调试用）")
+    ps.add_argument(
+        "--language",
+        default="",
+        help="本次归纳输出语言 zh/en（不改配置）；不填用 evolve.language（auto 跟随 SDK 检测）",
+    )
     ps.set_defaults(func=cmd_evolve)
 
     ps = sub.add_parser("list", help="列出记忆")
