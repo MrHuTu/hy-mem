@@ -289,7 +289,7 @@ CMD_META: dict[str, dict] = {
     },
     "add": {
         "group": "写入",
-        "when": "用户说「记一下」、表达偏好/决策/项目事实、确认了一个技术方案时。",
+        "when": "用户说「记一下」、表达偏好/决策/项目事实、确认了一个技术方案时。写事实型内容（主体+具体值），别写时间性流水——事实可复用，流水检索价值低。",
         "mutates": True,
         "examples": [
             'hy-mem add "招商活动报名审批流用自研 FSM，fireAndPersist 落库"',
@@ -311,7 +311,7 @@ CMD_META: dict[str, dict] = {
     },
     "search": {
         "group": "读取",
-        "when": "回答涉及用户历史偏好、项目上下文、以往决策，且当前上下文里没有时。",
+        "when": "主题类问题：历史偏好/项目上下文/技术事实（「部署目录在哪」「用的什么模型」）。时间类问题（「我昨天做了什么」）别用 search——语义匹配对时间问法必空手，改 list --since/--until。",
         "mutates": False,
         "examples": [
             'hy-mem --json search "上次定的部署方式" -n 5',
@@ -327,7 +327,7 @@ CMD_META: dict[str, dict] = {
     },
     "list": {
         "group": "读取",
-        "when": "浏览最近写了什么、拿 id 去删。",
+        "when": "时间类问题的正解（「我昨天做了什么」→ --since 1d 浏览）；也用于浏览最近写入、拿 id 去删。",
         "mutates": False,
         "examples": ["hy-mem --json list -n 20", "hy-mem --json list --tag infra --offset 20"],
         "output": {"resp": "{count, source(vdb|recent), tags_filter[], memories[]}"},
