@@ -158,4 +158,29 @@ hy-mem search "..." --source mcp --exclude-source cli    # sources 过滤
 
 ## §2 执行记录
 
-（未开始）
+### S1 写入入口（2026-10-30，commit `a85ea13`）
+
+- 实现：`_cmd_add_scene()`——`--scene working|coding` + `--trace <messages.json|->` + `--workspace` + `--branch`；`client.add(messages, scene=...)` 整段，**不走两段式/合批**（独立管线）
+- 门口预检：无 `tool_calls`/`role=tool` → `E_NO_TRACE` 零写入（SDK 静默回退 chat 是陷阱，不往外放）
+- 验收：`repro_scene_add` 7/7（E_NO_TRACE 拦截、fact 恰 1 条、`coding_memory_cv.db` + facts 表生成、chat 缺省同构）
+
+### S2 检索 + outcome（2026-10-30，commit `5b8c6e3`）
+
+- 实现：`_cmd_search_scene()`——facts/experiences 双路返回、`--workspace/--branch` scope、`--source-filter`、`--chain-block`（按次注入 `MEMORY_CODING_CHAIN_BLOCK_ENABLED`，用后即焚）
+- 实现：`hy-mem outcome <request_id>` → `get_write_outcome()` 排版
+- 验收：`repro_scene_add` 8/8（facts 命中刚写入的 `fact_id` 闭环）；回归 `test_cli` 97/97、`test_mcp` 31/31
+
+### S3 MCP 增强（2026-10-30）
+
+- 新增 `_PRODUCTIVITY_SCENES` / `_parse_scene_scope()` / `_str_list()` / `_add_productivity()` / `_search_scene()`
+- `add_memory`：`messages` / `scene` / `workspace_id` / `branch`；`text` 与 `messages` 二选一；无轨迹直接 `ParamError`（与 CLI 同一拦截口径，不让 SDK 静默回退 chat）；**scene 写入恒同步**（队列 payload 是 text 单条设计，worker 无 scene 分流），返回带 `note` 说明；`required: ["text"]` 移除（改由实现校验二选一）
+- `search_memory`：`scene` / `workspace_id` / `branch` / `include_sources` / `exclude_sources`；scene 分路返回 facts+experiences 两段（零命中给排障 hint：chat/生产力库互不可见、scope 要对齐）；include/exclude 互斥
+- 边界守住：chat 路径传 `messages` 报错、chat 路径传 `workspace_id/branch` 报错（chat 记忆没有仓库作用域）
+- 描述沿 rc.2 口径扩写：三场景分工（省略=chat / working=生产力 / coding=编码），并点明「库隔离 → 要跨库得搜两次」
+- 验收 `repro_scene_mcp` **15/15**（M1 schema 齐全、M2-M5 四类参数拦截、M6 真轨迹写入 fact 恰 1 条、M7 facts 命中刚写入 fact_id、M8 scope 不匹配零命中带 hint、M9 chat 缺省仍异步入队）；回归 `test_cli` 97/97、`test_mcp` 31/31
+- 测试环境坑（登记备查）：进程内直调 `hymem.mcp.server` 必须先跑 `cli.load_env()`，否则 `config.json` 没映射成 `MEMORY_*` 环境变量 → SDK 退回默认 openai 端点、embedding 连不上、facts 落不了库（第一轮 12/15 的失败全源于此，非产品缺陷）
+
+### 待办
+
+- S4 diff 链 / S5 ultra 评估 / S6 profile 命令
+- 三个 scene repro（S1/S2/S3）待 S6 收尾后统一转正进 `tests/`，计入套件总数
