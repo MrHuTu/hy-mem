@@ -273,6 +273,79 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         check("chroma 集成段异常", False, f"{type(e).__name__}: {e}")
 
+    # ---- U3 端点失效自愈（docs/specs/2026-11-02-endpoint-refresh/）----
+    # _endpoint_stale 四态 + _client 重建路径静态守护
+    from hymem.mcp import server as mcp_server
+
+    _saved = {k: os.environ.get(k) for k in
+              ("MEMORY_VECTOR_HOST", "MEMORY_VECTOR_PORT", vdb_endpoint.SRC_ENV)}
+    try:
+        for k in _saved:
+            os.environ.pop(k, None)
+        check("U3 无标记 env（嵌入式）→ False",
+              mcp_server._endpoint_stale() is False)
+
+        os.environ["MEMORY_VECTOR_HOST"] = "127.0.0.1"
+        os.environ[vdb_endpoint.SRC_ENV] = vdb_endpoint.SRC_VALUE
+        dead = _free_port()
+        os.environ["MEMORY_VECTOR_PORT"] = str(dead)
+        check("U3 注入端口心跳死 → True",
+              mcp_server._endpoint_stale() is True)
+
+        hport3, hsrv3 = _start_fake_heartbeat()
+        try:
+            os.environ["MEMORY_VECTOR_PORT"] = str(hport3)
+            check("U3 注入端口心跳活 → False",
+                  mcp_server._endpoint_stale() is False)
+
+            os.environ["MEMORY_VECTOR_PORT"] = str(dead)
+            vdb_endpoint.write_port_file(hport3)  # owner=本进程，活着
+            check("U3 env 死 + 登记新活端口 → True",
+                  mcp_server._endpoint_stale() is True)
+            vdb_endpoint.remove_port_file(expect_pid=os.getpid())
+        finally:
+            hsrv3.shutdown()
+
+        # 外部显式配置（无 SRC 标记）不干预
+        os.environ.pop(vdb_endpoint.SRC_ENV, None)
+        os.environ["MEMORY_VECTOR_PORT"] = str(dead)
+        check("U3 外部配置死端口 → False（尊重不动）",
+              mcp_server._endpoint_stale() is False)
+
+        import inspect
+        src = inspect.getsource(mcp_server._client)
+        check("U3 _client 缓存命中前复验并放掉重建",
+              "_endpoint_stale()" in src and "_close_client()" in src)
+    finally:
+        for _k, _v in _saved.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+    # ---- S2 servePort 固定端口（docs/specs/2026-11-02-endpoint-refresh/）----
+    try:
+        want = _free_port()
+        sport3, srv3 = vdb_endpoint.start_server_thread(persist, port=want)
+        check("S2 固定端口生效",
+              sport3 == want and vdb_endpoint.heartbeat_ok(want, timeout=2.0),
+              f"want={want} got={sport3}")
+        vdb_endpoint.stop_server_thread(srv3, sport3)
+
+        blocker = socket.socket()
+        blocker.bind(("127.0.0.1", want))
+        blocker.listen(1)
+        try:
+            sport4, srv4 = vdb_endpoint.start_server_thread(persist, port=want)
+            check("S2 占用回退随机",
+                  sport4 != want and vdb_endpoint.heartbeat_ok(sport4, timeout=2.0),
+                  f"want={want} got={sport4}")
+            vdb_endpoint.stop_server_thread(srv4, sport4)
+        finally:
+            blocker.close()
+    except Exception as e:  # noqa: BLE001
+        check("S2 固定端口段异常", False, f"{type(e).__name__}: {e}")
+
     ok = all(results)
     print(f"\n{'全部通过' if ok else '存在失败'}：{results.count(True)}/{len(results)}")
     return 0 if ok else 1

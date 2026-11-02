@@ -66,6 +66,10 @@ DEFAULTS: dict[str, Any] = {
     "backend": {
         "memory": "hy-memory",
     },
+    # serve 固定端口（U3 加固，docs/specs/2026-11-02-endpoint-refresh/）：
+    # 0 = 随机空闲端口（历史行为）。设为固定值后 serve 重启不再换端口，
+    # 长驻 client 冻结的向量端点恒有效；被占用时回退随机并 stderr 告警。
+    "servePort": 0,
     # 界面语言（zh / en）。放顶层而不是 ui.language：后者是历史遗留、从未生效，
     # 真正决定文案的是 i18n.lang()，它读的就是这个字段。
     "lang": "zh",

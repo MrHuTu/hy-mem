@@ -35,8 +35,16 @@ def cmd_serve(args) -> int:
                   f"向量库服务已在运行（pid {info['pid']}, :{info['port']}），本进程无需启动")
 
     persist = vdb_endpoint.sdk_persist_dir()
+    # U3（docs/specs/2026-11-02-endpoint-refresh/）：servePort 配置的固定端口，
+    # 0/缺省 = 随机（历史行为）；被占用时 start_server_thread 自行回退并告警。
+    try:
+        from hymem.core import config as _cfgmod
+
+        _want_port = int(_cfgmod.load().get("servePort") or 0)
+    except Exception:  # noqa: BLE001  配置坏了不该拦住 serve 起库
+        _want_port = 0
     t0 = time.time()
-    port, handle = vdb_endpoint.start_server_thread(persist)
+    port, handle = vdb_endpoint.start_server_thread(persist, port=_want_port or None)
 
     # 登记要在锁里做：两个 serve 同时启动时，只让先登记的活下来，另一个
     # 立即收摊——同一数据目录绝不允许两个所有者。

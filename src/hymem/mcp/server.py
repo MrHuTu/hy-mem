@@ -130,6 +130,37 @@ def _identity() -> dict:
 _CLIENT = None
 
 
+def _endpoint_stale() -> bool:
+    """检测注入端点是否失效（U3，docs/specs/2026-11-02-endpoint-refresh/）。
+
+    serve 空闲自退后重拉必换端口（bind :0 随机分配），而 SDK client 构造期
+    一次性冻结 MEMORY_VECTOR_HOST/PORT——长驻进程不重建就永远连旧死端口
+    （ConnectError 10061，实测 add sync 挂而 search 侥幸的分裂现场）。
+    判定（全部只读、回环拒连即时返回，正常热路径 ~1ms）：
+      1. 只对「自己注入的 env」生效（SRC 标记）；外部显式配置不干预，
+         嵌入式（无标记）恒 False；
+      2. env 端口心跳死了 → 失效（重建后 make_client→ensure_endpoint 会
+         重发现/重拉 serve 并重注入 env）；
+      3. 端口文件登记了另一个活着且可达的端口 → 失效（换端口场景）。
+    """
+    from hymem.core import vdb_endpoint
+
+    if os.getenv(vdb_endpoint.SRC_ENV) != vdb_endpoint.SRC_VALUE:
+        return False
+    try:
+        port_env = int(os.getenv("MEMORY_VECTOR_PORT") or 0)
+    except ValueError:
+        return False
+    if port_env > 0 and not vdb_endpoint.heartbeat_ok(port_env, timeout=0.5):
+        return True
+    info = vdb_endpoint.read_port_info()
+    if (info and info["port"] != port_env
+            and vdb_endpoint.pid_alive(info["pid"])
+            and vdb_endpoint.heartbeat_ok(info["port"], timeout=0.5)):
+        return True
+    return False
+
+
 def _client():
     """进程内复用同一个 client。
 
@@ -140,8 +171,15 @@ def _client():
 
     代价：ultra 下本进程会一直占着图库，CLI 的 evolve 会撞锁——所以 evolve
     必须同时暴露成本进程里的工具（C12），而不是只留 CLI。
+
+    U3 自愈（docs/specs/2026-11-02-endpoint-refresh/）：单例冻结的向量端点
+    会因 serve 重启换端口而死（serve 空闲自退是设计行为）。每次取单例前
+    廉价复验，失效则放掉重建——make_backend 内部重跑 ensure_endpoint，
+    SDK 构造期读 env，重建即拿到新端口。
     """
     global _CLIENT
+    if _CLIENT is not None and _endpoint_stale():
+        _close_client()
     if _CLIENT is None:
         # S2.5（docs/specs/2026-11-02-cli-split-ports/）：MCP 走协议层工厂，
         # 不再直连 vendor。HyMemBackend 对未显式列出的属性（含 SDK 私有成员）

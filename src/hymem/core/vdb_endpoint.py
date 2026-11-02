@@ -311,15 +311,31 @@ def _instrument(app: Any) -> Any:
     return _wrapped
 
 
-def start_server_thread(persist_dir: Path, host: str = "127.0.0.1") -> tuple[int, _ServerHandle]:
+def start_server_thread(persist_dir: Path, host: str = "127.0.0.1",
+                        port: int | None = None) -> tuple[int, _ServerHandle]:
     """在当前进程内起 chroma server 线程，返回 (port, handle)。
+
+    port（U3，docs/specs/2026-11-02-endpoint-refresh/）：servePort 配置的
+    固定端口。有值先试绑定；被占用（OSError）则 stderr 告警 + 回退随机——
+    固定端口让 serve 重启不换端点，长驻 client 的冻结配置恒有效。
 
     依赖 fastapi 与 opentelemetry-instrumentation-fastapi（chromadb 1.5.9
     未把前者列为运行时依赖，requirements.txt 已补）。uvicorn 线程内不装
     信号处理器，随宿主进程退出回收。
     """
     s = socket.socket()
-    s.bind((host, 0))
+    chosen = 0
+    if port:
+        try:
+            s.bind((host, int(port)))
+            chosen = int(port)
+        except OSError as e:
+            s.close()
+            s = socket.socket()
+            print(f"hy-mem: 配置的 serve 端口 :{port} 被占用（{e}），回退随机端口",
+                  file=sys.stderr)
+    if not chosen:
+        s.bind((host, 0))
     port = s.getsockname()[1]
     s.close()
 
