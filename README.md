@@ -1,14 +1,14 @@
 # hy-mem
 
-本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 [Tencent Hy-Memory SDK](https://github.com/Tencent-Hunyuan/Hy-Memory) 2.0.5 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
+本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 [Tencent Hy-Memory SDK](https://github.com/Tencent-Hunyuan/Hy-Memory) 2.0.12 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
 
-> A local long-term memory CLI for AI agents — write, fact-extract via LLM, semantic search, and tag archiving, with a built-in MCP stdio server (8 tools).
+> A local long-term memory CLI for AI agents — write, fact-extract via LLM, semantic search, and tag archiving, with a built-in MCP stdio server (9 tools).
 
 ## 下载安装
 
 | 平台 | 下载 |
 |------|------|
-| Windows x64 | [hy-mem-1.0.0-rc.1-win64.zip](https://github.com/MrHuTu/hy-mem/releases/download/v1.0.0-rc.1/hy-mem-1.0.0-rc.1-win64.zip)（免 Python，解压即用） |
+| Windows x64 | [hy-mem-win64.zip](https://github.com/MrHuTu/hy-mem/releases/download/v1.0.0-rc.11/hy-mem-win64.zip)（免 Python，解压即用；zip 恒名不带版本号，解压覆盖即升级） |
 
 其他版本与历史发布见 [Releases](https://github.com/MrHuTu/hy-mem/releases)。
 
@@ -18,7 +18,7 @@
 
 - **MCP 服务**：内置 stdio MCP server（9 工具：add/search/get/update/delete/list + queue_status + get_version + **evolve_status**），任何支持 MCP 的客户端（WorkBuddy / Claude Desktop / Cursor 等）即插即用。**pro 模式下 evolve_status 不出现在 `tools/list` 里**，客户端拿不到也就调不动
 - **L6 认知层（仅 ultra）**：行为模式归纳**全自动**——add 素材攒够（默认 ≥8 条新事实）且距上次尝试 ≥24h 就后台自动跑，无需手动触发；`evolve_status` 工具或 CLI `hy-mem evolve-status`（所有模式可看）查进度与历史，`get_version` 在连续失败时会顺带带出 `evolve_health` 异常信号。归纳模型与抽取/判重分开配（`config set evolve.model=…`）——**抽取（`llm.model`）配分析类小模型**（如 `tongyi-xiaomi-analysis-flash`，封闭判定够用且快），**归纳（`evolve.model`）配更强的通用大模型**（如 `deepseek-v4.1-flash`）：弱模型能抽取但做不了开放归纳。手动逃生门：CLI `hy-mem evolve`（直连模式下可用）
-- ⚠️ **ultra 是单写者模式**：L6 图库用 kuzu（独占锁，无 `read_only`），**同一数据目录第二个进程必失败**（实测 2 进程并发 `add` → 1 成 1 败）。所以 ultra 下 CLI 与 MCP 不要同时用同一库；需要多进程/多子代理并发写入请留在 **pro**。MCP 长驻持有图库时，`evolve` 只能走 MCP 工具，CLI 的 `hy-mem evolve` 会撞锁
+- ⚠️ **ultra 单写者语义**：L6 图库用 kuzu（独占锁，无 `read_only`），同一数据目录**图库只允许一个进程持有**。本版本起内置上游补丁：持锁冲突时自动降级为图 no-op（事实/向量/检索完全正常，仅该进程写入的记忆暂缺 L4 关系边，可用 `graph-build` 批量回填），**不再抛错死信**。`servePort` 可为 serve 固定端口（默认 0=随机）；serve 重启换端口后，MCP 长驻 client 会自动检测并重建端点（U3 自愈），无需重启客户端
 - **语义检索**：基于向量相似度的记忆搜索，写入时 LLM 自动抽取事实与标签
 - **异步写入**：非阻塞式入队，自动拉起后台 worker 消费；队列状态全程可查（pending / dead / shadow）
 - **标签管理**：灵活的标签系统，支持归档与分类
@@ -38,13 +38,13 @@ pip install -r requirements.txt
 首次运行需执行设置向导：
 
 ```bash
-python -m cli.hy_mem_cli setup
+python -m hymem setup
 ```
 
 或启动交互式菜单：
 
 ```bash
-python -m cli.hy_mem_cli menu
+python -m hymem menu
 ```
 
 ### 基本命令
@@ -52,18 +52,23 @@ python -m cli.hy_mem_cli menu
 | 命令 | 说明 |
 |------|------|
 | `add` | 添加记忆（支持单条/多条/带标签） |
-| `search` | 语义检索记忆 |
+| `search` | 语义检索记忆（支持 `queries` 多路并行检索） |
 | `list` / `get` / `update` / `delete` | 列出 / 详情 / 修改 / 逻辑删除 |
-| `forget` / `finalize` | 彻底删除 / 清理逻辑删除残留 |
+| `forget` / `finalize` | 彻底删除 / 清理逻辑删除残留（`--language` 指定归纳语言） |
 | `tags` / `untag` / `archive` | 标签与归档管理 |
 | `stats` / `doctor` | 统计 / 19 项健康自检 |
-| `queue` / `worker` / `drain` / `retry` | 异步队列查看 / 消费 / 清空 / 重投 |
+| `queue` / `worker` / `drain` / `retry` | 异步队列查看 / 消费 / 清空 / 重投（含 shadow 影子重投） |
+| `backup` / `restore` | 数据面快照备份 / 恢复 |
+| `vdb-scan` / `vdb-plan` / `vdb-reembed` / `vdb-reembed-graph` / `vdb-drop` | 向量空间巡检 / 重嵌计划 / 执行重嵌 / 图重嵌 / 删除空间（换嵌入模型后迁移用） |
+| `graph-build` | 存量记忆批量回填 L4 关系图（图库重建/降级补边用） |
+| `profile` | 用户画像查看（`--full` 含全部演化细节） |
 | `mcp` / `serve` | 启动 MCP stdio 服务 / HTTP 服务 |
 | `setup` / `config` / `user` / `install` | 设置菜单 / 配置管理 / 身份切换 / 注册到 PATH |
 | `history` / `log` / `skill` / `migrate` / `version` | 操作历史 / 运行日志 / Skill 安装 / 数据迁移 / 版本 |
-| `evolve` | 手动归纳 L6 行为模式（**逃生门**：直连模式可用；ultra 下 MCP 长驻持锁时会被拒并给出说明——正常情况不需要，沉淀已自动化） |
+| `evolve` | 手动归纳 L6 行为模式（**逃生门**：直连模式可用；正常情况不需要，沉淀已自动化） |
+| `evolve-status` | L6 沉淀进度与健康度查看（所有模式可用） |
 
-完整 34 个子命令说明见 `hy-mem help`。
+完整 43 个子命令说明见 `hy-mem help`。
 
 ## 配置说明
 
@@ -75,6 +80,8 @@ python -m cli.hy_mem_cli menu
 - **storage**: 存储路径配置
 - **user_id**: 当前身份标识
 - **search**: 检索参数（min_score 等）
+- **servePort**: serve 固定端口（0=随机默认；设为固定值后 serve 重启不再换端口，长驻 MCP client 端点恒有效）
+- **backend.memory**: 记忆后端选择（默认 `hy-memory`；JDBC 式协议层，实现在 `backends/`，未来可注册其他实现）
 
 **密钥存储**：默认直接固化在 `config.json` 的 `apiKey` 字段（`config.json` 恒被 `.gitignore` 保护，不会入库）；也兼容从环境变量读取（`MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`，老配置无需改动）。
 
@@ -83,36 +90,42 @@ python -m cli.hy_mem_cli menu
 ```
 hy-mem/
 ├── src/hymem/              # 包根（pip install -e . 可装；python -m hymem 可跑）
-│   ├── cli.py             # 入口（命令分发）
+│   ├── cli.py             # 门面入口（cmds/ 拆包后仅 re-export，79 行）
+│   ├── cmds/              # CLI 按域拆包（base / write / read / maint / queue / config / parser / entry）
+│   ├── ports/             # JDBC 式协议层：MemoryBackend Protocol + make_backend 工厂（不 import vendor）
+│   ├── backends/          # 后端实现（hymemory/ 适配器：vendor import 唯一允许地）
 │   ├── core/              # 核心域（无 UI 依赖，桌面/服务可复用）
 │   │   ├── store.py       #   SQLite 队列与记忆库操作
 │   │   ├── config.py      #   配置加载与密钥解析
 │   │   ├── netprobe.py    #   出站请求唯一出口
-│   │   └── ...            #   presets / oplog / vdb_endpoint / version 等
+│   │   ├── vdb_endpoint.py#   serve 按需拉起 / 端点发现与自愈
+│   │   └── ...            #   presets / oplog / version 等
 │   ├── ui/                # 终端交互层
 │   │   ├── tui.py         #   终端组件（行编辑/菜单/确认）
 │   │   ├── menu.py        #   交互式控制台
 │   │   ├── setup_wizard.py#   设置向导与设置菜单
 │   │   └── ...            #   helptext / i18n / skill_ops
 │   └── mcp/
-│       ├── server.py      # MCP 服务（9 工具，pro 下 8 个；evolve_status 仅 ultra 可见；L6 沉淀已自动化）
+│       ├── server.py      # MCP 服务（9 工具，pro 下 8 个；evolve_status 仅 ultra 可见；端点失效自愈）
 │       └── transport_http.py  # HTTP transport（--transport http，默认 stdio 不变）
 ├── skill/                 # Skill 定义
-├── scripts/               # 业务脚本（构建 / 闸门 / check_secrets / check_layering）
+├── docs/                  # 契约文档（docs/specs/）+ 上游 bug 追踪（UPSTREAM-ISSUES.md）
+├── scripts/               # 业务脚本（构建 / 上游补丁重放 / 闸门 / check_secrets / check_layering）
+├── vendor/hy-memory/      # 上游 SDK 快照（gitlink，拉最新源码用）
 ├── tests/                 # 14 套测试（cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog / i18n / encoding / concurrency / scene / evolve）
 ├── .local-test/           # 本地临时脚本（探针 / 实验 / bug 复现），整目录不入库
 ├── data/                  # 运行时数据（不入库，程序自建）
 └── AGENTS.md             # 项目交接文档
 ```
 
-分层铁律：core 不 import ui/mcp；ui 与 mcp 互不依赖；版本号真源在 core/version.py。
+分层铁律：core 不 import ui/mcp；ui 与 mcp 互不依赖；vendor import 只准出现在 backends/；版本号真源在 core/version.py。
 
 ## 开发说明
 
 ### 源码模式运行
 
 ```bash
-python -m cli.hy_mem_cli <command> [options]
+python -m hymem <command> [options]
 ```
 
 ### 打包为可执行文件
@@ -126,9 +139,9 @@ python scripts/build_exe.py
 ### 测试
 
 ```bash
-python tests/test_cli.py        # CLI（97 项）
+python tests/test_cli.py        # CLI（122 项，含分层守护 G1/G2）
 python tests/test_setup_ui.py   # 设置向导 UI 级（40 项）
-# 共 14 套 777 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
+# 共 14 套 850+ 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
 # i18n / encoding / concurrency / scene / evolve。其中 mcp、concurrency、scene、evolve
 # 会真调模型（缺密钥时显式跳过，不产出假绿）
 ```
@@ -142,7 +155,9 @@ python tests/test_setup_ui.py   # 设置向导 UI 级（40 项）
 
 ## 版本策略
 
-CLI 独立 semver，不与底层 hy-memory SDK 版本耦合（SDK 版本见 `hy-mem doctor`）。当前为 **1.0.0-rc.1**（Release Candidate）：功能面完整、测试矩阵全绿，进入发布候选；自用验证稳定后转正 1.0.0。
+CLI 独立 semver，不与底层 hy-memory SDK 版本耦合（SDK 版本见 `hy-mem doctor`）。当前为 **1.0.0-rc.11**（Release Candidate）：功能面完整、测试矩阵全绿，进入发布候选；自用验证稳定后转正 1.0.0。
+
+对上游 SDK 的已知问题（图库锁降级被否决 / auto 语言误判 / 端点构造期冻结）建有追踪文档 [docs/UPSTREAM-ISSUES.md](docs/UPSTREAM-ISSUES.md)：本仓库以补丁/自愈机制临时规避，上游修复后按文档流程退役。
 
 ## 声明
 
