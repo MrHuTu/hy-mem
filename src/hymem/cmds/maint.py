@@ -14,6 +14,7 @@ from hymem.cmds.base import (  # noqa: F401
     ok, os, require_ready, store, sys,
     time,
 )
+from hymem.backends.hymemory.clientops import sdk_info
 from hymem.cmds import base as _base  # 全局状态经 _base 读写
 
 
