@@ -11,6 +11,8 @@
     search_memory 返回 schema_available=false 且 hits 里无 l6_schema 混入
   D ultra 面（真模型）：写同主题素材 → evolve 跑通 → 返回结构齐全 →
     弱模型不产出 schema（idle 或 +0）→ search 的 schemas 字段可用
+  H 可见性：CLI evolve-status（pro/ultra/故障注入）、get_version 的
+    evolve_health 信号（失败 >0 出现 / 清零消失）、工具描述精简回归钉
 
 跑法：
     .venv/Scripts/python.exe tests/test_evolve.py [exe路径]
@@ -467,6 +469,67 @@ def main() -> int:
         _sp.unlink()
     except FileNotFoundError:
         pass
+
+    # ================= H 可见性（CLI evolve-status / evolve_health / 描述精简） =================
+    print("\n== H 可见性（evolve-status / evolve_health / 描述精简）==")
+    p = run(env_pro, ["--json", "evolve-status"])
+    d = jload(p)
+    check("H1 pro 下 evolve-status 可用且 exit 0",
+          p.returncode == 0 and d.get("mode") == "pro", f"rc={p.returncode} {str(d)[:120]}")
+    check("H1 返回结构齐全",
+          all(k in d for k in ("auto", "consecutive_failures", "last_total_facts",
+                               "can_attempt_now", "records")), sorted(d))
+    p2 = run(env_pro, ["evolve-status"])
+    check("H2 pro 下 human 输出注明仅 ultra 启用",
+          p2.returncode == 0 and "仅 ultra 启用" in (p2.stdout + p2.stderr),
+          (p2.stdout + p2.stderr)[:150])
+    d3 = jload(run(env_ultra, ["--json", "evolve-status"]))
+    check("H3 ultra 下 evolve-status mode=ultra", d3.get("mode") == "ultra", str(d3)[:80])
+
+    # H4 故障注入：连续失败 3 次 → CLI 必须看得见（否则 L6 异常无从发现）
+    _hsp = sb_ultra / "data" / "evolve_jobs.json"
+    _hsp.write_text(json.dumps({
+        "records": [
+            {"ts": "2026-11-01 09:00:00", "status": "failed", "error": "RuntimeError: gateway 502"},
+            {"ts": "2026-11-01 10:00:00", "status": "skipped_small", "new_facts": 2},
+        ],
+        "last_total_facts": 12, "last_attempt_ts": time.time() - 3600,
+        "consecutive_failures": 3,
+    }, ensure_ascii=False), encoding="utf-8")
+    d4 = jload(run(env_ultra, ["--json", "evolve-status"]))
+    check("H4 故障注入后 CLI 回报连续失败 3",
+          d4.get("consecutive_failures") == 3, str(d4)[:120])
+    check("H4 records 含 failed 与 error 摘要",
+          any(r.get("status") == "failed" and r.get("error") for r in (d4.get("records") or [])),
+          str(d4.get("records"))[:150])
+    p4 = run(env_ultra, ["evolve-status"])
+    check("H4 human 输出列出失败记录行", "failed" in (p4.stdout + p4.stderr), (p4.stdout or "")[-200:])
+
+    mcp_h = McpClient(mcp_base, env_ultra)
+    try:
+        gv = mcp_h.tool("get_version", {})[0] or {}
+        eh = gv.get("evolve_health") or {}
+        check("H5 get_version 带 evolve_health（连续失败 >0 时）",
+              gv.get("memoryMode") == "ultra" and eh.get("consecutive_failures") == 3
+              and "evolve_status" in (eh.get("note") or ""), str(eh)[:150])
+    finally:
+        mcp_h.close()
+    _hsp.unlink()
+    mcp_h2 = McpClient(mcp_base, env_ultra)
+    try:
+        gv2 = mcp_h2.tool("get_version", {})[0] or {}
+        check("H6 状态清空后不带 evolve_health（零噪声）",
+              "evolve_health" not in gv2, str(gv2.get("evolve_health")))
+    finally:
+        mcp_h2.close()
+
+    # H7 描述精简回归钉（docs/specs/2026-11-02-evolve-visibility/ S3）
+    import hymem.mcp.server as _srv_h
+
+    _all_tools = _srv_h.TOOLS + _srv_h.ULTRA_TOOLS
+    _long = [(t["name"], len(t["description"])) for t in _all_tools if len(t["description"]) > 200]
+    check("H7 全部工具主描述 ≤200 字", not _long, str(_long))
+    check("H7 工具注册表共 9 个", len(_all_tools) == 9, str(len(_all_tools)))
 
     # ================= D ultra 面 =================
     print("\n== D ultra 面（真模型：写入 → evolve → 检索）==")

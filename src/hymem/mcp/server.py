@@ -1031,6 +1031,24 @@ def _tool_get_version(_args: dict) -> str:
     }
     if queue_health:
         payload["queue_health"] = queue_health
+    # evolve 异常信号（与 queue_health 同款设计）：正常时不出现该键（零噪声）。
+    # L6 沉淀已全自动，坏了没人看得见——get_version 是智能体日常必调的工具，
+    # 连续失败 >0 时在这里顺带喊一嗓子，别让异常只有主动查 evolve_status 才发现。
+    if mem_mode == "ultra":
+        try:
+            from hymem.core import autoevops as _ae
+
+            _ev_fails = int(_ae.load_state().get("consecutive_failures") or 0)
+            if _ev_fails > 0:
+                payload["evolve_health"] = {
+                    "consecutive_failures": _ev_fails,
+                    "note": (
+                        f"L6 自动沉淀已连续失败 {_ev_fails} 次（冷却按 2^n 自动退避）；"
+                        "详情与历史用 evolve_status 查"
+                    ),
+                }
+        except Exception:  # noqa: BLE001
+            pass  # 状态文件读不到不影响版本信息本身
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -1038,15 +1056,11 @@ TOOLS = [
     {
         "name": "add_memory",
         "description": (
-            "写入一条长期记忆。用户说「记一下」、表达偏好/决策/项目事实时调用。"
-            "写事实型内容（含主体+具体值，如「部署目录是 D:\\x」），别写时间性流水"
-            "（「今天做了 A」这类改投日志类工具）——时间流水检索价值低，事实才可复用。"
-            "默认异步：立即返回，后台落库（lite 秒级；pro 模式单条可长达 2 分钟，"
-            "确认落库用 queue_status，别按固定秒数等）。"
-            "**三场景**：省略 scene 走 chat（闲聊/偏好/一般事实，异步队列）；"
-            "scene=working 记文档/表格/研究/电脑操作等生产力活；scene=coding 记改码/调试/"
-            "测试/SQL 等软件工程活。后两者必须传 messages（含 tool_calls/role=tool 的工具"
-            "轨迹），是同步写入——独立存储，与 chat 记忆互不可见，检索也需带同样的 scene。"
+            "写入一条长期记忆（用户说「记一下」、表达偏好/决策/项目事实时）。"
+            "写事实型内容（含主体+具体值），别写时间性流水（改投日志类工具）。"
+            "默认异步：入队即返回，pro 单条落库可达 2 分钟，确认落库用 queue_status。"
+            "scene 三选一：省略=chat；working/coding 记生产力/编码轨迹（必须传 messages，"
+            "同步写入，检索须带同样 scene）。"
         ),
         "inputSchema": {
             "type": "object",
@@ -1056,20 +1070,20 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "object"},
                     "description": (
-                        "工具轨迹：OpenAI messages 对象数组，须含 assistant.tool_calls 或 role=tool 的消息。"
-                        "仅 scene=working/coding 用（与 text 二选一）。没有工具轨迹会被拒——"
-                        "SDK 对无轨迹的显式 scene 会静默回退 chat，hy-mem 在门口拦成明确错误"
+                        "工具轨迹：OpenAI messages 数组，须含 assistant.tool_calls 或 role=tool 的消息。"
+                        "仅 scene=working/coding 用（与 text 二选一）；没有轨迹会被明确拒绝"
+                        "（SDK 对无轨迹的显式 scene 会静默回退 chat，hy-mem 在门口拦住）"
                     ),
                 },
                 "scene": {
                     "type": "string",
                     "enum": ["chat", "working", "coding"],
-                    "description": "省略=chat（现有行为）。working=生产力记忆，coding=编码记忆（带 diff 演进链）。working/coding 写入是同步的，返回即已落库",
+                    "description": "省略=chat。working=生产力记忆，coding=编码记忆（带 diff 演进链）；两者同步写入，返回即已落库",
                 },
-                "workspace_id": {"type": "string", "description": "仓库/项目隔离（建议 git remote URL）；仅 scene=working/coding 且通常只对 coding 有意义"},
+                "workspace_id": {"type": "string", "description": "仓库/项目隔离（建议 git remote URL）；仅 scene=working/coding"},
                 "branch": {"type": "string", "description": "分支隔离，必须同时传 workspace_id"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签（仅 chat 路径生效）"},
-                "async": {"type": "boolean", "description": "默认 true（入队即返回，3 车道消费）。false 时同步等待落库：两段式设计——LLM 抽取在锁外可并行，锁内只做 SDK 标准提交段（约 3~15s，reconcile 判重主导），抢不到写锁 5s 返回 lock_timeout（本条零写入，可重试或改用 async）；多条/并发务必用默认 true。scene=working/coding 恒同步，此参数忽略"},
+                "async": {"type": "boolean", "description": "默认 true（入队即返回）。false 同步落库（约 3~15s；抢不到写锁 5s 返回 lock_timeout，本条零写入可重试）；多条/并发务必用默认 true。working/coding 恒同步，此参数忽略"},
                 "metadata": {"type": "object", "description": "附加元数据对象，如 {\"project\": \"iisw\"}"},
                 "memory_at": {
                     "type": "string",
@@ -1082,9 +1096,9 @@ TOOLS = [
     {
         "name": "queue_status",
         "description": (
-            "查异步写入进度：add_memory 返回的 job_ids 现在到哪一步了（待处理/运行中/完成/死信）、"
-            "worker 是否还活着、队列是否清空。add_memory 之后想确认「落库了没」就调它，"
-            "别用 search 空结果反推。wait_seconds>0 时短阻塞等待（上限 60 秒）。"
+            "查异步写入进度：add_memory 返回的 job 走到哪了（待处理/运行中/完成/死信）、"
+            "worker 是否存活。add 后想确认「落库了没」就调它，别用 search 空结果反推。"
+            "wait_seconds>0 时短阻塞等待（上限 60 秒）。"
         ),
         "inputSchema": {
             "type": "object",
@@ -1105,15 +1119,10 @@ TOOLS = [
     {
         "name": "search_memory",
         "description": (
-            "语义检索长期记忆。适用于主题类问题：用户偏好/历史决策/项目上下文/技术事实"
-            "（如「部署目录在哪」「用的什么向量模型」）。"
-            "**不适用于时间类问题**（如「我昨天做了什么」「上周完成了什么」）——"
-            "语义检索匹配内容相似度，与时间问法天然不沾边，必空手；这类问题改用 "
-            "list_memories + since/until 时间窗。查不到不代表没有，可换措辞再试。"
-            "支持时间范围（since/until）与翻页（offset/has_more）。"
-            "**默认只搜 chat 记忆**：working/coding 记忆在独立库，必须带 scene 才搜得到"
-            "（返回 facts 事实段 + experiences 经验段两路）；"
-            "编码类问题（某段代码怎么改的、某 bug 怎么修的）先试 scene=coding。"
+            "语义检索长期记忆，适合主题类问题（偏好/历史决策/项目上下文/技术事实）。"
+            "时间类问题（「我昨天做了什么」）别用它——语义匹配对时间问法必空手，"
+            "改用 list_memories 带 since/until。默认只搜 chat 记忆：working/coding "
+            "在独立库，必须带 scene 才搜得到。查不到不代表没有，可换措辞再试。"
         ),
         "inputSchema": {
             "type": "object",
@@ -1124,15 +1133,15 @@ TOOLS = [
                 "scene": {
                     "type": "string",
                     "enum": ["working", "coding"],
-                    "description": "搜生产力记忆（working）或编码记忆（coding）。省略=只搜 chat 记忆；两者互不覆盖，要跨库得搜两次",
+                    "description": "搜生产力（working）或编码（coding）记忆，返回 facts/experiences 两路。省略=只搜 chat；跨库要搜两次",
                 },
                 "workspace_id": {"type": "string", "description": "按仓库/项目过滤（须与写入时一致）；仅 scene=working/coding"},
                 "branch": {"type": "string", "description": "按分支过滤（须与写入时一致），必须同时传 workspace_id"},
                 "chain_block": {
                     "type": "boolean",
                     "description": (
-                        "只在 scene=coding 生效：额外返回该文件的 diff 版本演进块（chain_block）。"
-                        "默认 false——注入 diff 会显著增加返回体量，只在「这段代码改过几版/怎么演进」时才开"
+                        "仅 scene=coding：额外返回该文件的 diff 演进块。默认 false（体量大），"
+                        "只在问「这段代码改过几版/怎么演进」时开"
                     ),
                 },
                 "include_sources": {
@@ -1153,10 +1162,7 @@ TOOLS = [
                 "offset": {"type": "integer", "description": "翻页偏移；上页返回 has_more 时用 next_offset 继续"},
                 "schema": {
                     "type": "boolean",
-                    "description": (
-                        "是否附带 L6 行为模式（默认 true）。仅 ultra 模式且跑过 evolve 才有；"
-                        "pro 下恒为空并返回 schema_available=false，不报错"
-                    ),
+                    "description": "是否附带 L6 行为模式（默认 true）。仅 ultra 且沉淀产出过才有；pro 下恒空并返回 schema_available=false，不报错",
                 },
                 "schema_limit": {
                     "type": "integer",
@@ -1165,9 +1171,8 @@ TOOLS = [
                 "schema_min_score": {
                     "type": "number",
                     "description": (
-                        "L6 语义分阈值（0~1），默认取 config.evolve.schemaMinScore（0.25）。"
-                        "evolve 归纳的 schema 是英文，中文 query 对它的分数常在 0.2~0.35；"
-                        "schemas 为空且 schema_note 提示「阈值下无命中」时，传 0.2 或 0 重试"
+                        "L6 语义分阈值（0~1），默认 0.25。schema 是英文归纳，中文 query 常在 0.2~0.35；"
+                        "schemas 为空且 schema_note 提示阈值下无命中时，传 0.2 或 0 重试"
                     ),
                 },
             },
@@ -1177,10 +1182,8 @@ TOOLS = [
     {
         "name": "list_memories",
         "description": (
-            "按时间顺序列出记忆（默认最新在前）。**时间类问题的正解**：「我昨天/上周做了什么」"
-            "→ 用 since/until 圈时间窗浏览，而不是 search（语义检索对时间问法必空手）。"
-            "也适合回顾流水、验收「刚写入的内容落库没有」。"
-            "支持时间范围（since/until）、排序（order）与翻页（offset/has_more）。"
+            "按时间顺序列出记忆（默认最新在前）。时间类问题（「我昨天/上周做了什么」）"
+            "的正解：用 since/until 圈时间窗浏览。也适合回顾流水、验收刚写入的内容。"
         ),
         "inputSchema": {
             "type": "object",
@@ -1208,8 +1211,8 @@ TOOLS = [
     {
         "name": "get_version",
         "description": (
-            "返回 hy-mem 版本与安装信息（版本号 / exe或源码 / 安装根 / 配置与数据目录）。"
-            "自动升级前先调它：比对版本决定要不要升级，installRoot 就是要替换的目录。"
+            "返回 hy-mem 版本与安装信息（版本号 / exe或源码 / 安装根 / 配置与数据目录），"
+            "可能附带 queue_health / evolve_health 异常信号。自动升级前先调它比对版本。"
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -1228,8 +1231,8 @@ TOOLS = [
     {
         "name": "update_memory",
         "description": (
-            "更新一条记忆的内容（走演化链，旧版本保留可追溯）。会改变检索结果，必须 confirm=true。"
-            "记忆内容有误或过时、用户纠正了某个事实时用；新增信息请用 add_memory。"
+            "更新一条记忆的正文（整条替换，旧版本保留可追溯）。内容有误/过时、"
+            "用户纠正了某个事实时用；新增信息用 add_memory。必须 confirm=true。"
         ),
         "inputSchema": {
             "type": "object",
@@ -1251,13 +1254,10 @@ ULTRA_TOOLS = [
     {
         "name": "evolve_status",
         "description": (
-            "查看 L6 自动沉淀的状态与历史。**仅 ultra 模式可用**。\n"
-            "背景：L6 沉淀（行为模式归纳）已改为全自动——add 素材攒够就后台跑，"
-            "不需要也不支持手动触发（evolve 工具已移除，CLI hy-mem evolve 仍可用）。\n"
-            "什么时候用：想确认「沉淀跑没跑、归纳出几条 schema、为什么一直没跑」时。"
-            "records 里 skipped_small=素材还不够（正常，攒够自动跑）；"
-            "skipped_lock=另一个 hy-mem 进程持着图库（关掉它）；"
-            "failed=LLM/网关出错（连续失败会自动退避，冷却翻倍）。"
+            "查看 L6 自动沉淀的状态与历史（仅 ultra）。沉淀已全自动：add 素材攒够就"
+            "后台跑，无需手动触发。想确认「跑没跑、归纳出几条 schema、为什么没跑」时用。"
+            "records：skipped_small=素材不够（正常）；skipped_lock=图库被别的进程占着；"
+            "failed=LLM 出错（冷却自动翻倍退避）。"
         ),
         "inputSchema": {
             "type": "object",

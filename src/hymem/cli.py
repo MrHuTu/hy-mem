@@ -1534,6 +1534,47 @@ def cmd_evolve(args) -> int:
     return ok(res, False, "\n".join(x for x in lines if x))
 
 
+def cmd_evolve_status(args) -> int:
+    """查看 L6 自动沉淀状态与历史（观察窗口，所有模式可看）。
+
+    为什么不拦 pro：沉淀只在 ultra 跑，但异常（连续失败/冷却卡死）的发现
+    不该要求先切模式——这里任何模式都回报状态，非 ultra 时注明「未启用」。
+    数据源与 MCP evolve_status 同一份（autoevops.status_summary）。
+    """
+    rc = require_ready("查看 L6 沉淀状态")
+    if rc is not None:
+        return rc
+    from hymem.core import autoevops
+
+    try:
+        limit = max(1, min(int(getattr(args, "limit", None) or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    payload = autoevops.status_summary(limit=limit)
+    if args.json:
+        return ok(payload, True)
+
+    auto = payload.get("auto") or {}
+    lines = [
+        f"模式  {payload.get('mode')}" + ("（L6 自动沉淀仅 ultra 启用）" if payload.get("mode") != "ultra" else ""),
+        f"阈值  新增事实 ≥ {auto.get('minNewFacts')} 条触发，冷却 {auto.get('cooldownHours'):g}h × 2^连续失败（7 天封顶）",
+        f"状态  连续失败 {payload.get('consecutive_failures')} 次，基线事实 {payload.get('last_total_facts')} 条",
+    ]
+    if payload.get("last_success"):
+        lines.append(f"最近成功  {payload['last_success']}")
+    if payload.get("next_attempt_after"):
+        tail = "（现在可尝试）" if payload.get("can_attempt_now") else "（冷却中）"
+        lines.append(f"下次可尝试  {payload['next_attempt_after']}　{tail}")
+    recs = payload.get("records") or []
+    lines.append(f"最近记录  {len(recs)} 条")
+    if not recs:
+        lines.append("  （还没有记录：素材攒够且冷却过后，add 时会自动触发）")
+    for r in recs[-10:]:
+        extra = {k: v for k, v in r.items() if k not in ("ts", "status")}
+        lines.append(f"  {r.get('ts')}  {r.get('status')}" + (f"  {extra}" if extra else ""))
+    return ok(payload, False, "\n".join(lines))
+
+
 def cmd_search(args) -> int:
     rc = require_ready("检索记忆")
     if rc is not None:
@@ -3648,6 +3689,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="本次归纳输出语言 zh/en（不改配置）；不填用 evolve.language（auto 跟随 SDK 检测）",
     )
     ps.set_defaults(func=cmd_evolve)
+
+    ps = sub.add_parser(
+        "evolve-status",
+        help="查看 L6 自动沉淀状态与历史（观察窗口，所有模式可看）",
+    )
+    ps.add_argument("-n", "--limit", type=int, default=20,
+                    help="返回最近几条记录（默认 20，上限 100）")
+    ps.set_defaults(func=cmd_evolve_status)
 
     ps = sub.add_parser("list", help="列出记忆")
     ps.add_argument("-n", "--limit", type=int, default=20)

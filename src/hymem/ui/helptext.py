@@ -412,6 +412,21 @@ CMD_META: dict[str, dict] = {
             "自动沉淀参数：evolve.auto.enabled（默认 true，仅 ultra）/ minNewFacts（默认 8）/ cooldownHours（默认 24，失败按 2^n 退避、7 天封顶）。状态文件 <dataDir>/evolve_jobs.json，MCP evolve_status 工具可查。",
         ],
     },
+    "evolve-status": {
+        "group": "维护",
+        "when": "想知道「L6 自动沉淀跑没跑、为什么一直没跑、归纳出几条 schema」。观察窗口，所有模式可看（pro 下会注明沉淀未启用）——查 L6 异常不用先切 ultra。",
+        "mutates": False,
+        "examples": [
+            "hy-mem evolve-status",
+            "hy-mem --json evolve-status -n 50",
+        ],
+        "output": "{mode, auto{enabled,minNewFacts,cooldownHours}, consecutive_failures, last_total_facts, last_success, next_attempt_after, can_attempt_now, records[]}",
+        "notes": [
+            "只读状态文件 evolve_jobs.json，不碰图库、不调模型，随时可跑。",
+            "records 的 status：success（含 no_clusters 零成本跑）/ failed（LLM/网关错）/ skipped_small（素材不够，正常）/ skipped_lock（图库被别的进程占着）/ skipped_error。",
+            "连续失败时冷却按 2^n 自动退避（7 天封顶），成功清零；MCP 侧同名工具是 evolve_status（仅 ultra），get_version 在异常时会顺带带出 evolve_health。",
+        ],
+    },
     "delete": {
         "notes": [
             "不可恢复。拿不准先加 --dry-run 看一眼要删的东西。",
