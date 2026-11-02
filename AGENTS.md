@@ -28,7 +28,7 @@
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
 | 源码规模 | **35 个 py，16900 行**（`cli/` 20 个 12634 行 + `scripts/` 15 个 4266 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
 | 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **817**（CLI 97 / UI 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / MCP 31 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80） | 见 §8 |
+| 测试用例 | **819**（CLI 101 / UI 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / MCP 31 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 33 MB）；对外分发 `dist/hy-mem-0.9.13-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **160 s**（含压缩包 24 s） | 构建日志末行 |
@@ -51,26 +51,42 @@ D:\tools_open\agent-bridge\
 ├── hy-mem.cmd                 ← 源码模式启动器（cmd 壳，调 .venv 的 python）
 ├── hy-mem.spec                ← PyInstaller spec（注意：build_exe.py 不走它，走命令行参数）
 │
-├── cli\                       ← 全部业务代码（全部可改，改完必须跑测试）
-│   ├── _pyi_entry.py          ← 打包入口。只做两件事：冻结进程强制 UTF-8、转发 main
-│   ├── hy_mem_cli.py   (3480) ← 大脑：31 个子命令 + 全局选项搬运 + 配置闸门 + 错误分类 + stdin 解码链
-│   ├── helptext.py      (672) ← 命令规格单一真源（`help` / `help --json` 的数据源）
-│   ├── config.py        (523) ← config.json 读写 + env 映射 + 校验 + 身份默认值（`MEMORY_DATA_DIR` 优先于配置文件）
-│   ├── netprobe.py       (276) ← 出站请求唯一出口：预检字符集 + Sent/NotSent，杜绝 HTTP 0；get_json(direct=True) 供回环探活
-│   ├── vdb_endpoint.py  (484) ← chroma server 端点层（0.9.10）：`serve` 独占数据 + owner 化的 server.port；客户端 ensure_endpoint 注入/复验 MEMORY_VECTOR_HOST/PORT，端点该在却连不上就抛 EndpointUnavailable（不静默降级）；0.9.11 起用进程创建时间识破 pid 复用
-│   ├── setup_wizard.py  (795) ← 四步向导（向量→模式→LLM→存储），实测维度、真调 LLM
-│   ├── menu.py         (1110) ← 交互控制台（命令式 shell：命令表 / 历史 / Tab 补全 / Ctrl+R；子命令一律子进程派发）
-│   ├── i18n.py          (529) ← 中英切换：中文原文当 key，`tr()` 缺译回落中文，语言来源 HY_MEM_LANG > config.lang > zh
-│   ├── oplog.py         (243) ← 操作日志：`<dataDir>/ops.log`，只留最近 50 条，正文/查询词不落盘，密钥打码
-│   ├── tui.py          (1556) ← 零依赖终端 UI：按键解码 / 行编辑 / 重绘 / 鼠标 / 宽度裁剪 / 折行（wrap）
-│   ├── runtime_check.py (323) ← 运行环境自检：系统/位数/包完整性/可写/运行库/磁盘
-│   ├── store.py         (511) ← SQLite 异步队列 + 标签索引 + 跨进程写锁
-│   ├── storage_ops.py   (197) ← 数据目录运维：用量 / 剩余空间 / 迁移 / 备份 / 重建
-│   ├── install_ops.py   (417) ← 生成 PATH 启动器（`hy-mem install`，双入口 + 旧壳接管 + 升级时沿用旧安装配置/数据）
-│   ├── skill_ops.py     (106) ← SKILL.md 定位 / 一致性 / 分发到 5 个宿主
-│   ├── mcp_server.py    (739) ← MCP stdio 服务（`hy-mem mcp`）：JSON-RPC 2.0，8 个工具（6 记忆 + queue_status + get_version），进程内直调 SDK，日志走 stderr
-│   ├── presets.py       (239) ← 向量/LLM/模式预设（数字全部实测，别凭想象改 dims）
-│   └── local_embedder.py (112) ← 本地 ONNX 嵌入（零 key 备选，512 维，fastembed）
+├── src\hymem\                 ← 全部业务代码（S2 按域分包，docs/specs/2026-11-02-cli-split-ports/）
+│   ├── cli.py            (79)  ← 入口门面：re-export 全部旧顶层名（hymem.cli:main 等引用零感知）
+│   ├── cmds\                   ← CLI 命令层（按域分包；全局状态在 base，cmd 只做编排）
+│   │   ├── base.py     (721)  ← 公共助手：输出/退出码/就绪度闸门/身份/转发 stub/stdin 解码链/标签工具
+│   │   ├── entry.py    (272)  ← main() / cmd_mcp / 操作日志 / 冻结编码强制
+│   │   ├── parser.py   (339)  ← argparse 组装 + help 命令
+│   │   ├── write.py    (502)  ← add / update / delete / forget / finalize / tags / archive
+│   │   ├── read.py     (396)  ← search / list / get / history / profile / outcome
+│   │   ├── maint.py    (693)  ← doctor / evolve / evolve-status / stats / log
+│   │   ├── queue.py    (648)  ← serve / worker / queue / retry / drain（消费线程体）
+│   │   └── config.py   (570)  ← config / user / migrate / install / setup / menu / version / skill
+│   ├── ports\                  ← **协议层（JDBC 式，不 import vendor）**
+│   │   ├── memory.py   (114)  ← MemoryBackend Protocol：基础 13 + evolve + 内部能力 4（count_facts/llm_model_swap/chain_diff_blocks/submit_in_writer_lock）
+│   │   └── registry.py  (46)  ← make_backend()：按 config.backend.memory 选实现（默认 hy-memory）
+│   ├── backends\hymemory\      ← **hy-memory 适配器（vendor import 唯一允许地，守护断言 G1）**
+│   │   ├── backend.py  (119)  ← HyMemBackend：显式协议面 + __getattr__ 透传 SDK 私有成员
+│   │   ├── clientops.py(181)  ← SDK client 工厂（并发初始化重试）+ sdk_info
+│   │   ├── searchops.py(577)  ← 检索编排（min_score 口径 / L6 schemas / scene 检索 / diff 链补丁）
+│   │   ├── two_phase.py(626)  ← 两段式写（抽取锁外、SDK 提交锁内）
+│   │   ├── evolveops.py(386)  ← L6 归纳（语言补丁 / build_evolve_client）
+│   │   └── autoevops.py(291)  ← L6 自动沉淀状态机（事件驱动 / 冷却退避 / 原子写）
+│   ├── core\                   ← 配置/队列/端点等自有资产（五个 ops 旧路径 = re-export 门面）
+│   │   ├── config.py   (646)  ← config.json 读写 + env 映射 + 校验 + backend.memory 默认
+│   │   ├── store.py    (645)  ← SQLite 异步队列 + 标签索引 + 跨进程写锁
+│   │   ├── errors.py   (148)  ← 退出码/错误分类（CLI 与 MCP 共用口径）
+│   │   ├── netprobe.py (315)  ← 出站请求唯一出口（预检字符集 + Sent/NotSent）
+│   │   ├── vdb_endpoint.py (484) ← chroma server 端点层（owner 化 server.port / pid 复用识破）
+│   │   ├── install_ops.py (421) ← PATH 启动器 / 升级接管
+│   │   ├── runtime_check.py (327) ← 运行环境自检
+│   │   ├── storage_ops.py (197) / oplog.py (243) / presets.py (208) / procs.py (139) / local_embedder.py (113) / paths.py (30) / version.py
+│   │   └── clientops|searchops|evolveops|two_phase|autoevops.py ← 门面（真源在 backends/hymemory/）
+│   ├── mcp\                    ← MCP stdio 服务（9 工具；pro 下 8 个）
+│   │   ├── server.py  (1429)  ← JSON-RPC 2.0 + 工具注册表；S2.5 起经 ports.make_backend 取后端
+│   │   └── transport_http.py (72) ← 可选 HTTP 传输
+│   └── ui\                     ← 终端交互
+│       ├── tui.py (1605) / menu.py (1117) / setup_wizard.py (1129) / helptext.py (763) / i18n.py (532) / skill_ops.py (106)
 │
 ├── scripts\                   ← **只放业务相关**：构建 / 提交闸门 / 密钥入口 / 驱动脚本（不进产物）
 │   ├── build_exe.py     (507) ← 打包主脚本：消毒 → SKILL.md → 启动器/说明 → 压缩包 → 清历史
@@ -78,7 +94,7 @@ D:\tools_open\agent-bridge\
 │   ├── _secrets.py      (121) ← 密钥唯一入口：只读 `MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`
 │   ├── drive_setup.py    (90) ← **黑盒驱动**：真 CLI 子进程 + 管道喂键，复现/回归交互配置 bug（见 §8.1）
 ├── tests\                     ← **14 套测试**（cli/ui/menu/setup/setup_ui/mcp/queue/vdb/oplog/i18n/encoding/concurrency/scene/evolve）
-│   ├── test_cli.py      (466) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
+│   ├── test_cli.py      (498) ← 接口契约（退出码 / 输出分流 / 全局选项位置 / 身份）
 │   ├── test_ui.py       (501) ← 按键与渲染 + 连续写入的循环语义（假终端，无需真 TTY）
 │   ├── test_setup.py    (690) ← 向导 / 存储运维 / 队列积压（不发网络请求）
 │   ├── test_vdb_endpoint.py (282) ← 端点层：归属校验 / 六个 ensure 分支 / pid 复用 / 真实 chroma 线程
@@ -387,7 +403,7 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe tests/test_cli.p
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：十四套全绿（cli 97 / ui 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / mcp 31 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80 / concurrency 场景 = **817**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：十四套全绿（cli 101 / ui 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / mcp 31 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80 / concurrency 场景 = **819**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
 
 ### 8.1 怎么测 CLI —— 四条铁律（2026-10-28 补，源自 401 事故）
 
