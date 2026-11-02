@@ -341,46 +341,69 @@ def main() -> int:
           float((_cfg_e.DEFAULTS.get("evolve") or {}).get("schemaMinScore") or 0) == 0.25,
           repr((_cfg_e.DEFAULTS.get("evolve") or {}).get("schemaMinScore")))
 
-    # ================= F 归纳语言可控（离线桩，R1/R2） =================
-    print("\n== F evolve.language 语言指令补丁（离线桩）==")
-    from hy_memory.pipelines import system2_agent as _s2_f
+    # ================= F 归纳语言原生通道（离线桩，SDK ≥2.0.11） =================
+    # rc.5 的运行时补丁已退役（docs/specs/2026-11-02-sdk-2011-language/）：
+    # 语言现在原生透传 client.evolve(language=...)。这里用桩 client 钉四条路径。
+    print("\n== F evolve.language 原生通道（离线桩）==")
+    from types import SimpleNamespace as _NS
 
     from hymem.core import evolveops as _evo_f
 
-    _orig_prompt_f = _s2_f._build_single_call_system_prompt
+    class _CapClient:
+        """evolve 桩：记录每次调用的 kwargs；可模拟老版本（带 language 就 TypeError）。"""
 
-    # F1 auto（""）：不改行为（SDK 原生输出，逐字一致）
-    _w = _evo_f.apply_language_directive("")
-    _out = _s2_f._build_single_call_system_prompt("en")
-    check("F1 auto 不注入（输出与 SDK 原生一致）",
-          _out == _orig_prompt_f("en") and not _w, _w)
+        def __init__(self, legacy=False):
+            self.calls = []
+            self._legacy = legacy
+            self._config = _NS(llm=_NS(model="m1", agent_max_tokens=100))
 
-    # F2 强制 zh：SDK 判 en 也追加（技术型中文记忆实测 zh_ratio=0.318 的场景）
-    _w = _evo_f.apply_language_directive("zh")
-    _out = _s2_f._build_single_call_system_prompt("en")
-    check("F2 强制 zh 时 en 提示词也追加中文输出指令",
-          _w == "" and _out.startswith(_orig_prompt_f("en"))
-          and "简体中文" in _out[len(_orig_prompt_f("en")):],
-          _w or _out[-80:])
+        def evolve(self, **kw):
+            if self._legacy and "language" in kw:
+                raise TypeError("evolve() got an unexpected keyword argument 'language'")
+            self.calls.append(kw)
+            return {"success": True, "results": {}, "request_id": "t"}
 
-    # F3 强制 en：对偶指令（zh 提示词上也要生效）
-    _w = _evo_f.apply_language_directive("en")
-    _out = _s2_f._build_single_call_system_prompt("zh")
-    check("F3 强制 en 时 zh 提示词追加英文指令",
-          _out.startswith(_orig_prompt_f("zh"))
-          and "MUST be written in English" in _out[len(_orig_prompt_f("zh")):],
-          _w or _out[-80:])
+        def close(self):
+            pass
 
-    # F4 幂等：切换后单次追加不叠加
-    _evo_f.apply_language_directive("zh")
-    _out2 = _s2_f._build_single_call_system_prompt("zh")
-    check("F4 切换语言后单次追加不叠加",
-          _out2.count("【输出语言要求】") == 1, _out2[-60:])
+    # F1 auto（""）：不传 language（跟随 SDK 检测）
+    _c = _CapClient()
+    _out = _evo_f.evolve(client=_c, user_id="default")
+    check("F1 auto 不传 language（跟随 SDK 检测）",
+          len(_c.calls) == 1 and "language" not in _c.calls[0]
+          and _out["language"] == "(auto)" and _out["language_note"] == "",
+          f"calls={_c.calls} lang={_out.get('language')!r}")
 
-    # F5 非法值：no-op + warning，不抛异常
-    _w = _evo_f.apply_language_directive("fr")
-    check("F5 非法语言 no-op 且给 warning", bool(_w), _w)
-    _evo_f.apply_language_directive("")  # 还原 auto，别影响 D 面
+    # F2 显式 zh：原生透传（SDK 会换提示词本体 + 追加硬性输出语言约束）
+    _c = _CapClient()
+    _out = _evo_f.evolve(client=_c, user_id="default", language="zh")
+    check("F2 显式 zh 原生透传给 client.evolve",
+          len(_c.calls) == 1 and _c.calls[0].get("language") == "zh"
+          and _out["language"] == "zh" and _out["language_note"] == "",
+          f"calls={_c.calls}")
+
+    # F3 显式 en：对偶透传
+    _c = _CapClient()
+    _out = _evo_f.evolve(client=_c, user_id="default", language="en")
+    check("F3 显式 en 原生透传",
+          len(_c.calls) == 1 and _c.calls[0].get("language") == "en",
+          f"calls={_c.calls}")
+
+    # F4 非法值：不传 language + 警告软降级（不炸 evolve）
+    _c = _CapClient()
+    _out = _evo_f.evolve(client=_c, user_id="default", language="xx")
+    check("F4 非法语言软降级（不传 + warning）",
+          len(_c.calls) == 1 and "language" not in _c.calls[0]
+          and "不是 SDK 支持的语言码" in (_out.get("language_note") or ""),
+          f"calls={_c.calls} note={_out.get('language_note')!r}")
+
+    # F5 老版本 SDK（evolve 无 language 参数 → TypeError）：去参重试 + note
+    _c = _CapClient(legacy=True)
+    _out = _evo_f.evolve(client=_c, user_id="default", language="zh")
+    check("F5 老版本 TypeError 软降级（去参重试 + note）",
+          len(_c.calls) == 1 and "language" not in _c.calls[0]
+          and "≥2.0.11" in (_out.get("language_note") or ""),
+          f"calls={_c.calls} note={_out.get('language_note')!r}")
 
     # F6 配置默认值：language=""（auto），key 必须显式存在
     _ev_f = _cfg_e.DEFAULTS.get("evolve") or {}

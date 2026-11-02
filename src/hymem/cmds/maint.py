@@ -356,7 +356,7 @@ def cmd_evolve(args) -> int:
         f"　耗时 {round((res.get('elapsed_ms') or 0) / 1000, 1)}s"
     )
     if str(res.get("language") or "") not in ("", "(auto)"):
-        lines.append(f"语言  {res['language']}（已注入输出语言指令）")
+        lines.append(f"语言  {res['language']}（SDK 原生输出语言约束）")
     if res.get("note"):
         lines.append(f"提示  {res['note']}")
     if res.get("language_note"):

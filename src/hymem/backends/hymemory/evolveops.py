@@ -210,58 +210,57 @@ def _schema_count(client, user_id: str = "default") -> int:
 
 
 # ---------------------------------------------------------------- language
-# SDK 2.0.5 的 System2 归纳语言靠 _detect_language 自动检测（zh_ratio≥0.7），
-# 对技术型中文记忆结构性失灵（路径/时间戳/术语把分母灌成 ASCII，实测 0.318
-# 判 en → 英文 schema → 中文 query 检索 0.17~0.34）。已提上游 issue；SDK
-# 修复前在这里打运行时补丁：给 _build_single_call_system_prompt 的返回值尾部
-# 追加一句输出语言指令。不改 vendor、SDK 升级改名时软降级。
-_LANG_DIRECTIVES = {
-    "zh": "\n\n【输出语言要求】所有 create_schema / revise_schema 操作的 "
-          "content 与 retrieval_text 必须用简体中文书写；专有名词与技术标识"
-          "（路径、命令、产品名、术语）可保留英文。",
-    "en": "\n\n[Language requirement] All content and retrieval_text in "
-          "create_schema / revise_schema operations MUST be written in English.",
-}
-_LANG_STATE = {"language": ""}  # 当前生效语言（幂等切换用，进程级）
+# SDK 2.0.11 起原生支持 evolve 的输出语言控制：显式 language（参数或
+# MemoryConfig.language）→ 提示词本体换语言 + 追加 OUTPUT_LANGUAGE_DIRECTIVE
+# （「所有自然语言内容一律用该语言书写，优先于任何『输出与输入一致』要求」），
+# 认 11 种语言、`zh`/`en` 是合法别名（prompts.LANGUAGE_ALIASES）。
+# rc.5 的运行时补丁（包装 _build_single_call_system_prompt）已退役——原生通道
+# 比补丁更强：补丁只追加指令，提示词本体仍可能被检测成 en；原生直接换本体。
+# 注意：SDK 的 auto 检测（_detect_language 的 zh_ratio≥0.7）在 2.0.11 仍未修，
+# 技术型中文依然判 en——显式配 evolve.language=zh 仍是推荐用法（契约
+# docs/specs/2026-11-02-sdk-2011-language/）。
+def _native_language(lang_eff: str) -> tuple[str, str]:
+    """把 hy-mem 的语言挡位解析成可透传给 SDK evolve 的值。
 
-
-def apply_language_directive(language: str) -> str:
-    """按给定语言给 SDK System2 系统提示词装输出语言指令。
-
-    返回 warning（成功为空串）。语义：
-    - ""（auto）：不注入，完全跟随 SDK 行为；
-    - "zh"/"en"：**无视检测结果**强制追加（en 提示词选中也追加 zh 指令——
-      检测不可靠正是需要强制的原因）；
-    - 重复调用幂等（切换语言只换指令，不叠加）。
-    SDK 升级若函数改名/缺失，返回 warning 且 evolve 照常跑（退回默认行为）。
+    返回 (language 或 None, note)。语义：
+    - ""（auto）→ (None, "")：不传，完全跟随 SDK 检测；
+    - 合法值（经 SDK normalize_language 校验，zh/en 及全部别名）→ 原样透传；
+    - 非法值 → (None, 警告)：不炸 evolve，按 auto 跑。
     """
-    language = str(language or "").strip().lower()
-    if language not in _LANG_DIRECTIVES:
-        if language:
-            return f"evolve.language={language!r} 不是 zh/en/auto，忽略（按 auto 处理）"
-        _LANG_STATE["language"] = ""
-        return ""
+    lang_eff = str(lang_eff or "").strip()
+    if not lang_eff:
+        return None, ""
     try:
-        from hy_memory.pipelines import system2_agent as _s2
+        from hy_memory.prompts import normalize_language
+
+        normalize_language(lang_eff)
+        return lang_eff, ""
+    except ValueError:
+        return None, (
+            f"evolve.language={lang_eff!r} 不是 SDK 支持的语言码"
+            "（如 zh/en/ja/zh-Hant），本次按 auto 执行"
+        )
     except Exception as e:  # noqa: BLE001
-        return f"语言指令补丁失败：无法导入 SDK system2_agent（{e}），按 SDK 默认行为继续"
-    orig = getattr(_s2, "_build_single_call_system_prompt", None)
-    if orig is None:
-        return "语言指令补丁失败：SDK 无 _build_single_call_system_prompt（版本不兼容），按默认行为继续"
-    if getattr(orig, "_hymem_lang_patched", False):
-        # 已装过补丁：只切语言，不重复包一层
-        _LANG_STATE["language"] = language
-        return ""
-    base_fn = orig
+        return None, f"语言参数校验失败（{e}），本次按 auto 执行"
 
-    def _patched(lang: str) -> str:
-        out = base_fn(lang)
-        return out + (_LANG_DIRECTIVES.get(_LANG_STATE["language"]) or "")
 
-    _patched._hymem_lang_patched = True  # type: ignore[attr-defined]
-    _s2._build_single_call_system_prompt = _patched
-    _LANG_STATE["language"] = language
-    return ""
+def _call_evolve(client, user_id: str, max_batches, language):
+    """调 SDK evolve；显式语言走原生 language 参数，老版本 SDK TypeError 兜底。
+
+    TypeError 兜底只在「带 language 调用」时启用：SDK < 2.0.11 的 evolve 没有
+    这个参数，去掉重试一次。note 非空表示发生过降级（随结果带出去）。
+    """
+    if language:
+        try:
+            return client.evolve(user_id=user_id, max_batches=max_batches,
+                                 language=language), ""
+        except TypeError:
+            out = client.evolve(user_id=user_id, max_batches=max_batches)
+            return out, (
+                "当前 hy-memory 版本不支持 evolve 的 language 参数（需 ≥2.0.11），"
+                "本次按 SDK 默认行为执行"
+            )
+    return client.evolve(user_id=user_id, max_batches=max_batches), ""
 
 
 def evolve(
@@ -283,10 +282,10 @@ def evolve(
 
     ev = cfgmod.load().get("evolve") or {}
     model = str(model_override or ev.get("model") or "").strip()
-    # 语言：显式参数 > config > auto。装补丁可能软降级（SDK 改名），warning
-    # 随结果带出去（CLI 的「提示」行 / MCP 的 language_note 字段）。
+    # 语言：显式参数 > config > auto。SDK ≥2.0.11 原生透传；非法值/老版本 SDK
+    # 软降级（warning 随结果带出去：CLI 的「提示」行 / MCP 的 language_note 字段）。
     lang_eff = str(language or ev.get("language") or "").strip().lower()
-    lang_note = apply_language_directive(lang_eff)
+    lang_pass, lang_note = _native_language(lang_eff)
     own = client is None
     old_model = ""
     old_mt = None
@@ -303,7 +302,9 @@ def evolve(
     before = _schema_count(client, user_id)
     try:
         try:
-            out = client.evolve(user_id=user_id, max_batches=max_batches)
+            out, degrade_note = _call_evolve(client, user_id, max_batches, lang_pass)
+            if degrade_note:
+                lang_note = f"{lang_note}；{degrade_note}" if lang_note else degrade_note
         except Exception as e:  # noqa: BLE001
             msg = f"{type(e).__name__}: {e}"
             return {
