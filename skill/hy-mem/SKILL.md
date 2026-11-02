@@ -636,7 +636,7 @@ D://tools_open//agent-bridge//
 ├── tests/test_ui.py    # 按键 / 鼠标 / 行编辑自测（无需真终端）
 ├── tests/test_setup.py # 向导 / 存储运维 / 运行环境自检 自测（不发网络请求）
 ├── dist\hy-mem\          # 产物目录（351MB，含 _internal\，整个拷走）
-├── dist\hy-mem-*-win64.zip # 对外分发物（152MB，解压即完整目录）
+├── dist\hy-mem.zip         # 对外分发物（名字恒定不带版本，解压覆盖历史安装）
 └── data\                 # 记忆库 + hy_mem_queue.db，整体备份
 ```
 
@@ -664,7 +664,7 @@ dist\hy-mem\hy-mem.exe --version                  # 拷走即可用，不需要 
 | 产物 | 用途 |
 |---|---|
 | `dist\hy-mem\` | 目录版，拷走即用（自带 `_internal\`） |
-| `dist\hy-mem-<版本>-win64.zip` | **对外分发的就是这个**，1417 个文件 / 152MB。解压出来就是完整目录，不存在漏文件 |
+| `dist\hy-mem.zip` | **对外分发的就是这个**，名字恒定不带版本（版本说明在 GitHub Release 标题），解压出来就是完整目录、覆盖历史安装，不存在漏文件 |
 | `启动 hy-mem.cmd` | 双击入口。**启动前先查 `_internal\`**，缺了就用中文说明 + `pause` 停住窗口 |
 | `安装到 PATH.cmd` | 一键 `hy-mem install` |
 | `使用说明.txt` | 三步上手 + 常见问题（给完全不懂命令行的人） |

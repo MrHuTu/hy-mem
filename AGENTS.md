@@ -108,7 +108,7 @@ D:\tools_open\agent-bridge\
 ├── build\                     ← PyInstaller 中间物（本地生成，不入库）
 └── dist\                      ← 产物（本地生成，不入库；`python scripts/build_exe.py` 约 196s）
     ├── hy-mem\                ← 产物目录：_internal/ + hy-mem.exe + skill/ + 启动器 (+ 自用 config/data)
-    └── hy-mem-0.9.11-win64.zip ← 对外分发物（178MB，解压即完整目录）
+    └── hy-mem.zip                ← 对外分发物（名字恒定不带版本，解压覆盖历史安装）
 ```
 
 **别在这几处凭直觉改**：`helptext.py` 是帮助文本唯一真源（改命令必须同步改它）；`presets.py` 的 `dims` 必须与真实模型一致；`SKILL.md` 只改 `skill/hy-mem/SKILL.md`，宿主里的副本用 `hy-mem skill --install` 铺过去。
@@ -481,9 +481,9 @@ ls dist-next/hy-mem-*.zip                 # 对外分发物，应该和 hy-mem/ 
 
 **Step 5.5 · 解压冒烟（务必做，这是「发给别人能跑」的唯一证据）**
 ```bash
-mkdir -p /d/tmp-hm/unzip && cd /d/tmp-hm/unzip && rm -rf hy-mem-* 
-unzip -q "$OLDPWD/dist-next/hy-mem-0.9.5-win64.zip"   # 或资源管理器右键解压
-cd hy-mem-0.9.5-win64
+mkdir -p /d/tmp-hm/unzip && cd /d/tmp-hm/unzip && rm -rf hy-mem 
+unzip -q "$OLDPWD/dist-next/hy-mem.zip"   # 或资源管理器右键解压（包内根目录恒为 hy-mem/）
+cd hy-mem
 cmd //c "启动 hy-mem.cmd" --version                    # 应打印 hy-mem 0.9.5
 ```
 此时目录里**没有** config.json / data/，能打印版本 = 包是自包含的。这一步在开发机上「看起来多余」，但它正是别人拿到包后的真实起点。
@@ -616,7 +616,7 @@ LoadLibrary: ?????????
 
 | 症状 | 真因 | 处置 |
 |---|---|---|
-| 对方双击一闪而过 / 说「打不开」 | **只拷了 `hy-mem.exe`**，`_internal/` 没跟过去（不是缺 Python、不是版本不对） | 发 `hy-mem-<ver>-win64.zip`；或整个目录一起拷。用 `启动 hy-mem.cmd` 启动，缺件时它会明确报错并停住窗口 |
+| 对方双击一闪而过 / 说「打不开」 | **只拷了 `hy-mem.exe`**，`_internal/` 没跟过去（不是缺 Python、不是版本不对） | 发 `hy-mem.zip`（名字恒定）；或整个目录一起拷。用 `启动 hy-mem.cmd` 启动，缺件时它会明确报错并停住窗口 |
 | 启动器报 `'…' is not recognized`、中文变乱码 | 批处理里含中文，cmd 在 65001 下按块解码把行截断了 | 批处理保持纯 ASCII，中文放 `.txt` 用 `type` 输出（`test_setup.py` 有断言守着） |
 | 「配好了却报配置不全」 | 走的是另一套环境 | `hy-mem config show` 看配置文件路径 |
 | 写入后检索不到 | **入队 ≠ 入库**。`add --async` 只入队，worker 被打断（`error=interrupted`）就永远 pending | `hy-mem queue` 看 pending → `hy-mem worker --once`。要立刻可查就别用异步 |
@@ -645,7 +645,7 @@ LoadLibrary: ?????????
 
 1. 不要 `rm -rf dist` —— 删产物用 `mv` 改名（安全保护会拦大量文件删除，且旧版 exe 可能被占用）。
 2. 不要把 `config.json` / `.env` / `data/` 打进产物，也不要为了「方便」预置一份没填 key 的配置（会导致首次运行不触发引导）。
-3. **不要把 `hy-mem.exe` 单独发给别人** —— 运行时在 `_internal/` 里，对方双击必闪退。对外只发 `hy-mem-<ver>-win64.zip`。
+3. **不要把 `hy-mem.exe` 单独发给别人** —— 运行时在 `_internal/` 里，对方双击必闪退。对外只发 `hy-mem.zip`（名字恒定，版本说明在 GitHub Release 标题）。
 4. 启动器/批处理里不要写中文（cmd 65001 会截断行）；中文放 `.txt` 用 `type`。
 5. 不要用 `--onefile`。
 6. 不要改 `presets.py` 的 `dims` 而不重建数据目录。
