@@ -24,10 +24,11 @@ r"""构建自包含 hy-mem.exe —— 把一条命令固定下来，避免每次
      * `启动 hy-mem.cmd`  —— 双击入口，先查 `_internal/` 再启动，出错会 pause
      * `安装到 PATH.cmd`  —— 一键 `hy-mem install`
      * `使用说明.txt`      —— 给完全不懂的人看的三步
-     * `hy-mem.zip` —— 直接把压缩包发人，从根上避免「只拷 exe」。
-       **命名规则（2026-11-02 定，用户拍板）：永远叫 hy-mem.zip，不带版本号**——
-       版本说明写在 GitHub Release 标题里；包内根目录恒为 `hy-mem/`，
-       解压到安装位置即自动覆盖历史安装，无需先删旧目录。
+     * `hy-mem-win64.zip` —— 直接把压缩包发人，从根上避免「只拷 exe」。
+       **命名规则（2026-11-02 调整，用户拍板）：恒名 hy-mem-win64.zip，不带版本号、
+       带 OS 后缀（一眼看出支持平台）**——版本说明写在 GitHub Release 标题里；
+       包内根目录恒为 `hy-mem-win64/`，解压到安装位置即自动覆盖历史安装，
+       无需先删旧目录。
 
 用法：
     .venv/Scripts/python.exe scripts/build_exe.py
@@ -35,7 +36,7 @@ r"""构建自包含 hy-mem.exe —— 把一条命令固定下来，避免每次
     HY_MEM_NO_ZIP=1 ...                                                      # 不生成压缩包
 产物：
     dist/hy-mem/            （目录，拷走即可用）
-    dist/hy-mem.zip         （压缩包，发给别人用这个；名字恒定）
+    dist/hy-mem-win64.zip   （压缩包，发给别人用这个；名字恒定）
 """
 
 from __future__ import annotations
@@ -55,6 +56,8 @@ ROOT = Path(__file__).resolve().parent.parent
 # 目录被占用就搬不动），这时先构建到旁边，等旧进程退出再换。
 DIST = Path(os.getenv("HY_MEM_DIST") or (ROOT / "dist"))
 NAME = "hy-mem"
+# 压缩包恒名（2026-11-02 调整：带 OS 后缀，与安装目录名一致——解压即覆盖）
+ZIP_NAME = "hy-mem-win64"
 
 ARGS = [
     "--noconfirm",
@@ -150,11 +153,12 @@ def _purge_old() -> None:
         print(f"[build] 以下旧产物删不掉（可能被杀软占用），可手工删：{', '.join(keep_fail)}")
     elif list(DIST.glob(f"_{NAME}-old-*")) == []:
         print("[build] 历史产物已清理")
-    # 旧版本的压缩包同样占地方：产物恒名 hy-mem.zip，其余 hy-mem-*.zip 全是
-    # 历史版本包或兜底名，一律清掉
-    cur = DIST / f"{NAME}.zip"
-    for z in sorted(DIST.glob(f"{NAME}-*.zip")):
-        if z.resolve() == cur.resolve():
+    # 旧版本的压缩包同样占地方：产物恒名 hy-mem-win64.zip（2026-11-02 调整，
+    # 旧规则为 hy-mem.zip），其余 hy-mem*.zip 全是历史版本包或兜底名，一律清掉
+    cur = DIST / f"{ZIP_NAME}.zip"
+    legacy = {DIST / f"{NAME}.zip"}  # 旧恒名产物，调整后也属历史
+    for z in sorted(list(DIST.glob(f"{NAME}-*.zip")) + list(legacy)):
+        if z.resolve() == cur.resolve() or not z.exists():
             continue
         try:
             z.unlink()
@@ -345,11 +349,11 @@ def _write_extras(out: Path) -> None:
 
 
 def _make_zip(out: Path) -> Path | None:
-    """把整个目录打成 `hy-mem.zip`，作为对外分发物。
+    """把整个目录打成 `hy-mem-win64.zip`，作为对外分发物。
 
-    **名字恒定（2026-11-02 用户拍板）**：不带版本号，版本说明写在 GitHub
-    Release 标题里；包内根目录恒为 `hy-mem/`——解压到安装位置即自动覆盖
-    历史安装，不用先删旧目录再解压。
+    **名字恒定（2026-11-02 调整，用户拍板）**：不带版本号、带 OS 后缀，版本
+    说明写在 GitHub Release 标题里；包内根目录恒为 `hy-mem-win64/`——解压到
+    安装位置即自动覆盖历史安装，不用先删旧目录再解压。
 
     这是「只拷 exe 导致闪退」的根治手段：发出去的是压缩包，接收方解压出来就是
     完整目录，不存在漏文件。压缩包必须在消毒之后生成，否则会把 config 带出去。
@@ -357,7 +361,7 @@ def _make_zip(out: Path) -> Path | None:
     if os.getenv("HY_MEM_NO_ZIP", "").strip() not in ("", "0"):
         print("[build] 已跳过压缩包（HY_MEM_NO_ZIP=1）")
         return None
-    folder = NAME  # 包内根目录恒定：解压覆盖历史安装的关键
+    folder = ZIP_NAME  # 包内根目录恒定：解压覆盖历史安装的关键
     zpath = DIST / f"{folder}.zip"
     try:
         if zpath.exists():
