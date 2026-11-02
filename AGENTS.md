@@ -27,8 +27,8 @@
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
 | 源码规模 | **35 个 py，16900 行**（`cli/` 20 个 12634 行 + `scripts/` 15 个 4266 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
-| 子命令 | **31** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **819**（CLI 101 / UI 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / MCP 31 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80） | 见 §8 |
+| 子命令 | **39** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**；rc.9 新增 `backup` / `restore` / `vdb-*` ×5 / `graph-build`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
+| 测试用例 | **842**（CLI 120 / UI 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / MCP 35 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80） | 见 §8 |
 | 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 33 MB）；对外分发 `dist/hy-mem-0.9.13-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **160 s**（含压缩包 24 s） | 构建日志末行 |
@@ -363,6 +363,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | 写入 | `add` `delete` `forget` `update` `finalize` |
 | 读取 | `search` `list` `get` `outcome` `profile` `history` |
 | **维护 / 认知层** | `evolve`（**仅 ultra**；pro 下 exit 1 并在 `tools/list` 里隐藏）、`evolve-status`（观察窗口，**所有模式可看**：自动沉淀状态与历史） |
+| **运维（SDK 2.0.11 对齐，docs/specs/2026-11-02-sdk-alignment-gaps/）** | `backup` / `restore`（数据面快照与回滚，需静默 + `--yes`）、`vdb-scan` / `vdb-plan` / `vdb-reembed` / `vdb-reembed-graph` / `vdb-drop`（换向量模型的官方迁移路径，破坏性命令需 `--yes`）、`graph-build`（存量记忆回填关系图，真模型） |
 | 队列 | `serve` `worker` `queue` `drain` `retry` |
 | 接入 | `mcp` |
 | 标签 | `tags` `untag` `archive` |
@@ -403,7 +404,7 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe tests/test_cli.p
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：十四套全绿（cli 101 / ui 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / mcp 31 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80 / concurrency 场景 = **819**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：十四套全绿（cli 120 / ui 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / mcp 35 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80 / concurrency 场景 = **842**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
 
 ### 8.1 怎么测 CLI —— 四条铁律（2026-10-28 补，源自 401 事故）
 
