@@ -48,3 +48,9 @@
 - **关联文档**：`docs/specs/2026-11-02-ultra-graph-degrade/issue-draft.md` 附带发现段。
 - **同步记录**：
   - 2026-11-02：发现于 MCP 工具实测（serve 重启窗口）。
+
+- **下游对策（2026-11-02 落地，commit d575778，rc.11）**：
+  - S1 自愈：MCP `_client()` 取缓存前 `_endpoint_stale()` 复验（env 端口心跳死 / 登记新活端口 → 放掉重建，重跑 ensure_endpoint）；CLI 短进程天然免疫。
+  - S2 加固：config 新增 `servePort`（0=随机默认），serve 绑定固定端口（被占回退随机+告警）——端口不变则冻结端点恒有效。
+  - 定性修正：主因是 hy-mem 侧「随机端口 + 单例不失效」两处设计；SDK 构造期读 env 属设计限制（enhancement），提 issue 时按低优先级建议附带。
+  - 验收：test_vdb_endpoint 44/44（U3 四态 + S2 两态），全量 14 套全绿。
