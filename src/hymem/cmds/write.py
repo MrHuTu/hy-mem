@@ -383,14 +383,23 @@ def cmd_forget(args) -> int:
 def cmd_finalize(args) -> int:
     if not args.user:
         return fail("finalize 必须指定 --user", EXIT_USAGE)
+    # S2（docs/specs/2026-11-02-sdk-alignment-gaps/）：episode 叙事与 evolve 同根因
+    # ——SDK auto 检测对技术型中文失灵（zh_ratio≥0.7 判 en）。缺省复用
+    # evolve.language 配置；两处都空才交给 SDK auto。
+    lang = str(getattr(args, "language", None) or "").strip().lower()
+    if not lang:
+        from hymem.core import config as _cfgmod
+
+        lang = str((_cfgmod.load().get("evolve") or {}).get("language") or "").strip().lower()
     client = make_client(args.mode)
     try:
         r = client.finalize_session(
             user_id=args.user,
             agent_id=args.agent or "default_agent",
             session_id=args.session or "default_session",
+            **({"language": lang} if lang else {}),
         )
-        return ok(r, args.json, "session 已收尾")
+        return ok(r, args.json, "session 已收尾" + (f"（叙事语言 {lang}）" if lang else ""))
     finally:
         client.close()
 

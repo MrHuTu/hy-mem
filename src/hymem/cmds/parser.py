@@ -21,7 +21,9 @@ from hymem.cmds.read import (  # noqa: F401
     cmd_outcome,
 )
 from hymem.cmds.maint import (  # noqa: F401
-    cmd_doctor, cmd_evolve, cmd_evolve_status, cmd_stats, cmd_log,
+    cmd_backup, cmd_doctor, cmd_evolve, cmd_evolve_status, cmd_graph_build,
+    cmd_log, cmd_restore, cmd_stats, cmd_vdb_drop, cmd_vdb_plan,
+    cmd_vdb_reembed, cmd_vdb_reembed_graph, cmd_vdb_scan,
 )
 from hymem.cmds.queue import (  # noqa: F401
     cmd_serve, cmd_worker, cmd_queue, cmd_retry, cmd_drain,
@@ -156,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.set_defaults(func=cmd_add)
 
     ps = sub.add_parser("search", help="语义检索")
-    ps.add_argument("query", help="查询语句；越接近原话命中率越高")
+    ps.add_argument("query", nargs="?", default=None, help="查询语句；越接近原话命中率越高（或用 --queries 多路）")
     ps.add_argument("-n", "--limit", type=int, default=10, help="返回条数")
     ps.add_argument(
         "--min-score",
@@ -187,6 +189,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--schema-limit", type=int, default=0,
         help="L6 返回条数，默认取 config.evolve.schemaLimit（3）",
     )
+    ps.add_argument(
+        "--queries", default=None,
+        help="多路并行检索：逗号分隔多个查询（与位置参数 query 二选一，都传报错）",
+    )
+    ps.add_argument(
+        "--search-mode", choices=["default", "agentic"], default="default",
+        help="agentic=智能体重写扩展检索（更慢更贵，命中率上限更高）",
+    )
+    ps.add_argument(
+        "--no-rerank", dest="rerank", action="store_false", default=True,
+        help="关闭 SDK 侧重排（省时省 token，排序质量下降）",
+    )
     ps.set_defaults(func=cmd_search)
 
     ps = sub.add_parser("outcome", help="按 request_id 查写入结果（含异步/scene 写入）")
@@ -194,6 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.set_defaults(func=cmd_outcome)
 
     ps = sub.add_parser("profile", help="查看 L0 用户画像（基础信息，如姓名/职业）")
+    ps.add_argument("--full", action="store_true",
+                    help="返回 SDK 组装好的完整画像（get_user_profile，ultra 附 balanced catalog）")
     ps.set_defaults(func=cmd_profile)
 
     ps = sub.add_parser(
@@ -253,6 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.set_defaults(func=cmd_forget)
 
     ps = sub.add_parser("finalize", help="收尾 session（触发演化）")
+    ps.add_argument("--language", default=None,
+                    help="episode 叙事输出语言（如 zh）；缺省取 config.evolve.language，再缺省 SDK 自动")
     ps.set_defaults(func=cmd_finalize)
 
     ps = sub.add_parser("stats", help="运行指标 / 库体积健康度")
@@ -327,6 +345,59 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("-n", "--limit", type=int, default=50, help="返回最近 N 条（最多保留 50 条）")
     ps.add_argument("--clear", action="store_true", help="清空日志（不可恢复）")
     ps.set_defaults(func=cmd_log)
+
+    # ---- S4/S5/S6（docs/specs/2026-11-02-sdk-alignment-gaps/）：迁移与运维 ----
+    ps = sub.add_parser("vdb-scan", help="扫描向量空间（只读）")
+    ps.add_argument("--root", default=None, help="向量空间根目录（缺省=数据目录）")
+    ps.add_argument("--whole", action="store_true", help="不按 user 拆分，报全库汇总")
+    ps.set_defaults(func=cmd_vdb_scan)
+
+    ps = sub.add_parser("vdb-plan", help="reembed 差量计划（只读）")
+    ps.add_argument("--source", required=True, help="源向量空间目录")
+    ps.add_argument("--target", required=True, help="目标向量空间目录（新维度/新模型）")
+    ps.add_argument("--graph-source", default=None, help="源 Kuzu 图路径（附带图差量）")
+    ps.set_defaults(func=cmd_vdb_plan)
+
+    ps = sub.add_parser("vdb-reembed", help="全量重嵌入 source→target（skip_existing 断点续跑）")
+    ps.add_argument("--source", required=True, help="源向量空间目录")
+    ps.add_argument("--target", required=True, help="目标向量空间目录")
+    ps.add_argument("--batch-size", type=int, default=64)
+    ps.add_argument("--max-inflight", type=int, default=2)
+    ps.add_argument("--roles", default=None, help="只重嵌这些 role（逗号分隔）")
+    ps.add_argument("--yes", action="store_true", help="确认执行（不加只报错）")
+    ps.set_defaults(func=cmd_vdb_reembed)
+
+    ps = sub.add_parser("vdb-reembed-graph", help="Kuzu 图向量重建（新维度）")
+    ps.add_argument("--source", required=True, help="源图路径")
+    ps.add_argument("--target", required=True, help="目标图路径")
+    ps.add_argument("--dims", type=int, required=True, help="目标向量维度")
+    ps.add_argument("--batch-size", type=int, default=64)
+    ps.add_argument("--yes", action="store_true", help="确认执行")
+    ps.set_defaults(func=cmd_vdb_reembed_graph)
+
+    ps = sub.add_parser("vdb-drop", help="删除向量空间（破坏性）")
+    ps.add_argument("--path", required=True, help="要删除的空间目录")
+    ps.add_argument("--roles", default=None, help="只删这些 role（逗号分隔）")
+    ps.add_argument("--yes", action="store_true", help="确认执行")
+    ps.set_defaults(func=cmd_vdb_drop)
+
+    ps = sub.add_parser("backup", help="数据面快照（需数据面静默）")
+    ps.add_argument("--to", required=True, help="快照输出目录")
+    ps.set_defaults(func=cmd_backup)
+
+    ps = sub.add_parser("restore", help="从快照恢复数据面（SDK 自带回滚；破坏性）")
+    ps.add_argument("--snapshot", required=True, help="快照目录（backup --to 的输出）")
+    ps.add_argument("--target", default=None, help="恢复目标（缺省=当前数据目录）")
+    ps.add_argument("--yes", action="store_true", help="确认执行")
+    ps.set_defaults(func=cmd_restore)
+
+    ps = sub.add_parser("graph-build", help="对存量记忆回填关系图（真模型，耗时长）")
+    ps.add_argument("--limit", type=int, default=10000, help="最多处理多少条记忆")
+    ps.add_argument("--clear-first", action="store_true", help="构建前清空旧图")
+    ps.add_argument("--entities", action="store_true", help="附带重建实体库")
+    ps.add_argument("--rebuild-entities", dest="rebuild_entities", action="store_true",
+                    help="实体库全量重建（缺省增量）")
+    ps.set_defaults(func=cmd_graph_build)
 
     return p
 

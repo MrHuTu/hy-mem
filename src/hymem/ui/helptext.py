@@ -569,6 +569,51 @@ CMD_META: dict[str, dict] = {
         "output": {"resp": "{ok, by, groups:[{key, n}]}"},
         "notes": ["条数接近阈值（默认 200/500）时，reconcile 开销会拖慢写入。"],
     },
+    "backup": {
+        "group": "运维",
+        "when": "升级/换模型/动数据目录之前留一份可回滚的快照。要求数据面静默——有 worker/serve 在跑会拒绝。",
+        "mutates": "写快照目录（不动源数据）",
+        "examples": ["hy-mem backup --to D:/Agent_memory/backup-1102"],
+        "output": {"snapshot": "快照清单（文件数/校验），恢复用 hy-mem restore --snapshot <该目录>"},
+    },
+    "restore": {
+        "group": "运维",
+        "when": "数据面坏了/升级失败要回滚到快照。SDK 自带保护性回滚；需 --yes。",
+        "mutates": "覆盖数据目录（先 --yes）",
+        "examples": ["hy-mem restore --snapshot D:/Agent_memory/backup-1102 --yes"],
+    },
+    "vdb-scan": {
+        "group": "运维",
+        "when": "换向量模型前盘点：每个向量空间的 role/记录数/宽度。",
+        "examples": ["hy-mem vdb-scan", "hy-mem vdb-scan --root D:/Agent_memory/hy-mem-data"],
+    },
+    "vdb-plan": {
+        "group": "运维",
+        "when": "reembed 前看差量：每个 role 要算多少条向量（只读）。",
+        "examples": ["hy-mem vdb-plan --source <旧空间> --target <新空间>"],
+    },
+    "vdb-reembed": {
+        "group": "运维",
+        "when": "换向量模型（维度/端点变了）后的官方迁移路径：全部记录用当前 embedding 配置重写进目标空间；skip_existing 断点续跑。",
+        "mutates": "向 target 写全量向量；需 --yes",
+        "examples": ["hy-mem vdb-reembed --source <旧> --target <新> --yes"],
+    },
+    "vdb-reembed-graph": {
+        "group": "运维",
+        "when": "维度变了之后重建 Kuzu 图向量。",
+        "mutates": "写目标图路径；需 --yes",
+        "examples": ["hy-mem vdb-reembed-graph --source <旧图> --target <新图> --dims 1024 --yes"],
+    },
+    "vdb-drop": {
+        "group": "运维",
+        "when": "重嵌入完成并验证后，删掉旧向量空间腾地方。破坏性，需 --yes。",
+        "examples": ["hy-mem vdb-drop --path <旧空间> --yes"],
+    },
+    "graph-build": {
+        "group": "运维",
+        "when": "存量记忆回填关系图（如 Excel 批量导入后让图谱召回吃到存量）。真模型逐条抽关系，耗时长；--entities 附带实体库。",
+        "examples": ["hy-mem graph-build --entities"],
+    },
     "log": {
         "group": "诊断",
         "when": "回看「刚才那条命令到底跑了什么、为什么失败」——尤其是交互界面或 worker 里发生的失败，终端滚动缓冲早就没了。",

@@ -457,6 +457,39 @@ def main() -> int:
     check("R3 help add E_LOCK 快速失败", "E_LOCK" in p.stdout and "零写入" in p.stdout, "")
     check("R3 help add 指向 --async", "--async" in p.stdout, "")
 
+    # ---- I SDK 对齐补全（docs/specs/2026-11-02-sdk-alignment-gaps/）----
+    # 全部离线：只测参数校验/确认门/help 注册，不发起真实模型调用。
+    print("\nI SDK 对齐：search 新参数 / 确认门 / help 注册")
+    p = run(["help", "--json"])
+    okj, spec_i = one_json_object(p.stdout)
+    if okj and isinstance(spec_i, dict):
+        cmds_i = {c["name"] for c in spec_i.get("commands", [])}
+        for must in ("backup", "restore", "vdb-scan", "vdb-plan", "vdb-reembed",
+                     "vdb-reembed-graph", "vdb-drop", "graph-build"):
+            check(f"I1 help 注册 {must}", must in cmds_i)
+    else:
+        check("I1 help --json 可解析", False, p.stdout[:80])
+
+    p = run(["search"])
+    check("I2 search 缺查询 exit 1", p.returncode == 1, f"exit={p.returncode}")
+    check("I2 提示 query/--queries 两种给法", "--queries" in (p.stderr + p.stdout))
+
+    p = run(["search", "hello", "--queries", "a,b"])
+    check("I3 queries 与位置参数 query 互斥 exit 1", p.returncode == 1, f"exit={p.returncode}")
+
+    p = run(["search", "--queries", "1,2,3,4,5,6"])
+    check("I4 queries 超 5 路拒绝 exit 1", p.returncode == 1, f"exit={p.returncode}")
+
+    p = run(["search", "--scene", "working", "--queries", "a,b", "-u", "tester"])
+    check("I5 scene 检索不支持 queries exit 1", p.returncode == 1, f"exit={p.returncode}")
+
+    for _cmd, _extra in (("vdb-reembed", ["--source", "a", "--target", "b"]),
+                         ("vdb-drop", ["--path", "a"]),
+                         ("restore", ["--snapshot", "a"])):
+        p = run([_cmd] + _extra)
+        check(f"I6 {_cmd} 无 --yes 拒绝 exit 1", p.returncode == 1, f"exit={p.returncode}")
+        check(f"I6 {_cmd} 提示加 --yes", "--yes" in (p.stderr + p.stdout))
+
     # ---- S1 协议层守护断言（docs/specs/2026-11-02-cli-split-ports/）----
     # vendor 触点只准出现在 backends/：防止「只抽一半」的协议层被悄悄绕过。
     import re as _re

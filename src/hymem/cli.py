@@ -57,8 +57,10 @@ from hymem.cmds.read import (  # noqa: F401
 )
 from hymem.cmds.maint import (  # noqa: F401
     _LAT_A, _LAT_B, _dir_size, _estimate_write_latency, _health_thresholds,
-    _scan_all_memories, _stats_health, _status_icon, cmd_doctor, cmd_evolve,
-    cmd_evolve_status, cmd_log, cmd_stats,
+    _scan_all_memories, _stats_health, _status_icon, cmd_backup, cmd_doctor,
+    cmd_evolve, cmd_evolve_status, cmd_graph_build, cmd_log, cmd_restore,
+    cmd_stats, cmd_vdb_drop, cmd_vdb_plan, cmd_vdb_reembed,
+    cmd_vdb_reembed_graph, cmd_vdb_scan,
 )
 from hymem.cmds.queue import (  # noqa: F401
     _LaneState, _batch_compat, _execute_batch, _execute_job, _worker_id,

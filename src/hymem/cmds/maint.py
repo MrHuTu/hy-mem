@@ -691,3 +691,174 @@ def cmd_log(args) -> int:
         return ok(payload, args.json, f"{i18n.tr('（还没有操作记录）')}\n  {p}")
     head = f"{i18n.tr('操作日志')}  {len(entries)}/{oplog.MAX_KEEP}  {p}"
     return ok(payload, args.json, "\n".join([head, ""] + lines))
+
+
+# =========================================================== S4/S5/S6（docs/specs/2026-11-02-sdk-alignment-gaps/）
+# SDK 2.0.11 对齐补全：reembed 工具族 / backup-restore / graph-build。
+# 全部只留 CLI（迁移级/破坏性/长耗时重操作不进 MCP，判定见契约）。
+
+def _require_yes(args, what: str) -> int | None:
+    if not getattr(args, "yes", False):
+        return fail(f"{what}是破坏性/迁移级操作，必须加 --yes 确认", EXIT_USAGE,
+                    hint="先跑只读命令看影响范围，确认后再加 --yes")
+    return None
+
+
+def _quiesce_or_fail(action: str) -> int | None:
+    """备份/回滚前探测静默：短暂抢写锁，抢不到说明有写入进程在跑。"""
+    lk = store.WriteLock(timeout=1.0, name="backup.lock")
+    with lk:
+        if not lk.acquired:
+            return fail(
+                f"{action}要求数据面静默（writers_stopped），但写锁被别的进程持有",
+                hint="先停 worker / serve / 其它 hy-mem 进程，再重试",
+            )
+    return None
+
+
+def _fmt_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
+        n /= 1024
+    return f"{n:.1f}GB"
+
+
+def cmd_vdb_scan(args) -> int:
+    """扫描向量空间（只读）：每个空间的 role/条数/宽度/模型。"""
+    from hymem.backends.hymemory import reembedops
+
+    try:
+        spaces = reembedops.scan_spaces(getattr(args, "root", None), per_user=not args.whole)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"扫描失败：{type(e).__name__}: {e}")
+    payload = {"root": str(reembedops._persist_root(getattr(args, "root", None))), "count": len(spaces), "spaces": spaces}
+    lines = [f"向量空间扫描：{payload['root']}（{len(spaces)} 个）", ""]
+    for s in spaces:
+        name = s.get("name") or s.get("base") or "?"
+        width = s.get("width") or s.get("dims") or "?"
+        cnt = s.get("count") or s.get("records") or "?"
+        lines.append(f"  - {name}  宽度={width}  记录={cnt}")
+    return ok(payload, args.json, "\n".join(lines) if spaces else "没有找到任何向量空间")
+
+
+def cmd_vdb_plan(args) -> int:
+    """reembed 差量计划（只读）：每个 role 要算多少条向量。"""
+    from hymem.backends.hymemory import reembedops
+
+    try:
+        plan = reembedops.plan_reembed(args.source, args.target,
+                                       getattr(args, "graph_source", None))
+    except Exception as e:  # noqa: BLE001
+        return fail(f"计划失败：{type(e).__name__}: {e}")
+    return ok(plan, args.json, f"计划生成（源 {args.source} → 目标 {args.target}），JSON 里有逐 role 明细")
+
+
+def cmd_vdb_reembed(args) -> int:
+    """全量重嵌入：source → target（skip_existing 断点续跑）。"""
+    rc = _require_yes(args, "重嵌入（会向 target 写全量向量）")
+    if rc is not None:
+        return rc
+    from hymem.backends.hymemory import reembedops
+
+    roles = [r.strip() for r in (args.roles or "").split(",") if r.strip()] or None
+    try:
+        report = reembedops.run_reembed(
+            args.source, args.target, batch_size=args.batch_size,
+            max_inflight=args.max_inflight, roles=roles,
+        )
+    except Exception as e:  # noqa: BLE001
+        return fail(f"重嵌入失败：{type(e).__name__}: {e}",
+                    hint="先跑 hy-mem vdb-plan 看差量；skip_existing 默认开，中断后重跑即续传")
+    return ok(report, args.json, f"重嵌入完成（源 {args.source} → 目标 {args.target}）")
+
+
+def cmd_vdb_reembed_graph(args) -> int:
+    """Kuzu 图向量重建：源图 → 目标图（新维度）。"""
+    rc = _require_yes(args, "图向量重建（会写目标图路径）")
+    if rc is not None:
+        return rc
+    from hymem.backends.hymemory import reembedops
+
+    try:
+        report = reembedops.run_reembed_graph(args.source, args.target, args.dims,
+                                              batch_size=args.batch_size)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"图重建失败：{type(e).__name__}: {e}")
+    return ok(report, args.json, f"图向量重建完成（{args.source} → {args.target}，dims={args.dims}）")
+
+
+def cmd_vdb_drop(args) -> int:
+    """删除向量空间（破坏性）。"""
+    rc = _require_yes(args, "删除向量空间")
+    if rc is not None:
+        return rc
+    from hymem.backends.hymemory import reembedops
+
+    roles = [r.strip() for r in (args.roles or "").split(",") if r.strip()] or None
+    try:
+        dropped = reembedops.drop_space(args.path, roles=roles)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"删除失败：{type(e).__name__}: {e}")
+    return ok({"dropped": dropped, "count": len(dropped)}, args.json,
+              f"已删除 {len(dropped)} 个 collection：{', '.join(dropped) or '（无）'}")
+
+
+def cmd_backup(args) -> int:
+    """数据面快照（SDK snapshot 契约：静默 + 校验清单）。"""
+    rc = _quiesce_or_fail("备份")
+    if rc is not None:
+        return rc
+    from hymem.backends.hymemory import reembedops
+
+    src = data_dir()
+    dst = Path(str(args.to)).expanduser()
+    if dst.resolve() == src.resolve():
+        return fail("备份目标不能是数据目录本身", EXIT_USAGE)
+    try:
+        out = reembedops.snapshot_data_plane(src, dst)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"备份失败：{type(e).__name__}: {e}")
+    return ok(out, args.json, f"备份完成：{src} → {dst}")
+
+
+def cmd_restore(args) -> int:
+    """从快照恢复数据面（SDK 自带回滚：protective_root 保底）。"""
+    rc = _require_yes(args, "恢复（会覆盖当前数据面）")
+    if rc is not None:
+        return rc
+    rc = _quiesce_or_fail("恢复")
+    if rc is not None:
+        return rc
+    from hymem.backends.hymemory import reembedops
+
+    target = Path(str(args.target).expanduser()) if args.target else data_dir()
+    snap_root = Path(str(args.snapshot)).expanduser()
+    try:
+        res = reembedops.restore_data_plane(snap_root, target)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"恢复失败：{type(e).__name__}: {e}",
+                    hint="SDK 恢复自带回滚清单，看它的输出定位 protective 备份目录")
+    return ok(res, args.json, f"恢复完成：{snap_root} → {target}")
+
+
+def cmd_graph_build(args) -> int:
+    """对存量记忆回填关系图（可选附带实体库）。真模型操作。"""
+    rc = require_ready("构建关系图")
+    if rc is not None:
+        return rc
+    client = make_client(args.mode)
+    uid = identity(args).get("user_id") or config_defaults_user()
+    try:
+        r = client.build_memory_graph(
+            user_id=uid, limit=args.limit, clear_first=args.clear_first)
+        if args.entities:
+            r["entity_store"] = client.build_entity_store(
+                user_id=uid, rebuild=args.rebuild_entities)
+    except Exception as e:  # noqa: BLE001
+        return fail(f"构建失败：{type(e).__name__}: {e}",
+                    hint="这是真模型批量操作（逐条抽关系），确认 LLM 端点与密钥可用")
+    finally:
+        client.close()
+    n = (r.get("triples") or r.get("edges") or r.get("count") or "?") if isinstance(r, dict) else "?"
+    return ok(r, args.json, f"关系图构建完成（user={uid}，产出门面见 JSON；实体库={'已重建' if args.entities else '未动'}）")

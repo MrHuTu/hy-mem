@@ -129,6 +129,15 @@ def main() -> int:
     tools = {t["name"] for t in r.get("result", {}).get("tools", [])}
     check("tools/list 8 工具齐全", tools == EXPECTED_TOOLS, f"got={sorted(tools)}")
 
+    # ---- 2b. SDK 对齐（docs/specs/2026-11-02-sdk-alignment-gaps/ S1）：----
+    # search_memory 暴露 queries / search_mode / rerank；query 不再强制（与 queries 二选一）
+    _sm = next((t for t in r.get("result", {}).get("tools", [])
+                if t.get("name") == "search_memory"), {})
+    _props = set((_sm.get("inputSchema", {}).get("properties") or {}).keys())
+    for _f in ("queries", "search_mode", "rerank"):
+        check(f"MCP search_memory schema 含 {_f}", _f in _props, str(sorted(_props)))
+    check("MCP search_memory 不再强制 query", "query" not in (_sm.get("inputSchema", {}).get("required") or []))
+
     def tool(name: str, args: dict, timeout: float = 180) -> dict:
         r = cli.call("tools/call", {"name": name, "arguments": args}, timeout=timeout)
         if "error" in r:

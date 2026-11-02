@@ -95,17 +95,38 @@ def cmd_profile(args) -> int:
 
     L0 basic_info 是 add 时顺带抽取的「这个人是谁」——姓名/职业/所在地/偏好，
     与检索出来的 L1 事实是两层。以前只有写入没有读取，等于白抽。
+    S3（docs/specs/2026-11-02-sdk-alignment-gaps/）：--full 走 get_user_profile
+    ——SDK 组装好的完整画像（ultra 附 balanced catalog），仍零 LLM/零 embedding。
     """
     rc = require_ready("读取用户画像")
     if rc is not None:
         return rc
     client = make_client(args.mode)
     uid = identity(args).get("user_id") or config_defaults_user()
+    full = bool(getattr(args, "full", False))
     try:
-        r = client.get_user_basic_info(user_id=uid) or {}
+        if full:
+            r = client.get_user_profile(user_id=uid) or {}
+        else:
+            r = client.get_user_basic_info(user_id=uid) or {}
     except Exception as e:  # noqa: BLE001
         return fail(f"读取画像失败：{type(e).__name__}: {e}",
                     hint="确认身份与数据目录正确；排查用 hy-mem doctor")
+    if full:
+        # 组装画像结构由 SDK 决定（basic/memories/catalog 各层），原样透传 +
+        # 摘要行；未知键不猜，方便 SDK 演进时不用改这里。
+        payload = {"user": uid, "mode": "full", "profile": r}
+        if args.json:
+            return ok(payload, True)
+        lines = [f"用户 {uid} 的完整画像（SDK get_user_profile）", ""]
+        for k, v in r.items():
+            if isinstance(v, (str, int, float, bool)) and v not in ("", None):
+                lines.append(f"  {k}: {v}")
+            elif isinstance(v, list):
+                lines.append(f"  {k}: {len(v)} 条")
+            elif isinstance(v, dict):
+                lines.append(f"  {k}: {len(v)} 项")
+        return ok(payload, args.json, "\n".join(lines))
     mems = [m for m in (r.get("memories") or []) if isinstance(m, dict)]
     payload = {
         "user": uid,
@@ -132,7 +153,20 @@ def cmd_search(args) -> int:
     # 检索（facts/experiences 双路返回）；缺省 chat 路径零变化。
     scene = getattr(args, "scene", None)
     if scene in ("working", "coding"):
+        if not (args.query or "").strip() or getattr(args, "queries", None):
+            return fail("scene 检索只支持单个位置参数 query（不支持 --queries）", EXIT_USAGE)
         return _cmd_search_scene(args, scene)
+    # 多路检索（S1，docs/specs/2026-11-02-sdk-alignment-gaps/）：--queries 逗号
+    # 分隔多个查询（SDK queries= 并行召回融合）；与位置参数 query 互斥。
+    raw_q = getattr(args, "queries", None) or ""
+    queries = [q.strip() for q in raw_q.replace("，", ",").split(",") if q.strip()]
+    if queries and len(queries) > 5:
+        return fail("--queries 最多 5 路（SDK 融合收益在 3~5 路，多了纯烧钱）", EXIT_USAGE)
+    if queries and (args.query or "").strip():
+        return fail("--queries 与位置参数 query 二选一，不要都传", EXIT_USAGE)
+    if not queries and not (args.query or "").strip():
+        return fail("search 需要查询语句：位置参数 query 或 --queries \"a,b\"", EXIT_USAGE)
+    primary = queries[0] if queries else args.query
     client = make_client(args.mode)
     try:
         # 默认阈值按实测调过：qwen3.7-flash 的分数带更窄
@@ -170,7 +204,10 @@ def cmd_search(args) -> int:
         schema_min = float(_ev.get("schemaMinScore") or 0.25)
 
         r = client.search(
-            args.query,
+            primary,
+            **({"queries": queries} if queries else {}),
+            search_mode=getattr(args, "search_mode", None) or "default",
+            rerank=bool(getattr(args, "rerank", True)),
             limit=fetch_limit,
             min_score=min_score,
             schema_limit=0,
@@ -187,7 +224,7 @@ def cmd_search(args) -> int:
             from hymem.core.searchops import fetch_l6_schemas
 
             schemas, schema_state = fetch_l6_schemas(
-                client, args.query, user_id=uid,
+                client, primary, user_id=uid,
                 limit=schema_limit, min_score=schema_min,
             )
         if not items and not want_tags:

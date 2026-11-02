@@ -712,6 +712,12 @@ def _tool_search_memory(args: dict) -> str:
     exc = _str_list(args.get("exclude_sources"), "exclude_sources")
     if inc and exc:
         raise ParamError("include_sources 与 exclude_sources 不能同时用（选一个）")
+    # S1 新参数只进 chat 路径：scene 双路有自己的融合口径，传了就明说，别静默忽略
+    if scene in _PRODUCTIVITY_SCENES and (
+        args.get("queries") or (args.get("search_mode") or "default") != "default"
+        or args.get("rerank") is False
+    ):
+        raise ParamError("queries / search_mode / rerank 仅 chat 检索支持（scene 检索有自己的双路口径）")
     if scene in _PRODUCTIVITY_SCENES:
         return _search_scene(args, scene, ws, branch, inc, exc)
     if ws or branch:
@@ -721,8 +727,21 @@ def _tool_search_memory(args: dict) -> str:
     if args.get("chain_block"):
         raise ParamError("chain_block 只对 scene=coding 生效：chat 记忆没有 diff 演进链")
     query = str(args.get("query") or "").strip()
-    if not query:
+    # S1（docs/specs/2026-11-02-sdk-alignment-gaps/）：多路检索 / agentic / rerank。
+    # 只进 chat 路径——scene 双路检索有自己的融合口径，不混。
+    queries = _str_list(args.get("queries"), "queries")
+    if queries and len(queries) > 5:
+        raise ParamError("queries 最多 5 路（融合收益在 3~5 路，多了纯烧钱）")
+    if queries and query:
+        raise ParamError("queries 与 query 二选一，不要都传")
+    if not queries and not query:
         raise ParamError("query 不能为空：检索必须提供查询词")
+    search_mode = str(args.get("search_mode") or "default").strip()
+    if search_mode not in ("default", "agentic"):
+        raise ParamError(f"search_mode 只认 default/agentic（收到 {search_mode!r}）")
+    rerank = args.get("rerank")
+    if rerank is not None and not isinstance(rerank, bool):
+        raise ParamError("rerank 必须是布尔值（缺省 true）")
     limit = max(1, min(int(args.get("limit") or 5), 20))
     min_score = args.get("min_score")
     offset = max(0, int(args.get("offset") or 0))
@@ -745,8 +764,13 @@ def _tool_search_memory(args: dict) -> str:
     # L6 只走正路（与 CLI 同口径）：SDK 的两路一起关，正路由 hy-mem 自己跑。
     # 反路不看 query 只按「哪些 schema 引用了命中的 fact」取，且注入时 score 被
     # RRF 融合分覆盖（0.01~0.03），宿主既过滤不了也解释不了。
-    r = client.search(query, limit=fetch, min_score=min_score, schema_limit=0,
-                      user_ids=[u], **kw)
+    r = client.search(
+        query or None,
+        **({"queries": queries} if queries else {}),
+        search_mode=search_mode,
+        rerank=True if rerank is None else rerank,
+        limit=fetch, min_score=min_score, schema_limit=0,
+        user_ids=[u], **kw)
     items = _flatten_search(r)
     if not items:
         # SDK 吞掉嵌入端异常静默返回空列表（见 cmd_search 同款防护）——
@@ -1130,7 +1154,18 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "检索词（语义匹配，不是关键词精确匹配）"},
+                "query": {"type": "string", "description": "检索词（语义匹配，不是关键词精确匹配）；与 queries 二选一"},
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "多路并行检索（≤5 条）：一次传多个措辞变体，SDK 融合去重，省得换措辞反复试；与 query 二选一",
+                },
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["default", "agentic"],
+                    "description": "agentic=智能体重写扩展后检索（更慢，命中率上限更高），第一轮 default 空手时可试；仅 chat 路径",
+                },
+                "rerank": {"type": "boolean", "description": "关闭重排可省时省 token（默认 true，排序质量优先就别传）"},
                 "limit": {"type": "integer", "description": "返回条数，默认 5，上限 20"},
                 "min_score": {"type": "number", "description": "相似度阈值，默认用配置值（0.35）"},
                 "scene": {
@@ -1174,12 +1209,12 @@ TOOLS = [
                 "schema_min_score": {
                     "type": "number",
                     "description": (
-                        "L6 语义分阈值（0~1），默认 0.25。schema 是英文归纳，中文 query 常在 0.2~0.35；"
-                        "schemas 为空且 schema_note 提示阈值下无命中时，传 0.2 或 0 重试"
+                        "L6 语义分阈值（0~1），默认 0.25。schema 语言跟随 config.evolve.language"
+                        "（显式 zh 时为中文归纳）；schemas 为空且 schema_note 提示阈值下无命中时，"
+                        "传 0.2 或 0 重试"
                     ),
                 },
             },
-            "required": ["query"],
         },
     },
     {
