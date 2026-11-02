@@ -522,6 +522,19 @@ def main() -> int:
           all(callable(getattr(HyMemBackend, m, None)) for m in _PROTO_METHODS),
           str([m for m in _PROTO_METHODS if not callable(getattr(HyMemBackend, m, None))]))
 
+    # ---- G2 上游补丁守护（docs/specs/2026-11-02-ultra-graph-degrade/，U1 见 docs/UPSTREAM-ISSUES.md）----
+    # pip 重装 venv 会丢掉 site-packages 里的补丁；这条断言让它当场暴露而不是
+    # 等到多进程死信才被发现。补丁本体与重放：scripts/apply_upstream_patches.py。
+    _marker = "[hy-mem patch 2026-11-02 graph-degrade]"
+    _sdk_client = ROOT / ".venv" / "Lib" / "site-packages" / "hy_memory" / "client.py"
+    _vendor_client = ROOT / "vendor" / "hy-memory" / "hy_memory" / "client.py"
+    check("G2 site-packages SDK 含 graph-degrade 补丁标记",
+          _sdk_client.exists() and _marker in _sdk_client.read_text(encoding="utf-8"),
+          str(_sdk_client))
+    check("G2 vendor 快照含 graph-degrade 补丁标记",
+          _vendor_client.exists() and _marker in _vendor_client.read_text(encoding="utf-8"),
+          str(_vendor_client))
+
     bad = results.count(False)
     print(f"\n{'全部通过' if bad == 0 else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")
     return 1 if bad else 0

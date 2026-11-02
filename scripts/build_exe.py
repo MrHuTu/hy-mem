@@ -443,6 +443,14 @@ def main() -> int:
     exe = ROOT / ".venv" / "Scripts" / "pyinstaller.exe"
     if not exe.exists():
         exe = Path("pyinstaller")
+    # 上游 SDK 补丁先于打包（pip 重装 venv 会丢补丁，见 docs/UPSTREAM-ISSUES.md U1）
+    patch_rc = subprocess.call(
+        [sys.executable, str(ROOT / "scripts" / "apply_upstream_patches.py")],
+        cwd=str(ROOT),
+    )
+    if patch_rc != 0:
+        print("[build] 上游补丁应用失败（上游代码变更？），中止打包")
+        return patch_rc
     _stamp_old()
     t0 = time.time()
     print(f"[build] 开始打包（约 1.5 分钟）…")
