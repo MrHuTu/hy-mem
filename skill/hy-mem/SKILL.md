@@ -279,8 +279,8 @@ chroma 嵌入式库不支持多进程共享——0.9.8 及以前，长驻进程�
 ```
 
 - 协议：JSON-RPC 2.0 换行分隔（MCP stdio 标准），宿主按会话拉起、随会话退出，不常驻。
-- 工具：`add_memory`（默认异步毫秒返回）/ `queue_status`（查异步落库进度）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `update_memory`（改内容，走演化链，须 `confirm: true`）/ `get_version` / `evolve`（**仅 ultra**，见下节）。
-- **工具集随模式变化，且是热切换**：`tools/list` 按当前模式实时生成——pro 下只有 8 个工具，`evolve` 根本不会出现。外部 `hy-mem config set mode=…` 改模式后，服务端在下一条消息时会主动发 `notifications/tools/list_changed`（initialize 时声明了 `listChanged` 能力），宿主收到自动重拉列表，**无需重连**；`tools/call` 另有实时校验兜底，列表过时硬调 `evolve` 也会被拒并返回中文说明。`get_version` 返回 `memoryMode` / `capabilities`（`evolve` / `l6Search` / `scene` 三个布尔）可直接自检当前能不能用。
+- 工具：`add_memory`（默认异步毫秒返回）/ `queue_status`（查异步落库进度）/ `search_memory` / `list_memories` / `get_memory` / `delete_memory`（须 `confirm: true`）/ `update_memory`（改内容，走演化链，须 `confirm: true`）/ `get_version` / `evolve_status`（**仅 ultra**，查 L6 自动沉淀进度，见下节）。
+- **工具集随模式变化，且是热切换**：`tools/list` 按当前模式实时生成——pro 下只有 8 个工具，`evolve_status` 根本不会出现。外部 `hy-mem config set mode=…` 改模式后，服务端在下一条消息时会主动发 `notifications/tools/list_changed`（initialize 时声明了 `listChanged` 能力），宿主收到自动重拉列表，**无需重连**；`tools/call` 另有实时校验兜底，列表过时硬调 `evolve_status` 也会被拒并返回中文说明。`get_version` 返回 `memoryMode` / `capabilities`（`evolve` / `l6Search` / `scene` 三个布尔）可直接自检当前能不能用。
 - 异步写进度：`add_memory` 返回的 `job_ids` 交给 `queue_status`（可选 `wait_seconds` 0~60 短阻塞），拿到每条 job 的 `status`（pending/running/done/dead）、耗时、`error`，以及 `drained`（队列是否清空）与 `worker.live`。**别用「search 空结果」反推落库与否**——那大概是还在队列里；`search_memory` 返回的 `pending_jobs` 字段也是同一信号。
 - 写入附加参数（`add_memory`）：`metadata`（对象，附加元数据）、`memory_at`（补录记忆发生时间，`2026-03-01` 这类写法；时间过滤按它算）、`request_id`（幂等写 id，同一 id 重复提交只落一条）。
 - 时间过滤与翻页：`search_memory` 和 `list_memories` 都支持 `since` / `until`（两种写法：相对值 `30m`/`12h`/`7d`/`30d`/`1y`，或 ISO 日期 `2026-01-01`）与 `offset` 翻页；响应带 `has_more` / `next_offset`，还有更多就带 offset 接着翻。`list_memories` 另支持 `order`（`desc` 最新在前 / `asc` 最旧在前）。时间过滤优先按 `memory_at`（补录的发生时间），没有补录才按写入时间。
@@ -471,7 +471,16 @@ hy-mem stats --health --vacuum          # 顺带清理已完成 job 记录并 VA
 
 ## L6 认知层：把「做事风格」沉淀下来（仅 ultra）
 
-`add` 只做抽取 + 判重，产出一条条事实。要把一批同主题的事实归纳成**行为模式**（例如「本地数据主权 / 可逆操作」「严格边界 / 可审计写路径」），要显式跑 `evolve`：
+`add` 只做抽取 + 判重，产出一条条事实。**L6 归纳已全自动化（2026-11-02 起）**：不用手动触发——add 素材攒够（默认自上次沉淀以来新增 ≥8 条 L2 事实）且距上次尝试 ≥24h，MCP 侧就会在 add 完成后自动后台跑归纳。用 MCP 工具 `evolve_status`（**仅 ultra**）查进度与历史：
+
+```
+evolve_status → { auto, consecutive_failures, last_total_facts,
+                  last_success, next_attempt_after, can_attempt_now, records[] }
+```
+
+records 里的状态怎么读：`success`（跑完了，看 `schemas_added` 正数才算真产出）/ `skipped_small`（素材还不够，正常，攒够自动跑）/ `skipped_lock`（另一个 hy-mem 进程持着图库）/ `failed`（LLM/网关出错，连续失败自动退避：冷却按 2^n 翻倍、7 天封顶，成功清零）。
+
+手动逃生门（正常不需要）：CLI `hy-mem evolve`：
 
 ```bash
 hy-mem evolve                        # 用配置里的 evolve.model；没配就用 llm.model
@@ -479,7 +488,7 @@ hy-mem evolve --model deepseek-v4.1-flash   # 本次临时换模型，不改配�
 hy-mem evolve --batches 2            # 最多跑几批（调试用）
 ```
 
-**MCP 场景只能走工具，不能走 CLI。** ultra 下 MCP 服务长驻就持有图库（kuzu 独占锁），此时在终端跑 `hy-mem evolve` 必然报 `Could not set lock on file` —— 要用 MCP 的 `evolve` 工具（它跑在持有进程内）。工具不传 `model` 时用配置里的 `evolve.model`；耗时数十秒到数分钟，别中途重试。一次调用结束看 `schemas_added`，正数才是真产出。
+注意：ultra 下 MCP 服务长驻就持有图库（kuzu 独占锁），此时在终端跑 `hy-mem evolve` 必然报 `Could not set lock on file`——这是预期行为不是故障，关掉 MCP 进程再跑即可。自动沉淀跑在 MCP 持有进程内，不受此限制。
 
 五条硬事实（踩过坑）：
 
@@ -487,9 +496,9 @@ hy-mem evolve --batches 2            # 最多跑几批（调试用）
 2. **素材只能用一次。** 参与过归纳的事实会被标记排除，同一批再跑一次通常零产出（返回里会说明）。要新结果就 `add` 新内容。
 3. **不是每条事实都能成簇。** 需要「同主题、细节各异、≥4 条且没被判重合并」。太散 → 簇都成不了，LLM 根本不会被调用（`batches_completed: 0`）；太像 → 被 reconcile 合成一条。零产出时会打印**剩余未消费事实数**与原因（`no_clusters` / `no_facts`），据此判断是「素材太散」还是「已消费完」，别当成故障。
 4. **返回 `idle: true` 别当成功。** 它表示模型被调了但 completion < 150 token——多半是模型做不了这件事。看 `schemas_before/after` 增量才算数。
-5. **ultra 是单写者模式，不能多进程并发。** L6 图库用 kuzu（`kuzu.Database(path)` 无 read_only），**同一数据目录第二个进程必失败**：实测 2 进程并发 `add` → 1 成 1 败 `GraphStore (kuzu) init failed`，8 进程风暴全灭。所以 ultra 下 CLI 与 MCP 不能同时用同一库；需要多子代理并发写入就留在 pro。MCP 长驻持有图库时，`evolve` 只能用 MCP 工具跑（见下），CLI 的 `hy-mem evolve` 会撞锁。
+5. **ultra 是单写者模式，不能多进程并发。** L6 图库用 kuzu（`kuzu.Database(path)` 无 read_only），**同一数据目录第二个进程必失败**：实测 2 进程并发 `add` → 1 成 1 败 `GraphStore (kuzu) init failed`，8 进程风暴全灭。所以 ultra 下 CLI 与 MCP 不能同时用同一库；需要多子代理并发写入就留在 pro。自动沉淀的跨进程并发由这把锁天然兜底：两个会话同时触发时，第二个在开图库那一步就失败并被记为 `skipped_lock`（零副作用，下个冷却周期再试）。
 
-检索侧：ultra 下 `search` 会额外带 L6 schema（`schemas` 字段）。`--no-schema` 关掉，`--schema-limit N` 调条数（默认 3），`--schema` 强制开。schema 默认英文（SDK 提示词决定），中文 query 对它语义分实测 0.17~0.34，所以 `schemaMinScore` 默认 **0.25** 卡相关、不带无关内容；`schemas` 为空且 `schema_note` 说「阈值下无命中」时，降 `schema_min_score`（MCP 参数）或 `config set evolve.schemaMinScore` 再试。**根治法是让 schema 变中文**：`config set evolve.language=zh`（或 MCP `evolve` 传 `language:"zh"`、CLI `--language zh`），会给归纳模型注入输出语言指令（SDK 自动检测对技术型中文记忆失灵，实测 32 条中文事实被判 en）。
+检索侧：ultra 下 `search` 会额外带 L6 schema（`schemas` 字段）。`--no-schema` 关掉，`--schema-limit N` 调条数（默认 3），`--schema` 强制开。schema 默认英文（SDK 提示词决定），中文 query 对它语义分实测 0.17~0.34，所以 `schemaMinScore` 默认 **0.25** 卡相关、不带无关内容；`schemas` 为空且 `schema_note` 说「阈值下无命中」时，降 `schema_min_score`（MCP 参数）或 `config set evolve.schemaMinScore` 再试。**根治法是让 schema 变中文**：`config set evolve.language=zh`（CLI `--language zh`），会给归纳模型注入输出语言指令（SDK 自动检测对技术型中文记忆失灵，实测 32 条中文事实被判 en）。
 
 ## 检索 / 读取
 

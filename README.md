@@ -16,8 +16,8 @@
 
 ## 功能特性
 
-- **MCP 服务**：内置 stdio MCP server（9 工具：add/search/get/update/delete/list + queue_status + get_version + **evolve**），任何支持 MCP 的客户端（WorkBuddy / Claude Desktop / Cursor 等）即插即用。**pro 模式下 evolve 不出现在 `tools/list` 里**，客户端拿不到也就调不动
-- **L6 认知层（仅 ultra）**：`evolve` 把已有的一批事实归纳成「行为模式」，检索时与事实一起按语义返回；归纳用哪个模型与抽取/判重分开配（`config set evolve.model=…`）——**抽取（`llm.model`）配分析类小模型**（如 `tongyi-xiaomi-analysis-flash`，封闭判定够用且快），**归纳（`evolve.model`）配更强的通用大模型**（如 `deepseek-v4.1-flash`）：弱模型能抽取但做不了开放归纳
+- **MCP 服务**：内置 stdio MCP server（9 工具：add/search/get/update/delete/list + queue_status + get_version + **evolve_status**），任何支持 MCP 的客户端（WorkBuddy / Claude Desktop / Cursor 等）即插即用。**pro 模式下 evolve_status 不出现在 `tools/list` 里**，客户端拿不到也就调不动
+- **L6 认知层（仅 ultra）**：行为模式归纳**全自动**——add 素材攒够（默认 ≥8 条新事实）且距上次尝试 ≥24h 就后台自动跑，无需手动触发；`evolve_status` 工具查进度与历史。归纳模型与抽取/判重分开配（`config set evolve.model=…`）——**抽取（`llm.model`）配分析类小模型**（如 `tongyi-xiaomi-analysis-flash`，封闭判定够用且快），**归纳（`evolve.model`）配更强的通用大模型**（如 `deepseek-v4.1-flash`）：弱模型能抽取但做不了开放归纳。手动逃生门：CLI `hy-mem evolve`（直连模式下可用）
 - ⚠️ **ultra 是单写者模式**：L6 图库用 kuzu（独占锁，无 `read_only`），**同一数据目录第二个进程必失败**（实测 2 进程并发 `add` → 1 成 1 败）。所以 ultra 下 CLI 与 MCP 不要同时用同一库；需要多进程/多子代理并发写入请留在 **pro**。MCP 长驻持有图库时，`evolve` 只能走 MCP 工具，CLI 的 `hy-mem evolve` 会撞锁
 - **语义检索**：基于向量相似度的记忆搜索，写入时 LLM 自动抽取事实与标签
 - **异步写入**：非阻塞式入队，自动拉起后台 worker 消费；队列状态全程可查（pending / dead / shadow）
@@ -61,7 +61,7 @@ python -m cli.hy_mem_cli menu
 | `mcp` / `serve` | 启动 MCP stdio 服务 / HTTP 服务 |
 | `setup` / `config` / `user` / `install` | 设置菜单 / 配置管理 / 身份切换 / 注册到 PATH |
 | `history` / `log` / `skill` / `migrate` / `version` | 操作历史 / 运行日志 / Skill 安装 / 数据迁移 / 版本 |
-| `evolve` | 归纳 L6 行为模式（**仅 ultra**；pro 下退 1 并给出切换提示） |
+| `evolve` | 手动归纳 L6 行为模式（**逃生门**：直连模式可用；ultra 下 MCP 长驻持锁时会被拒并给出说明——正常情况不需要，沉淀已自动化） |
 
 完整 34 个子命令说明见 `hy-mem help`。
 
@@ -71,7 +71,7 @@ python -m cli.hy_mem_cli menu
 
 - **embedding**: 嵌入模型配置（provider、model、apiKey）
 - **llm**: 大语言模型配置。**S1 抽取模型，推荐分析类小模型**（信息抽取、场景分类等封闭判定需求），如 `tongyi-xiaomi-analysis-flash` —— 高频调用，快和便宜优先，不要求开放生成能力
-- **evolve**: L6 归纳配置（model / maxTokens 8000 / schemaLimit 3 / schemaMinScore 0.25 / language）。**model 是 S2 归纳模型，推荐更强的通用大模型**（如 `deepseek-v4.1-flash`）—— 开放归纳是成败关键，分析类小模型做不了（实测只回 7 个 token 还自报 success）；留空则回落 `llm.model`（等于没分）。schemaMinScore 默认 0.25 而非 SDK 的 0.4：evolve 归纳出的 schema 是英文，中文 query 对它的语义分实测 0.17~0.34，0.4 会全部滤空。**language** 控制归纳输出语言：默认 auto 跟随 SDK 检测（对技术型中文记忆失灵，实测 32 条中文事实因 ASCII 密度被判 en）；`config set evolve.language=zh` 强制中文 schema（MCP `evolve` 工具也有 `language` 参数、CLI 有 `--language`），配 zh 后中文 query 检索分可回正常档。配置入口：`config set evolve.model=…` 或 `setup` 面板「沉淀模型」（仅 ultra 生效）
+- **evolve**: L6 归纳配置（model / maxTokens 8000 / schemaLimit 3 / schemaMinScore 0.25 / language）。**model 是 S2 归纳模型，推荐更强的通用大模型**（如 `deepseek-v4.1-flash`）—— 开放归纳是成败关键，分析类小模型做不了（实测只回 7 个 token 还自报 success）；留空则回落 `llm.model`（等于没分）。schemaMinScore 默认 0.25 而非 SDK 的 0.4：evolve 归纳出的 schema 是英文，中文 query 对它的语义分实测 0.17~0.34，0.4 会全部滤空。**language** 控制归纳输出语言：默认 auto 跟随 SDK 检测（对技术型中文记忆失灵，实测 32 条中文事实因 ASCII 密度被判 en）；`config set evolve.language=zh` 强制中文 schema（CLI 有 `--language`），配 zh 后中文 query 检索分可回正常档。**auto** 控制自动沉淀（`evolve.auto`）：enabled=true（默认，仅 ultra）/ minNewFacts=8（自上次沉淀以来新增 L2 事实达到才跑）/ cooldownHours=24（两次尝试最小间隔，连续失败按 2^n 退避、7 天封顶，成功清零）。配置入口：`config set evolve.model=…` 或 `setup` 面板「沉淀模型」（仅 ultra 生效）
 - **storage**: 存储路径配置
 - **user_id**: 当前身份标识
 - **search**: 检索参数（min_score 等）
@@ -95,7 +95,7 @@ hy-mem/
 │   │   ├── setup_wizard.py#   设置向导与设置菜单
 │   │   └── ...            #   helptext / i18n / skill_ops
 │   └── mcp/
-│       ├── server.py      # MCP 服务（9 工具，pro 下 8 个；evolve 仅 ultra 可见）
+│       ├── server.py      # MCP 服务（9 工具，pro 下 8 个；evolve_status 仅 ultra 可见；L6 沉淀已自动化）
 │       └── transport_http.py  # HTTP transport（--transport http，默认 stdio 不变）
 ├── skill/                 # Skill 定义
 ├── scripts/               # 业务脚本（构建 / 闸门 / check_secrets / check_layering）
