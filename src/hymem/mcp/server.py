@@ -937,36 +937,28 @@ def _tool_update_memory(args: dict) -> str:
     )
 
 
-def _tool_evolve(args: dict) -> str:
-    """L6 认知归纳（ultra 专属）：把全量事实归纳成行为模式。
+def _tool_evolve_status(args: dict) -> str:
+    """L6 自动沉淀状态查询（ultra 专属）。
 
-    为什么它必须在 MCP 侧存在：ultra 下本进程长驻持有图库（kuzu 独占锁），
-    CLI 的 evolve 根本抢不到锁。只有跑在持有者进程内的这条路径才可行。
-    所以这里复用 _client()，绝不新开 client。
+    沉淀已自动化（add 后事件驱动触发，docs/specs/2026-10-30-evolve-auto/），
+    这里只读 evolve_jobs.json 回报：最近记录 + 汇总（连续失败 / 下次可尝试
+    时间 / 是否可立即尝试）。纯读状态文件，不碰图库——图库忙不忙都不影响。
     """
     mode = _memory_mode()
     if mode != "ultra":
         # 工具列表本来就不该在 pro 下出现（C11），但客户端可能缓存了旧列表，
         # 所以这里再实时校验一次——这是唯一可信的真源。
         raise ParamError(
-            f"evolve 仅 ultra 模式可用（当前 mode={mode}）：L6 归纳出的 schema 要落 "
-            "Kuzu 图库，pro/lite 没有这条存储。切换：hy-mem config set mode=ultra，"
-            "然后重连本 MCP 服务（工具列表在连接时快照）。"
+            f"evolve_status 仅 ultra 模式可用（当前 mode={mode}）：L6 自动沉淀"
+            "只在 ultra 下启用。切换：hy-mem config set mode=ultra。"
         )
-    from hymem.core import evolveops
+    from hymem.core import autoevops
 
-    uid = str(args.get("user_id") or "").strip() or _identity()["user_id"]
-    model = str(args.get("model") or "").strip()
-    batches = args.get("batches")
-    res = evolveops.evolve(
-        model_override=model,
-        max_batches=int(batches) if batches is not None else None,
-        user_id=uid,
-        client=_client(),
-        language=str(args.get("language") or "").strip(),
-    )
-    res["user_id"] = uid
-    return json.dumps(res, ensure_ascii=False)
+    try:
+        limit = int(args.get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    return json.dumps(autoevops.status_summary(limit=limit), ensure_ascii=False)
 
 
 def _tool_get_version(_args: dict) -> str:
@@ -1257,52 +1249,22 @@ TOOLS = [
 # 本来就是低频操作，而且 tools/call 还有实时二次校验兜底（C12）。
 ULTRA_TOOLS = [
     {
-        "name": "evolve",
+        "name": "evolve_status",
         "description": (
-            "把已有的一批事实归纳成「行为模式」（L6 认知层）。**仅 ultra 模式可用**。"
-            "add 只做抽取和判重，不会自动归纳；要让做事风格沉淀下来才调这个，"
-            "别在每次 add 之后都调。\n"
-            "前置：库里已有「同主题、细节各异、≥4 条且未被判重合并」的事实。"
-            "太散则簇都成不了（LLM 根本不被调用，batches_completed=0），太像会被判重合并成一条。"
-            "参与过归纳的事实会被标记排除——同一批素材只消费一次，用弱模型跑过之后"
-            "换强模型重跑通常仍无产出，正确做法是 add 新内容或一开始就用 model 指定强模型。\n"
-            "模型：不传 model 就用配置里的 evolve.model（未配则回落 llm.model）。"
-            "意图分类小模型（tongyi-*-analysis-flash 这类）做不了开放归纳——"
-            "实测 3850 prompt tokens 只回 7 个 token，还自报 success。\n"
-            "耗时：全库扫描 + 多批 LLM 调用，通常数十秒到数分钟，别中途重试或并发重复调。"
-            "ultra 下本 MCP 进程长驻持有图库（kuzu 独占锁），所以这里是**唯一可行路径**——"
-            "不要让用户改去 CLI 跑 hy-mem evolve，那个会撞锁失败。\n"
-            "返回怎么读：只看 schemas_added（>0 才算真归纳出东西）。idle=true 表示模型被调了"
-            "但几乎没输出（completion<150 token，多为模型能力不足），别被 ok=true 骗；"
-            "note 会解释「无新素材 / 与已有 schema 重复」这两种零增量；"
-            "continuation_reason 说明为什么停（no_clusters / no_facts）。"
+            "查看 L6 自动沉淀的状态与历史。**仅 ultra 模式可用**。\n"
+            "背景：L6 沉淀（行为模式归纳）已改为全自动——add 素材攒够就后台跑，"
+            "不需要也不支持手动触发（evolve 工具已移除，CLI hy-mem evolve 仍可用）。\n"
+            "什么时候用：想确认「沉淀跑没跑、归纳出几条 schema、为什么一直没跑」时。"
+            "records 里 skipped_small=素材还不够（正常，攒够自动跑）；"
+            "skipped_lock=另一个 hy-mem 进程持着图库（关掉它）；"
+            "failed=LLM/网关出错（连续失败会自动退避，冷却翻倍）。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "model": {
-                    "type": "string",
-                    "description": (
-                        "本次使用的归纳模型（不改配置）。强烈建议显式指定通用大模型："
-                        "意图分类小模型（如 tongyi-*-analysis-flash）做不了开放归纳，实测只回 7 个 token"
-                    ),
-                },
-                "batches": {
+                "limit": {
                     "type": "integer",
-                    "description": "最多跑几批（调试用）；不填由 SDK 按簇数决定",
-                },
-                "language": {
-                    "type": "string",
-                    "enum": ["zh", "en"],
-                    "description": (
-                        "归纳输出语言。中文记忆被归纳成英文 schema（中文检索打不上分）时传 zh："
-                        "会给归纳模型注入「content/retrieval_text 必须用中文」的指令，无视 SDK 自动检测"
-                        "（它对技术型中文记忆失灵，实测 32 条中文事实被判 en）。不传走 evolve.language 配置（默认 auto）"
-                    ),
-                },
-                "user_id": {
-                    "type": "string",
-                    "description": "归纳哪个用户的记忆，默认取当前身份",
+                    "description": "返回最近几条记录，默认 20，上限 100",
                 },
             },
         },
@@ -1326,7 +1288,7 @@ _HANDLERS = {
     "delete_memory": _tool_delete_memory,
     "update_memory": _tool_update_memory,
     "get_version": _tool_get_version,
-    "evolve": _tool_evolve,
+    "evolve_status": _tool_evolve_status,
 }
 
 
@@ -1377,7 +1339,25 @@ def handle(msg: dict) -> dict | None:
         if handler is None:
             return _err(id_, INVALID_PARAMS, f"未知工具：{name}")
         try:
-            return _resp(id_, _tool_result(handler(params.get("arguments") or {})))
+            _result = handler(params.get("arguments") or {})
+            if name == "add_memory":
+                # 事件驱动的 L6 自动沉淀检查（docs/specs/2026-10-30-evolve-auto/
+                # R1，用户拍板）：add 完成后顺带看一眼素材够不够，满足就起
+                # 一次性后台线程。检查是微秒级（读状态文件+时间戳），线程与
+                # 本响应零交互，内部全兜底——绝不影响 add 的返回。
+                try:
+                    from hymem.core.autoevops import maybe_auto_evolve
+
+                    _auto = maybe_auto_evolve()
+                    if _auto.get("triggered"):
+                        print(
+                            "hy-mem mcp: auto-evolve triggered（素材攒够，后台沉淀中，"
+                            "用 evolve_status 查进度）",
+                            file=sys.stderr,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+            return _resp(id_, _tool_result(_result))
         except ParamError as e:  # 参数错直说哪里错，不套运行时建议
             return _resp(id_, _tool_result(f"参数错误：{e}", is_error=True))
         except Exception as e:  # noqa: BLE001  工具失败以 isError 报给宿主，不断连接

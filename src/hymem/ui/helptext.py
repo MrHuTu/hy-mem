@@ -391,7 +391,7 @@ CMD_META: dict[str, dict] = {
     },
     "evolve": {
         "group": "维护",
-        "when": "想把一堆零散事实归纳成「行为模式」（L6）。add 只跑 S1（抽事实/判重），不会自动归纳；evolve 扫当前全量 VDB 做一次 System 2。",
+        "when": "手动归纳 L6 行为模式（**逃生门**）。正常情况不需要：L6 已自动化——add 素材攒够（≥8 条新事实）且距上次尝试 ≥24h，MCP 侧会自动后台跑。这条命令用于批量导入后立刻归纳、或自动跑失败后手动重跑。",
         "mutates": True,
         "examples": [
             "hy-mem evolve",
@@ -406,9 +406,10 @@ CMD_META: dict[str, dict] = {
             "素材要求「同主题、细节各异、≥4 条且没被 reconcile 合并」。太散不成簇（LLM 根本不会被调用），太像会被判重合并成一条。",
             "同一批事实只会被归纳一次：参与过的会被标成已用（evidenced_excluded），所以「用弱模型跑空转了，再换强模型重跑」通常仍然没产出——要么 add 新内容，要么一开始就用 --model 指定强模型。",
             "模型怎么选：llm.model（S1）服务抽取/分类等封闭判定，推荐分析类小模型（快、便宜）；evolve.model（S2）做开放归纳，推荐更强的通用大模型。意图分类模型（如 tongyi-*-analysis-flash）做归纳实测 3850 prompt tokens 只回 7 个 token。这种空转会被标成 idle=true，框架仍报 success——别被 success 骗了。",
-            "kuzu 是独占锁：MCP 服务长驻会一直持有图库，CLI 的 evolve 会失败。先停 MCP，或改用 MCP 里的 evolve 工具（跑在持有进程内）。",
+            "kuzu 是独占锁：MCP 服务长驻会一直持有图库，CLI 的 evolve 会失败——先停 MCP 再跑。ultra+MCP 场景正常情况不用手动跑（自动沉淀跑在持有进程内）；用 MCP 的 evolve_status 工具查自动沉淀进度。",
             "--model 只影响本次，不改 config.json；想长期生效写 evolve.model。",
             "--language zh/en 只影响本次归纳的输出语言；想长期生效写 evolve.language。技术型中文记忆被归纳成英文 schema（中文检索打不上分）时用它强制中文。",
+            "自动沉淀参数：evolve.auto.enabled（默认 true，仅 ultra）/ minNewFacts（默认 8）/ cooldownHours（默认 24，失败按 2^n 退避、7 天封顶）。状态文件 <dataDir>/evolve_jobs.json，MCP evolve_status 工具可查。",
         ],
     },
     "delete": {

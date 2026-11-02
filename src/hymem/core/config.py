@@ -125,6 +125,17 @@ DEFAULTS: dict[str, Any] = {
         "schemaLimit": 3,
         "schemaMinScore": 0.25,
         "language": "",
+        # 自动沉淀（docs/specs/2026-10-30-evolve-auto/）：不再靠模型手动调
+        # evolve 工具，add 之后顺带检查，素材攒够就后台跑（事件驱动，无
+        # 定时线程）。enabled 仅 ultra 生效；minNewFacts 是「自上次沉淀以来
+        # 新增 L2 fact 数」的触发阈值——SDK 的 no_clusters 让试跑零成本，
+        # 阈值只是防孤簇白烧 LLM；cooldownHours 是防跑飞的硬约束（对话
+        # 密集时一天几十次 add，没有它每条都触发检查起线程）。
+        "auto": {
+            "enabled": True,
+            "minNewFacts": 8,
+            "cooldownHours": 24,
+        },
     },
     "queue": {
         "maxAttempts": 3,
@@ -576,6 +587,16 @@ def validate(cfg: dict) -> list[tuple[str, bool, str]]:
         str(ev.get("language") or "") in ("", "zh", "en"),
         f"{ev.get('language') or '(auto 跟随 SDK 检测)'}（zh/en 强制归纳输出语言，"
         "技术型中文记忆被归纳成英文 schema 时配 zh）",
+    ))
+    _auto = ev.get("auto") or {}
+    _auto_enabled = bool(_auto.get("enabled", ev_def.get("auto", {}).get("enabled", True)))
+    _auto_min = int(_auto.get("minNewFacts") or ev_def.get("auto", {}).get("minNewFacts") or 8)
+    _auto_cd = float(_auto.get("cooldownHours") or ev_def.get("auto", {}).get("cooldownHours") or 24)
+    out.append((
+        "evolve.auto",
+        _auto_min >= 1 and _auto_cd > 0,
+        f"enabled={_auto_enabled}（仅 ultra 生效）, minNewFacts={_auto_min}, "
+        f"cooldownHours={_auto_cd:g}——add 后自动沉淀 L6，失败按 2^n 退避（上限 7 天）",
     ))
     # 注意：这条恒为 True。pro/lite 下 L6 不可用是**预期状态**不是配置错误，
     # 标红会让用户以为配坏了。想用 L6 的人看到提示就知道该切 ultra。

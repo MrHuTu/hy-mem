@@ -213,7 +213,12 @@ def main() -> int:
                                 "clientInfo": {"name": "test_evolve", "version": "1"}})
         mcp.notify("notifications/initialized")
         tools = {t["name"]: t for t in mcp.call("tools/list").get("result", {}).get("tools", [])}
-        check("C1 pro 下 tools/list 不含 evolve", "evolve" not in tools, sorted(tools))
+        check("C1 pro 下 tools/list 不含 evolve_status",
+              "evolve_status" not in tools, sorted(tools))
+        check("C1 evolve 工具已移除（任何模式都不暴露）",
+              "evolve" not in tools
+              and "evolve" not in {t["name"] for t in mcp.call("tools/list").get("result", {}).get("tools", [])},
+              sorted(tools))
         check("C1 search_memory 有 schema 参数",
               "schema" in (tools.get("search_memory", {}).get("inputSchema", {})
                            .get("properties", {})), "")
@@ -221,8 +226,8 @@ def main() -> int:
               "schema_min_score" in (tools.get("search_memory", {}).get("inputSchema", {})
                                      .get("properties", {})), "")
 
-        data, is_err, text = mcp.tool("evolve", {})
-        check("C2 硬调 evolve 被拒（isError）", is_err, text[:100])
+        data, is_err, text = mcp.tool("evolve_status", {})
+        check("C2 pro 下硬调 evolve_status 被拒（isError）", is_err, text[:100])
         check("C2 拒绝理由说明仅 ultra 并可切换", "ultra" in text, text[:120])
 
         vp, _, vtext = mcp.tool("get_version", {})
@@ -251,7 +256,8 @@ def main() -> int:
         check("C4 切 ultra 后发 tools/list_changed",
               mcp.notifications == ["notifications/tools/list_changed"], mcp.notifications)
         tools2 = {t["name"] for t in mcp.call("tools/list").get("result", {}).get("tools", [])}
-        check("C4 重拉后含 evolve", "evolve" in tools2, sorted(tools2))
+        check("C4 重拉后含 evolve_status（替代已移除的 evolve）",
+              "evolve_status" in tools2 and "evolve" not in tools2, sorted(tools2))
 
         cfg_obj["mode"] = "pro"
         cfg_p.write_text(json.dumps(cfg_obj, ensure_ascii=False), encoding="utf-8")
@@ -261,7 +267,7 @@ def main() -> int:
               mcp.notifications == ["notifications/tools/list_changed", "notifications/tools/list_changed"],
               mcp.notifications)
         tools3 = {t["name"] for t in mcp.call("tools/list").get("result", {}).get("tools", [])}
-        check("C4 切回后不含 evolve", "evolve" not in tools3, sorted(tools3))
+        check("C4 切回后不含 evolve_status", "evolve_status" not in tools3, sorted(tools3))
     finally:
         mcp.close()
 
@@ -380,13 +386,87 @@ def main() -> int:
           "language" in _ev_f and _ev_f.get("language") == "",
           repr(_ev_f.get("language")))
 
-    # F7 MCP evolve 工具声明 language 参数（离线查 ULTRA_TOOLS 注册表）
+    # F7 evolve 工具已移除、evolve_status 已接位（离线查 ULTRA_TOOLS 注册表）
     from hymem.mcp import server as _srv_f
 
-    _ev_tool = next((t for t in _srv_f.ULTRA_TOOLS if t.get("name") == "evolve"), {})
-    check("F7 evolve 工具 inputSchema 含 language 参数",
-          "language" in (_ev_tool.get("inputSchema", {}).get("properties", {})),
-          str(list((_ev_tool.get("inputSchema", {}).get("properties", {})).keys())))
+    _names = [t.get("name") for t in _srv_f.ULTRA_TOOLS]
+    check("F7 MCP 工具注册表：无 evolve、有 evolve_status",
+          "evolve" not in _names and "evolve_status" in _names, str(_names))
+    check("F7 evolve_status 的 inputSchema 只有 limit（无 model/language）",
+          set((_srv_f.ULTRA_TOOLS[0].get("inputSchema", {}).get("properties", {})).keys()) == {"limit"},
+          str(list((_srv_f.ULTRA_TOOLS[0].get("inputSchema", {}).get("properties", {})).keys())))
+    check("F7 HANDLERS 无 evolve、有 evolve_status",
+          "evolve" not in _srv_f._HANDLERS and "evolve_status" in _srv_f._HANDLERS,
+          str(sorted(_srv_f._HANDLERS)))
+
+    # ================= G 自动沉淀（离线桩，R1/R4/R5） =================
+    # 不真跑 evolve：只钉状态机（冷却/退避/损坏容忍/原子写/触发门）。
+    print("\n== G 自动沉淀状态机（离线桩）==")
+    from hymem.core import autoevops as _ae
+
+    _st0 = _ae.load_state()
+    check("G1 缺失状态文件 → 首次运行默认（基线 0 / 无冷却）",
+          _st0["last_total_facts"] == 0 and _st0["last_attempt_ts"] == 0.0
+          and _st0["consecutive_failures"] == 0, str(_st0)[:120])
+
+    _auto = {"enabled": True, "minNewFacts": 8, "cooldownHours": 24}
+    ok, why = _ae.should_attempt({"last_attempt_ts": time.time() - 60,
+                                  "consecutive_failures": 0}, _auto)
+    check("G2 刚尝试过（1 分钟前）→ 冷却拦截", not ok and why == "cooldown", f"{ok}/{why}")
+    ok2, _ = _ae.should_attempt({"last_attempt_ts": time.time() - 25 * 3600,
+                                 "consecutive_failures": 0}, _auto)
+    check("G2 冷却期（24h）过后 → 放行", ok2, "")
+
+    check("G3 连续失败 2 次 → 冷却 24×4=96h（2^2 退避）",
+          abs(_ae._backoff_hours(2, 24) - 96.0) < 1e-9, str(_ae._backoff_hours(2, 24)))
+    check("G3 连续失败 3 次理论 192h 但被 7 天封顶截到 168h",
+          abs(_ae._backoff_hours(3, 24) - 168.0) < 1e-9, str(_ae._backoff_hours(3, 24)))
+    check("G3 退避上限 7 天（100 次失败不超 168h）",
+          _ae._backoff_hours(100, 24) <= 168.0, str(_ae._backoff_hours(100, 24)))
+    check("G3 成功清零（0 次失败 = 原始冷却）",
+          abs(_ae._backoff_hours(0, 24) - 24.0) < 1e-9, "")
+
+    # G4 状态文件损坏容忍：写坏 JSON → 按首次运行处理，且能正常覆盖回来
+    _sp = _ae._state_path()
+    _sp.parent.mkdir(parents=True, exist_ok=True)
+    _sp.write_text("{broken json!!", encoding="utf-8")
+    _st_bad = _ae.load_state()
+    check("G4 损坏 JSON → 首次运行默认不炸",
+          _st_bad["last_attempt_ts"] == 0.0 and isinstance(_st_bad["records"], list), "")
+    _st_bad["records"] = [{"ts": "t", "status": "success"}]
+    _ae._save_state(_st_bad)
+    check("G4 原子写后可读回且无 .tmp 残留",
+          _ae.load_state()["records"][0]["status"] == "success"
+          and not _sp.with_suffix(".json.tmp").exists(), "")
+
+    # G5 maybe_auto_evolve 触发门（pro/disabled 用 monkeypatch 配置）
+    import hymem.core.config as _cfg_g
+    _real_load = _cfg_g.load
+    _cfg_g.load = lambda: {"mode": "pro"}  # type: ignore[assignment]
+    try:
+        r1 = _ae.maybe_auto_evolve()
+        check("G5 pro 模式 → skipped=mode", r1.get("skipped") == "mode", str(r1))
+        _cfg_g.load = lambda: {  # type: ignore[assignment]
+            "mode": "ultra",
+            "evolve": {"auto": {"enabled": False, "minNewFacts": 8, "cooldownHours": 24}},
+        }
+        r2 = _ae.maybe_auto_evolve()
+        check("G5 auto.enabled=false → skipped=disabled", r2.get("skipped") == "disabled", str(r2))
+    finally:
+        _cfg_g.load = _real_load  # type: ignore[assignment]
+
+    # G6 冷却期内不触发（不真起线程）
+    _sp.parent.mkdir(parents=True, exist_ok=True)
+    _ae._save_state({"records": [], "last_total_facts": 5,
+                     "last_attempt_ts": time.time() - 60, "consecutive_failures": 0})
+    r3 = _ae.maybe_auto_evolve()
+    check("G6 冷却期内 → skipped=cooldown（不起线程）",
+          r3.get("skipped") == "cooldown", str(r3))
+    # 收尾：清掉测试状态文件，别影响同沙箱的后续用例
+    try:
+        _sp.unlink()
+    except FileNotFoundError:
+        pass
 
     # ================= D ultra 面 =================
     print("\n== D ultra 面（真模型：写入 → evolve → 检索）==")
