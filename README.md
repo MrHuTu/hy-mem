@@ -17,7 +17,7 @@
 ## 功能特性
 
 - **MCP 服务**：内置 stdio MCP server（9 工具：add/search/get/update/delete/list + queue_status + get_version + **evolve_status**），任何支持 MCP 的客户端（WorkBuddy / Claude Desktop / Cursor 等）即插即用。**pro 模式下 evolve_status 不出现在 `tools/list` 里**，客户端拿不到也就调不动
-- **L6 认知层（仅 ultra）**：行为模式归纳**全自动**——add 素材攒够（默认 ≥8 条新事实）且距上次尝试 ≥24h 就后台自动跑，无需手动触发；`evolve_status` 工具查进度与历史。归纳模型与抽取/判重分开配（`config set evolve.model=…`）——**抽取（`llm.model`）配分析类小模型**（如 `tongyi-xiaomi-analysis-flash`，封闭判定够用且快），**归纳（`evolve.model`）配更强的通用大模型**（如 `deepseek-v4.1-flash`）：弱模型能抽取但做不了开放归纳。手动逃生门：CLI `hy-mem evolve`（直连模式下可用）
+- **L6 认知层（仅 ultra）**：行为模式归纳**全自动**——add 素材攒够（默认 ≥8 条新事实）且距上次尝试 ≥24h 就后台自动跑，无需手动触发；`evolve_status` 工具或 CLI `hy-mem evolve-status`（所有模式可看）查进度与历史，`get_version` 在连续失败时会顺带带出 `evolve_health` 异常信号。归纳模型与抽取/判重分开配（`config set evolve.model=…`）——**抽取（`llm.model`）配分析类小模型**（如 `tongyi-xiaomi-analysis-flash`，封闭判定够用且快），**归纳（`evolve.model`）配更强的通用大模型**（如 `deepseek-v4.1-flash`）：弱模型能抽取但做不了开放归纳。手动逃生门：CLI `hy-mem evolve`（直连模式下可用）
 - ⚠️ **ultra 是单写者模式**：L6 图库用 kuzu（独占锁，无 `read_only`），**同一数据目录第二个进程必失败**（实测 2 进程并发 `add` → 1 成 1 败）。所以 ultra 下 CLI 与 MCP 不要同时用同一库；需要多进程/多子代理并发写入请留在 **pro**。MCP 长驻持有图库时，`evolve` 只能走 MCP 工具，CLI 的 `hy-mem evolve` 会撞锁
 - **语义检索**：基于向量相似度的记忆搜索，写入时 LLM 自动抽取事实与标签
 - **异步写入**：非阻塞式入队，自动拉起后台 worker 消费；队列状态全程可查（pending / dead / shadow）
