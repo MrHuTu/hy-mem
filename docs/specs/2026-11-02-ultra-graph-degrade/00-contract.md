@@ -2,7 +2,7 @@
 
 - 父级：无（独立 bug 修复）
 - 日期：2026-11-02
-- 状态：**实施中**
+- 状态：**已完成（2026-11-02，red→green closure + 全量 14 套全绿，commit fa78cb5/684449c）**
 - 上游追踪：`docs/UPSTREAM-ISSUES.md` U1；issue 稿 `issue-draft.md`（用户手动提交）
 - 级别：轻需求 + 纯后端（red→green closure + 测试守护，不走 grill 全链路）
 
@@ -47,10 +47,10 @@ None: return None`；client 层 `_get_graph()`/`get_node`/`delete_node` 等调�
 
 | 条款 | 分片 | commit | 产物 | 验收证据 |
 |---|---|---|---|---|
-| §2 补丁本体 | S1 | （待填） | venv+vendor client.py 降级 | repro_graph_lock.py B 进程构造成功（green） |
-| §2 幂等重放 | S2 | （待填） | scripts/apply_upstream_patches.py + build_exe.py 挂钩 | 脚本幂等（二次运行跳过）；build 输出含补丁确认 |
-| §3 守护 | S3 | （待填） | tests/test_cli.py 补丁标记守护断言 | test_cli 全绿含新断言 |
-| §1 red 复现 | R1 | （待填，落 .local-test） | repro_graph_lock.py 补丁前 B 进程 RuntimeError | red 证据输出 |
+| §2 补丁本体 | S1 | fa78cb5 | venv+vendor client.py 降级 | repro_graph_lock.py B 进程构造成功（green，B_OK + warning） |
+| §2 幂等重放 | S2 | fa78cb5 | scripts/apply_upstream_patches.py + build_exe.py 挂钩 | 二次运行"已存在，跳过"；build 输出含补丁确认 |
+| §3 守护 | S3 | fa78cb5 | tests/test_cli.py G2×2 | test_cli 122/122 含新断言 |
+| §1 red 复现 | R1 | （不入库，.local-test） | repro_graph_lock.py | 补丁前 B 进程 RuntimeError + kuzu 日志 "will degrade to no-op" 同屏 |
 
 ## 5. 验收口径
 
