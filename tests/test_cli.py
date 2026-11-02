@@ -457,6 +457,38 @@ def main() -> int:
     check("R3 help add E_LOCK 快速失败", "E_LOCK" in p.stdout and "零写入" in p.stdout, "")
     check("R3 help add 指向 --async", "--async" in p.stdout, "")
 
+    # ---- S1 协议层守护断言（docs/specs/2026-11-02-cli-split-ports/）----
+    # vendor 触点只准出现在 backends/：防止「只抽一半」的协议层被悄悄绕过。
+    import re as _re
+
+    _src_root = Path(__file__).resolve().parent.parent / "src" / "hymem"
+    _vendor_hits, _priv_hits, _run_hits = [], [], []
+    for _f in _src_root.rglob("*.py"):
+        _rel = _f.relative_to(_src_root).as_posix().replace("\\", "/")
+        if _rel.startswith("backends/") or _rel == "_pyi_entry.py":
+            continue
+        _t = _f.read_text(encoding="utf-8")
+        if _re.search(r"^\s*(from|import)\s+hy_memory", _t, _re.M):
+            _vendor_hits.append(_rel)
+        if _re.search(r"(client|b|bk)\._(graph_store|get_chain_store|registry|loop_thread|config\b)", _t):
+            _priv_hits.append(_rel)
+        if _re.search(r"asyncio\.run", _t) and not _rel.startswith("cmds/"):
+            _run_hits.append(_rel)
+    check("G1 vendor import 只在 backends/", not _vendor_hits, str(_vendor_hits))
+    check("G1 SDK 私有触点只在 backends/", not _priv_hits, str(_priv_hits))
+    check("G1 asyncio.run 只在 backends/（cmds 仅本地嵌入探针）", not _run_hits, str(_run_hits))
+    # 适配器能被协议工厂构造（结构化鸭子类型：显式面 + 透传）
+    from hymem.backends.hymemory.backend import HyMemBackend
+    _PROTO_METHODS = (
+        "add", "get", "update", "delete", "delete_all", "search", "list_memories",
+        "history", "get_recent_history", "finalize_session", "get_write_outcome",
+        "get_user_basic_info", "get_metrics", "close", "evolve",
+        "count_facts", "chain_diff_blocks", "submit_in_writer_lock",
+    )
+    check("G1 HyMemBackend 显式面覆盖 MemoryBackend 全部协议方法",
+          all(callable(getattr(HyMemBackend, m, None)) for m in _PROTO_METHODS),
+          str([m for m in _PROTO_METHODS if not callable(getattr(HyMemBackend, m, None))]))
+
     bad = results.count(False)
     print(f"\n{'全部通过' if bad == 0 else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")
     return 1 if bad else 0

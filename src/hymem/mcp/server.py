@@ -143,9 +143,12 @@ def _client():
     """
     global _CLIENT
     if _CLIENT is None:
-        from hymem.core.clientops import make_client
+        # S2.5（docs/specs/2026-11-02-cli-split-ports/）：MCP 走协议层工厂，
+        # 不再直连 vendor。HyMemBackend 对未显式列出的属性（含 SDK 私有成员）
+        # 原样透传，调用点零改动；换 backend 时这里就是唯一改动点。
+        from hymem.ports.registry import make_backend
 
-        _CLIENT = make_client(None)
+        _CLIENT = make_backend(None)
     return _CLIENT
 
 
