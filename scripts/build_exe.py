@@ -24,15 +24,18 @@ r"""构建自包含 hy-mem.exe —— 把一条命令固定下来，避免每次
      * `启动 hy-mem.cmd`  —— 双击入口，先查 `_internal/` 再启动，出错会 pause
      * `安装到 PATH.cmd`  —— 一键 `hy-mem install`
      * `使用说明.txt`      —— 给完全不懂的人看的三步
-     * `hy-mem-<版本>-win64.zip` —— 直接把压缩包发人，从根上避免「只拷 exe」
+     * `hy-mem.zip` —— 直接把压缩包发人，从根上避免「只拷 exe」。
+       **命名规则（2026-11-02 定，用户拍板）：永远叫 hy-mem.zip，不带版本号**——
+       版本说明写在 GitHub Release 标题里；包内根目录恒为 `hy-mem/`，
+       解压到安装位置即自动覆盖历史安装，无需先删旧目录。
 
 用法：
     .venv/Scripts/python.exe scripts/build_exe.py
     HY_MEM_DIST=D:/build/out .venv/Scripts/python.exe scripts/build_exe.py   # 换输出目录
     HY_MEM_NO_ZIP=1 ...                                                      # 不生成压缩包
 产物：
-    dist/hy-mem/                       （目录，拷走即可用）
-    dist/hy-mem-<ver>-win64.zip        （压缩包，发给别人用这个）
+    dist/hy-mem/            （目录，拷走即可用）
+    dist/hy-mem.zip         （压缩包，发给别人用这个；名字恒定）
 """
 
 from __future__ import annotations
@@ -147,9 +150,10 @@ def _purge_old() -> None:
         print(f"[build] 以下旧产物删不掉（可能被杀软占用），可手工删：{', '.join(keep_fail)}")
     elif list(DIST.glob(f"_{NAME}-old-*")) == []:
         print("[build] 历史产物已清理")
-    # 旧版本的压缩包同样占地方，只留当前版本那一份
-    cur = DIST / f"{NAME}-{_version()}-win64.zip"
-    for z in sorted(DIST.glob(f"{NAME}-*-win64*.zip")):
+    # 旧版本的压缩包同样占地方：产物恒名 hy-mem.zip，其余 hy-mem-*.zip 全是
+    # 历史版本包或兜底名，一律清掉
+    cur = DIST / f"{NAME}.zip"
+    for z in sorted(DIST.glob(f"{NAME}-*.zip")):
         if z.resolve() == cur.resolve():
             continue
         try:
@@ -341,7 +345,11 @@ def _write_extras(out: Path) -> None:
 
 
 def _make_zip(out: Path) -> Path | None:
-    """把整个目录打成 `hy-mem-<ver>-win64.zip`，作为对外分发物。
+    """把整个目录打成 `hy-mem.zip`，作为对外分发物。
+
+    **名字恒定（2026-11-02 用户拍板）**：不带版本号，版本说明写在 GitHub
+    Release 标题里；包内根目录恒为 `hy-mem/`——解压到安装位置即自动覆盖
+    历史安装，不用先删旧目录再解压。
 
     这是「只拷 exe 导致闪退」的根治手段：发出去的是压缩包，接收方解压出来就是
     完整目录，不存在漏文件。压缩包必须在消毒之后生成，否则会把 config 带出去。
@@ -349,8 +357,7 @@ def _make_zip(out: Path) -> Path | None:
     if os.getenv("HY_MEM_NO_ZIP", "").strip() not in ("", "0"):
         print("[build] 已跳过压缩包（HY_MEM_NO_ZIP=1）")
         return None
-    ver = _version()
-    folder = f"{NAME}-{ver}-win64"
+    folder = NAME  # 包内根目录恒定：解压覆盖历史安装的关键
     zpath = DIST / f"{folder}.zip"
     try:
         if zpath.exists():
@@ -489,7 +496,7 @@ def main() -> int:
     size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     print(f"[build] 完成，用时 {time.time() - t0:.0f}s，体积 {size / 1048576:.0f} MB")
     print(f"[build] 产物目录：{out}")
-    print(f"[build] 对外分发：{DIST / (NAME + '-' + _version() + '-win64.zip')}（整个目录打成的包）")
+    print(f"[build] 对外分发：{DIST / (NAME + '.zip')}（整个目录打成的包，名字恒定）")
     print("[build] 已确认产物不含 config.json / .env / 密钥 → 首次运行必须由用户完成设置")
     exe_path = out / (NAME + ".exe")
     print("[build] 校验建议：")
