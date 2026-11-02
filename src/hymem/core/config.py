@@ -60,6 +60,12 @@ DEFAULTS: dict[str, Any] = {
     "setupComplete": False,
     "setupSkipped": False,
     "mode": "pro",
+    # 记忆后端选择（docs/specs/2026-11-02-cli-split-ports/，JDBC 式协议层）：
+    # 协议在 hymem/ports/，实现在 hymem/backends/。默认 hy-memory；
+    # 未来接 memvid 等开源实现时在 ports/registry.py 注册新名字即可。
+    "backend": {
+        "memory": "hy-memory",
+    },
     # 界面语言（zh / en）。放顶层而不是 ui.language：后者是历史遗留、从未生效，
     # 真正决定文案的是 i18n.lang()，它读的就是这个字段。
     "lang": "zh",
@@ -520,6 +526,15 @@ def validate(cfg: dict) -> list[tuple[str, bool, str]]:
     mode = cfg.get("mode")
 
     out.append(("mode", mode in ("lite", "pro", "ultra"), f"MEMORY_MODE={mode}"))
+
+    # 记忆后端名：白名单来自 ports/registry（延迟 import 防环）
+    _bk = str(((cfg.get("backend") or {}).get("memory")) or "hy-memory")
+    try:
+        from hymem.ports.registry import available_backends as _ab
+
+        out.append(("backend.memory", _bk in _ab(), _bk))
+    except Exception:  # noqa: BLE001
+        out.append(("backend.memory", True, _bk))
 
     provider = str(emb.get("provider") or "").lower()
     out.append(("embedding.provider", provider in ("openai", "local"), f"provider={provider}"))
