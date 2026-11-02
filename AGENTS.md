@@ -105,7 +105,7 @@ D:\tools_open\agent-bridge\
 │   ├── test_mcp.py      (338) ← MCP stdio 八工具端到端
 │   ├── test_concurrency.py (192) ← 并发写 + 检索风暴（独立沙箱）
 │   ├── test_scene.py    (359) ← scene 全量：schema/拦截/两轮编码写入+diff 链/chain_block/profile（真模型，缺密钥显式跳过）
-│   └── test_evolve.py   (583) ← L6 认知层：pro 拦截 / 空转检测 / 强模型归纳出 schema / 状态可见性桩测 / evolve.language 指令补丁桩测 / 自动沉淀状态机桩测 / 可见性（evolve-status + evolve_health + 描述精简钉）/ MCP 工具按 mode 过滤（真模型，缺密钥显式跳过）
+│   └── test_evolve.py   (606) ← L6 认知层：pro 拦截 / 空转检测 / 强模型归纳出 schema / 状态可见性桩测 / evolve.language 原生通道桩测（SDK ≥2.0.11 透传）/ 自动沉淀状态机桩测 / 可见性（evolve-status + evolve_health + 描述精简钉）/ MCP 工具按 mode 过滤（真模型，缺密钥显式跳过）
 │
 ├── .local-test\               ← 临时/诊断脚本，**整目录 `.gitignore` 忽略、永不入库**
 │                                 probe_*（巡检/探针）、graph_ab_*（检索 A/B 实验）、
@@ -385,7 +385,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | `tests/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe tests/test_concurrency.py [exe]` |
 | `tests/test_mcp.py` | **31** | MCP stdio 工具端到端（pro 下 8 个；ultra 多一个 `evolve`）：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe tests/test_mcp.py [exe]` |
 | `tests/test_scene.py` | **43** | scene（working/coding）全量：tools/list schema、参数拦截（无轨迹/二选一/branch 缺 workspace/chat 传 messages·chain_block）、两轮同文件写入 → 独立 coding 库 + diff 链两版 → chain_block 两版、默认不注入、scope 不匹配零命中、config chainRepo 校验、profile 读 L0 画像、helptext 同步 | `.venv/Scripts/python.exe tests/test_scene.py [exe]` |
-| `tests/test_evolve.py` | **80** | L6 认知层五面向：A 离线（help/config/validate/exit）、B CLI（pro 拦截 exit 1）、C MCP（pro 下 tools/list 无 evolve、tools/call 被拒、**模式热切换发 list_changed**）、E 状态可见性离线桩（graph_unavailable / empty / no_embedding / 命中 / state 映射 / 默认 0.25）、F 语言指令补丁桩测（auto 不注入 / 强制 zh 穿透 en 提示词 / 强制 en / 幂等 / 非法值 / MCP 注册表）、G 自动沉淀状态机桩测（首次默认 / 冷却拦截与放行 / 2^n 退避与 7 天封顶 / 损坏容忍与原子写 / 触发门 mode+enabled / 冷却内不起线程）、H 可见性（CLI evolve-status pro/ultra/故障注入 / get_version 的 evolve_health 信号出现与零噪声 / 工具主描述 ≤200 字回归钉）、D ultra 真模型（弱模型空转 `completion<150` 判 idle / 强模型产出 schema / `--model` 跑完 `config.json` 不变 / 同素材二次无产出）；缺密钥 D 面显式跳过 | `.venv/Scripts/python.exe tests/test_evolve.py [exe]` |
+| `tests/test_evolve.py` | **80** | L6 认知层五面向：A 离线（help/config/validate/exit）、B CLI（pro 拦截 exit 1）、C MCP（pro 下 tools/list 无 evolve、tools/call 被拒、**模式热切换发 list_changed**）、E 状态可见性离线桩（graph_unavailable / empty / no_embedding / 命中 / state 映射 / 默认 0.25）、F 语言原生通道桩测（auto 不传 language / zh/en 原生透传 / 非法值警告软降级 / 老版本 TypeError 降级 / MCP 注册表）、G 自动沉淀状态机桩测（首次默认 / 冷却拦截与放行 / 2^n 退避与 7 天封顶 / 损坏容忍与原子写 / 触发门 mode+enabled / 冷却内不起线程）、H 可见性（CLI evolve-status pro/ultra/故障注入 / get_version 的 evolve_health 信号出现与零噪声 / 工具主描述 ≤200 字回归钉）、D ultra 真模型（弱模型空转 `completion<150` 判 idle / 强模型产出 schema / `--model` 跑完 `config.json` 不变 / 同素材二次无产出）；缺密钥 D 面显式跳过 | `.venv/Scripts/python.exe tests/test_evolve.py [exe]` |
 | `tests/test_vdb_endpoint.py` | **36** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe tests/test_vdb_endpoint.py` |
 | `tests/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe tests/test_encoding.py` |
 | `tests/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe tests/test_oplog.py` |

@@ -498,7 +498,7 @@ hy-mem evolve --batches 2            # 最多跑几批（调试用）
 4. **返回 `idle: true` 别当成功。** 它表示模型被调了但 completion < 150 token——多半是模型做不了这件事。看 `schemas_before/after` 增量才算数。
 5. **ultra 是单写者模式，不能多进程并发。** L6 图库用 kuzu（`kuzu.Database(path)` 无 read_only），**同一数据目录第二个进程必失败**：实测 2 进程并发 `add` → 1 成 1 败 `GraphStore (kuzu) init failed`，8 进程风暴全灭。所以 ultra 下 CLI 与 MCP 不能同时用同一库；需要多子代理并发写入就留在 pro。自动沉淀的跨进程并发由这把锁天然兜底：两个会话同时触发时，第二个在开图库那一步就失败并被记为 `skipped_lock`（零副作用，下个冷却周期再试）。
 
-检索侧：ultra 下 `search` 会额外带 L6 schema（`schemas` 字段）。`--no-schema` 关掉，`--schema-limit N` 调条数（默认 3），`--schema` 强制开。schema 默认英文（SDK 提示词决定），中文 query 对它语义分实测 0.17~0.34，所以 `schemaMinScore` 默认 **0.25** 卡相关、不带无关内容；`schemas` 为空且 `schema_note` 说「阈值下无命中」时，降 `schema_min_score`（MCP 参数）或 `config set evolve.schemaMinScore` 再试。**根治法是让 schema 变中文**：`config set evolve.language=zh`（CLI `--language zh`），会给归纳模型注入输出语言指令（SDK 自动检测对技术型中文记忆失灵，实测 32 条中文事实被判 en）。
+检索侧：ultra 下 `search` 会额外带 L6 schema（`schemas` 字段）。`--no-schema` 关掉，`--schema-limit N` 调条数（默认 3），`--schema` 强制开。schema 默认英文（SDK 提示词决定），中文 query 对它语义分实测 0.17~0.34，所以 `schemaMinScore` 默认 **0.25** 卡相关、不带无关内容；`schemas` 为空且 `schema_note` 说「阈值下无命中」时，降 `schema_min_score`（MCP 参数）或 `config set evolve.schemaMinScore` 再试。**根治法是让 schema 变中文**：`config set evolve.language=zh`（CLI `--language zh`）——SDK ≥2.0.11 原生支持：显式语言会把归纳提示词换成该语言并追加硬性输出语言约束（比早期运行时补丁更强）；注意 SDK 的 auto 检测（zh_ratio≥0.7）对技术型中文记忆仍失灵（实测 32 条中文事实被判 en），所以**显式配置仍是推荐用法**。
 
 ## 检索 / 读取
 

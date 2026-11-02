@@ -71,7 +71,7 @@ python -m cli.hy_mem_cli menu
 
 - **embedding**: 嵌入模型配置（provider、model、apiKey）
 - **llm**: 大语言模型配置。**S1 抽取模型，推荐分析类小模型**（信息抽取、场景分类等封闭判定需求），如 `tongyi-xiaomi-analysis-flash` —— 高频调用，快和便宜优先，不要求开放生成能力
-- **evolve**: L6 归纳配置（model / maxTokens 8000 / schemaLimit 3 / schemaMinScore 0.25 / language）。**model 是 S2 归纳模型，推荐更强的通用大模型**（如 `deepseek-v4.1-flash`）—— 开放归纳是成败关键，分析类小模型做不了（实测只回 7 个 token 还自报 success）；留空则回落 `llm.model`（等于没分）。schemaMinScore 默认 0.25 而非 SDK 的 0.4：evolve 归纳出的 schema 是英文，中文 query 对它的语义分实测 0.17~0.34，0.4 会全部滤空。**language** 控制归纳输出语言：默认 auto 跟随 SDK 检测（对技术型中文记忆失灵，实测 32 条中文事实因 ASCII 密度被判 en）；`config set evolve.language=zh` 强制中文 schema（CLI 有 `--language`），配 zh 后中文 query 检索分可回正常档。**auto** 控制自动沉淀（`evolve.auto`）：enabled=true（默认，仅 ultra）/ minNewFacts=8（自上次沉淀以来新增 L2 事实达到才跑）/ cooldownHours=24（两次尝试最小间隔，连续失败按 2^n 退避、7 天封顶，成功清零）。配置入口：`config set evolve.model=…` 或 `setup` 面板「沉淀模型」（仅 ultra 生效）
+- **evolve**: L6 归纳配置（model / maxTokens 8000 / schemaLimit 3 / schemaMinScore 0.25 / language）。**model 是 S2 归纳模型，推荐更强的通用大模型**（如 `deepseek-v4.1-flash`）—— 开放归纳是成败关键，分析类小模型做不了（实测只回 7 个 token 还自报 success）；留空则回落 `llm.model`（等于没分）。schemaMinScore 默认 0.25 而非 SDK 的 0.4：evolve 归纳出的 schema 是英文，中文 query 对它的语义分实测 0.17~0.34，0.4 会全部滤空。**language** 控制归纳输出语言：默认 auto 跟随 SDK 检测（对技术型中文记忆失灵，实测 32 条中文事实因 ASCII 密度被判 en）；`config set evolve.language=zh` 强制中文 schema（CLI 有 `--language`）——SDK ≥2.0.11 原生支持（显式语言会换归纳提示词本体 + 追加硬性输出语言约束），配 zh 后中文 query 检索分可回正常档；auto 检测上游仍未修，显式配置是推荐用法。**auto** 控制自动沉淀（`evolve.auto`）：enabled=true（默认，仅 ultra）/ minNewFacts=8（自上次沉淀以来新增 L2 事实达到才跑）/ cooldownHours=24（两次尝试最小间隔，连续失败按 2^n 退避、7 天封顶，成功清零）。配置入口：`config set evolve.model=…` 或 `setup` 面板「沉淀模型」（仅 ultra 生效）
 - **storage**: 存储路径配置
 - **user_id**: 当前身份标识
 - **search**: 检索参数（min_score 等）
