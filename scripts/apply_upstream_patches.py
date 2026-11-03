@@ -9,6 +9,9 @@ build_exe.py 打包前调用本脚本，保证 pip 重装 venv 后补丁不丢�
 - 每个 patch = (唯一标记, 上游原文, 补丁后文本)；对目标文件做精确文本替换。
 - 幂等：文件已含标记 → 跳过；原文不匹配且无标记 → 报错（上游代码变了，人工核对）。
 - 落点 ×2：venv site-packages（PyInstaller 打包实际来源）+ vendor 快照（仓库留档）。
+- `--check` 只读核对，构建脚本在应用后必须再跑一次；退出码非 0 即中止打包。
+- vendor 子模块因此会长期显示 ` m vendor/hy-memory`：这是预期状态——补丁不属于上游，
+  也不能提交进子模块（无推送权限）；任何环境重跑本脚本即可复现，无需人工改文件。
 """
 from __future__ import annotations
 
@@ -61,19 +64,64 @@ PATCHES = [
 
 
 def apply_one(target: Path, patch: dict) -> str:
-    """返回 'applied' / 'skipped' / 'mismatch'。"""
+    """返回 'applied' / 'skipped' / 'conflict' / 'mismatch' / 'missing'。"""
     if not target.exists():
         return "missing"
     text = target.read_text(encoding="utf-8")
-    if patch["marker"] in text:
+    if patch["marker"] in text and patch["before"] not in text:
         return "skipped"
-    if patch["before"] not in text:
-        return "mismatch"
-    target.write_text(text.replace(patch["before"], patch["after"], 1), encoding="utf-8")
-    return "applied"
+    if patch["before"] in text:
+        if patch["marker"] in text:
+            # 标记与上游原文同时存在：文件被手工改过，自动替换有歧义，交人工。
+            return "conflict"
+        target.write_text(text.replace(patch["before"], patch["after"], 1), encoding="utf-8")
+        return "applied"
+    return "mismatch"
+
+
+def check_one(target: Path, patch: dict) -> str:
+    """只读核对补丁是否真的落地：'patched' / 'unpatched' / 'missing' / 'revertible'。
+
+    'unpatched' = 含上游原文、可被本脚本安全补上；'revertible' = 既无标记也无
+    原文（上游已改，需人工核对）。两者都不算通过。
+    """
+    if not target.exists():
+        return "missing"
+    text = target.read_text(encoding="utf-8")
+    if patch["marker"] in text and patch["before"] not in text:
+        return "patched"
+    if patch["before"] in text:
+        return "unpatched"
+    return "revertible"
+
+
+def _no_patch_text(status: str) -> str:
+    return {
+        "missing": "文件缺失（vendor 子模块未初始化？）",
+        "unpatched": "补丁未应用（含上游原文）",
+        "revertible": "上游原文与补丁标记都不存在——上游代码已变更，请人工核对 docs/UPSTREAM-ISSUES.md",
+        "conflict": "补丁标记与上游原文同时存在（文件被手工改过），请人工核对",
+        "mismatch": "上游原文不匹配且无补丁标记——上游代码已变更，请人工核对 docs/UPSTREAM-ISSUES.md",
+    }[status]
+
+
+def run_check() -> int:
+    failures = 0
+    for patch in PATCHES:
+        for target in patch["targets"]:
+            rel = target.relative_to(ROOT)
+            status = check_one(target, patch)
+            if status == "patched":
+                print(f"[patch:check] {patch['name']} → {rel}：已生效")
+            else:
+                print(f"[patch:check] {patch['name']} → {rel}：{_no_patch_text(status)}")
+                failures += 1
+    return 1 if failures else 0
 
 
 def main() -> int:
+    if "--check" in sys.argv[1:]:
+        return run_check()
     failures = 0
     for patch in PATCHES:
         for target in patch["targets"]:
@@ -83,16 +131,11 @@ def main() -> int:
                 print(f"[patch] {patch['name']} → {rel}：已应用")
             elif result == "skipped":
                 print(f"[patch] {patch['name']} → {rel}：已存在，跳过")
-            elif result == "missing":
-                print(f"[patch] {patch['name']} → {rel}：文件缺失，跳过")
-                failures += 1
             else:
-                print(
-                    f"[patch] {patch['name']} → {rel}：上游原文不匹配且无补丁标记——"
-                    "上游代码已变更，请人工核对 docs/UPSTREAM-ISSUES.md 后更新本脚本"
-                )
+                print(f"[patch] {patch['name']} → {rel}：{_no_patch_text(result)}")
                 failures += 1
-    return 1 if failures else 0
+    # 写完立刻复核：宁可在这里硬失败，也不要让「以为打过、其实没打」混进 exe。
+    return run_check() if failures == 0 else 1
 
 
 if __name__ == "__main__":

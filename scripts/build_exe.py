@@ -450,13 +450,19 @@ def main() -> int:
     if not exe.exists():
         exe = Path("pyinstaller")
     # 上游 SDK 补丁先于打包（pip 重装 venv 会丢补丁，见 docs/UPSTREAM-ISSUES.md U1）
-    patch_rc = subprocess.call(
-        [sys.executable, str(ROOT / "scripts" / "apply_upstream_patches.py")],
-        cwd=str(ROOT),
-    )
+    patch_script = ROOT / "scripts" / "apply_upstream_patches.py"
+    patch_rc = subprocess.call([sys.executable, str(patch_script)], cwd=str(ROOT))
     if patch_rc != 0:
         print("[build] 上游补丁应用失败（上游代码变更？），中止打包")
         return patch_rc
+    # 独立复核一次：应用脚本退出 0 不等于补丁真的在（例如静默跳过/只打了一半）。
+    # 缺补丁时宁可打包中止，也不要把「ultra 第二进程必炸」的版本发出去。
+    check_rc = subprocess.call(
+        [sys.executable, str(patch_script), "--check"], cwd=str(ROOT)
+    )
+    if check_rc != 0:
+        print("[build] 上游补丁校验未通过（venv 或 vendor 快照仍缺补丁），中止打包")
+        return check_rc
     _stamp_old()
     t0 = time.time()
     print(f"[build] 开始打包（约 1.5 分钟）…")
