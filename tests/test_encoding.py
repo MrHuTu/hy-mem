@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-import io
 import os
 import subprocess
 import sys

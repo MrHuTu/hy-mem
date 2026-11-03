@@ -15,23 +15,11 @@ from hymem.cmds.base import (  # noqa: F401
 from hymem.backends.hymemory.clientops import sdk_info
 
 
-def cmd_doctor(args) -> int:
-    report = {"ok": True, "checks": []}
+def _doctor_runtime(check) -> None:
+    """运行环境自检：系统版本/位数/包完整性/安装目录可写/运行库/磁盘。
 
-    def check(name, passed, detail, fatal=True):
-        report["checks"].append({"name": name, "pass": bool(passed), "detail": detail})
-        if not passed and fatal:
-            report["ok"] = False
-
-    # 1. SDK
-    _sdk_ok, _sdk_detail = sdk_info()  # vendor import 收敛在 backends（守护断言 G1）
-    check("sdk_import", _sdk_ok, _sdk_detail)
-    if not _sdk_ok:
-        emit(report, args.json, "SDK 导入失败，先 pip install hy-memory")
-        return EXIT_USAGE
-
-    # 1.5 运行环境：系统版本 / 位数 / 包完整性 / 安装目录可写 / 运行库 / 磁盘
-    #     把「双击闪退」的成因搬进自检，不必等人报障再猜。
+    把「双击闪退」的成因搬进自检，不必等人报障再猜。
+    """
     try:
         from hymem.core import runtime_check
 
@@ -43,7 +31,9 @@ def cmd_doctor(args) -> int:
     except Exception as e:  # noqa: BLE001
         check("runtime", False, f"{type(e).__name__}: {e}", fatal=False)
 
-    # 2. 数据目录
+
+def _doctor_data_dir(args, check) -> None:
+    """数据目录可写性 + 目录来源（env / config / default）。"""
     dd = Path(args.data_dir) if args.data_dir else data_dir()
     try:
         from hymem.core import config as _cfgdir
@@ -60,7 +50,9 @@ def cmd_doctor(args) -> int:
     except Exception as e:  # noqa: BLE001
         check("data_dir", False, f"{dd}: {e}")
 
-    # 2.5 身份与启动器：agent 不传 -u 时用的是哪个 user_id，命令在不在 PATH 上
+
+def _doctor_identity(check) -> None:
+    """身份与启动器：agent 不传 -u 时用的是哪个 user_id，命令在不在 PATH 上。"""
     try:
         from hymem.core import config as _cfg
 
@@ -102,7 +94,9 @@ def cmd_doctor(args) -> int:
     except Exception as e:  # noqa: BLE001
         check("launcher", False, f"{type(e).__name__}: {e}", fatal=False)
 
-    # 3. Embedding（local=进程内 ONNX；remote=OpenAI 兼容端点）
+
+def _doctor_embedding(check) -> None:
+    """Embedding 自检（local=进程内 ONNX；remote=OpenAI 兼容端点）。"""
     provider = embedding_provider()
     want_dims = int(os.getenv("MEMORY_EMBEDDING_DIMS", "0") or 0)
     base = os.getenv("MEMORY_EMBEDDER_BASE_URL", "").rstrip("/")
@@ -176,7 +170,9 @@ def cmd_doctor(args) -> int:
                     detail += f"（与 MEMORY_EMBEDDING_DIMS={want_dims} 不一致！会导致写入失败）"
                 check("embedding_live", good, detail)
 
-    # 4. 模式与 LLM（lite 不需要 LLM）
+
+def _doctor_llm(args, check) -> None:
+    """模式与 LLM 自检（lite 不需要 LLM）。"""
     mode = args.mode or os.getenv("MEMORY_MODE", "pro")
     check("mode", mode in ("lite", "pro", "ultra"), f"MEMORY_MODE={mode}")
     if mode in ("pro", "ultra"):
@@ -228,7 +224,9 @@ def cmd_doctor(args) -> int:
                         f"{ms}ms 空响应 finish_reason={fin!r}：端点通但模型没给内容",
                     )
 
-    # 5. 异步队列与写锁（worker 依赖这两个，坏了会静默丢任务）
+
+def _doctor_queue(check) -> None:
+    """异步队列与写锁（worker 依赖这两个，坏了会静默丢任务）。"""
     try:
         qconn = store.connect()
         try:
@@ -251,6 +249,40 @@ def cmd_doctor(args) -> int:
         check("write_lock", held, f"{ms}ms" if held else "5s 内未拿到写锁（有 worker 正在写？）", fatal=False)
     except Exception as e:  # noqa: BLE001
         check("write_lock", False, f"{type(e).__name__}: {e}", fatal=False)
+
+
+def cmd_doctor(args) -> int:
+    report = {"ok": True, "checks": []}
+
+    def check(name, passed, detail, fatal=True):
+        report["checks"].append({"name": name, "pass": bool(passed), "detail": detail})
+        if not passed and fatal:
+            report["ok"] = False
+
+    # 1. SDK
+    _sdk_ok, _sdk_detail = sdk_info()  # vendor import 收敛在 backends（守护断言 G1）
+    check("sdk_import", _sdk_ok, _sdk_detail)
+    if not _sdk_ok:
+        emit(report, args.json, "SDK 导入失败，先 pip install hy-memory")
+        return EXIT_USAGE
+
+    # 1.5 运行环境（系统/位数/包完整性/可写/运行库/磁盘）
+    _doctor_runtime(check)
+
+    # 2. 数据目录
+    _doctor_data_dir(args, check)
+
+    # 2.5 身份与启动器
+    _doctor_identity(check)
+
+    # 3. Embedding（local=进程内 ONNX；remote=OpenAI 兼容端点）
+    _doctor_embedding(check)
+
+    # 4. 模式与 LLM（lite 不需要 LLM）
+    _doctor_llm(args, check)
+
+    # 5. 异步队列与写锁（worker 依赖这两个，坏了会静默丢任务）
+    _doctor_queue(check)
 
     human = "\n".join(
         f"  [{'PASS' if c['pass'] else 'FAIL'}] {c['name']}: {c['detail']}"
@@ -695,6 +727,7 @@ def cmd_log(args) -> int:
 # =========================================================== S4/S5/S6（docs/specs/2026-11-02-sdk-alignment-gaps/）
 # SDK 2.0.11 对齐补全：reembed 工具族 / backup-restore / graph-build。
 # 全部只留 CLI（迁移级/破坏性/长耗时重操作不进 MCP，判定见契约）。
+
 
 def _require_yes(args, what: str) -> int | None:
     if not getattr(args, "yes", False):

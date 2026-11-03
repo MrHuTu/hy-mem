@@ -217,6 +217,8 @@ def _schema_count(client, user_id: str = "default") -> int:
 # 注意：SDK 的 auto 检测（_detect_language 的 zh_ratio≥0.7）在 2.0.11 仍未修，
 # 技术型中文依然判 en——显式配 evolve.language=zh 仍是推荐用法（契约
 # docs/specs/2026-11-02-sdk-2011-language/）。
+
+
 def _native_language(lang_eff: str) -> tuple[str, str]:
     """把 hy-mem 的语言挡位解析成可透传给 SDK evolve 的值。
 

@@ -19,7 +19,13 @@ import os
 import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
+
+_T = TypeVar("_T")
+Conn = sqlite3.Connection
+Row = sqlite3.Row
 
 # --------------------------------------------------------------------------
 # 路径
@@ -85,7 +91,7 @@ CREATE TABLE IF NOT EXISTS worker_reg (
 SCHEMA_VERSION = 1
 
 
-def _migrate(conn) -> None:
+def _migrate(conn: Conn) -> None:
     """旧库幂等迁移。CREATE TABLE IF NOT EXISTS 不会给已有表补列，这里补。
 
     0.9.8：jobs.not_before（延迟重试的最早可领时间）。并发迁移的竞态用
@@ -111,7 +117,7 @@ def _migrate(conn) -> None:
             raise
 
 
-def connect() -> sqlite3.Connection:
+def connect() -> Conn:
     # 并发启动（多子代理）下的已知瞬态：另一进程 checkpoint/重建 WAL 的窗口里，
     # 新连接可能拿到只读句柄，PRAGMA 阶段就报 "attempt to write a readonly
     # database"（并发压测实测约 5%）。锁类错误 busy_timeout 会自己等，这种
@@ -146,7 +152,7 @@ def connect() -> sqlite3.Connection:
     raise last  # type: ignore[misc]
 
 
-def transient_write(fn, attempts: int = 4):
+def transient_write(fn: Callable[[Conn], _T], attempts: int = 4) -> _T:
     """执行一轮写操作，readonly/locked 瞬态自动换新连接重试。
 
     WAL 在「最后一个连接关闭 → 删 -wal/-shm → 下个连接重建」的窗口里，
@@ -174,6 +180,8 @@ def transient_write(fn, attempts: int = 4):
 # --------------------------------------------------------------------------
 # 跨进程写锁
 # --------------------------------------------------------------------------
+
+
 class WriteLock:
     """排他写锁。进程异常退出时由 OS 释放，不会留残锁。
 
@@ -182,7 +190,7 @@ class WriteLock:
             lk.acquired  # True=真拿到锁；False=超时但仍放行（降级）
     """
 
-    def __init__(self, timeout: float | None = None, name: str = "write.lock", strict: bool = True):
+    def __init__(self, timeout: float | None = None, name: str = "write.lock", strict: bool = True) -> None:
         if timeout is None:
             timeout = float(os.getenv("HY_MEM_LOCK_TIMEOUT") or 180)
         self.path = data_dir() / name
@@ -209,7 +217,7 @@ class WriteLock:
             self._fh = None
             return False
 
-    def __enter__(self):
+    def __enter__(self) -> WriteLock:
         deadline = time.time() + self.timeout
         warned = False
         while True:
@@ -235,7 +243,7 @@ class WriteLock:
                 warned = True
             time.sleep(0.15)
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: object) -> bool:
         if self._fh is not None:
             try:
                 if self.acquired:
@@ -260,7 +268,9 @@ class WriteLock:
 # --------------------------------------------------------------------------
 # 队列
 # --------------------------------------------------------------------------
-def enqueue(conn, payload: dict, kind: str = "add", mode: str | None = None, max_attempts: int = 3) -> int:
+
+
+def enqueue(conn: Conn, payload: dict, kind: str = "add", mode: str | None = None, max_attempts: int = 3) -> int:
     cur = conn.execute(
         "INSERT INTO jobs (kind, payload, status, max_attempts, mode, created_at) VALUES (?,?,?,?,?,?)",
         (kind, json.dumps(payload, ensure_ascii=False), "pending", max_attempts, mode, time.time()),
@@ -268,7 +278,7 @@ def enqueue(conn, payload: dict, kind: str = "add", mode: str | None = None, max
     return int(cur.lastrowid)
 
 
-def claim_next(conn, worker_id: str, kinds: tuple[str, ...] = ("add", "finalize")):
+def claim_next(conn: Conn, worker_id: str, kinds: tuple[str, ...] = ("add", "finalize")) -> Row | None:
     """原子领取一个待处理任务。返回 row 或 None。
 
     UPDATE ... WHERE status='pending' 的 rowcount 就是抢占是否成功，
@@ -296,8 +306,8 @@ def claim_next(conn, worker_id: str, kinds: tuple[str, ...] = ("add", "finalize"
             return conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
 
 
-def claim_next_batch(conn, worker_id: str, limit: int, kinds: tuple[str, ...] = ("add",),
-                     compat_check=None, stats: dict | None = None) -> list:
+def claim_next_batch(conn: Conn, worker_id: str, limit: int, kinds: tuple[str, ...] = ("add",),
+                     compat_check: Callable[[Row], bool] | None = None, stats: dict | None = None) -> list[Row]:
     """批量领取同一 (user_id, agent_id) 的待处理 add 任务（S1 · 2026-10-30 batch-commit）。
 
     与 claim_next 同款原子性：逐条 UPDATE ... WHERE status='pending' 抢占，
@@ -357,7 +367,7 @@ def claim_next_batch(conn, worker_id: str, limit: int, kinds: tuple[str, ...] = 
     return rows
 
 
-def mark_done(conn, job_id: int, memory_ids: list[str], extra: dict | None = None) -> None:
+def mark_done(conn: Conn, job_id: int, memory_ids: list[str], extra: dict | None = None) -> None:
     """任务成功落账。extra 里的 note 写进 error 列当告警留痕。
 
     error 在 done 行上本来就是空的，直接写 note 给人看成本最低；留痕的价值是
@@ -377,7 +387,7 @@ def mark_done(conn, job_id: int, memory_ids: list[str], extra: dict | None = Non
     )
 
 
-def requeue_shadow(conn) -> int:
+def requeue_shadow(conn: Conn) -> int:
     """把「只落了 l1_raw 影子节点」的完成任务重投（PRD F9 的自愈入口）。
 
     这些任务当时算成功（抽取没报错，只是没产出可检索节点），但记忆实际
@@ -390,7 +400,7 @@ def requeue_shadow(conn) -> int:
     return cur.rowcount
 
 
-def mark_failed(conn, job_id: int, error: str, retry: bool) -> str:
+def mark_failed(conn: Conn, job_id: int, error: str, retry: bool) -> str:
     """失败落账。retry=True 且还有重试预算时回到 pending，并写退避 not_before。
 
     退避曲线 min(2**attempts, 30)（attempts 已在 claim 时 +1）：
@@ -413,7 +423,7 @@ def mark_failed(conn, job_id: int, error: str, retry: bool) -> str:
     return "dead"
 
 
-def requeue_stale(conn, older_than: float | None = None) -> int:
+def requeue_stale(conn: Conn, older_than: float | None = None) -> int:
     """把崩溃 worker 留下的 running 任务放回 pending（清掉 not_before：重投立即到期）。"""
     if older_than is None:
         older_than = float(os.getenv("HY_MEM_STALE_SEC") or 900)
@@ -426,7 +436,7 @@ def requeue_stale(conn, older_than: float | None = None) -> int:
     return cur.rowcount
 
 
-def queue_stats(conn) -> dict:
+def queue_stats(conn: Conn) -> dict[str, int | float | None]:
     rows = conn.execute("SELECT status, COUNT(*) n FROM jobs GROUP BY status").fetchall()
     stats = {r["status"]: r["n"] for r in rows}
     oldest = conn.execute("SELECT MIN(created_at) t FROM jobs WHERE status='pending'").fetchone()
@@ -451,10 +461,12 @@ def queue_stats(conn) -> dict:
 
 # 完成态记录保留天数（P1-4）。0/负数 = 不清理；dead（失败）永久保留——
 # 死信是排障证据，不参与按天清理。清理只从既有维护入口 stats --vacuum 触发。
+
+
 DONE_RETENTION_DAYS = 30
 
 
-def purge_finished_jobs(conn, keep_days: float | None = None) -> int:
+def purge_finished_jobs(conn: Conn, keep_days: float | None = None) -> int:
     """按天清理 done 记录，返回删除行数。dead/pending/running 一律不动。"""
     days = DONE_RETENTION_DAYS if keep_days is None else float(keep_days)
     if days <= 0:
@@ -471,7 +483,9 @@ def purge_finished_jobs(conn, keep_days: float | None = None) -> int:
 # worker 心跳/注册（add --async 判断要不要自动拉起临时 worker、以及
 # worker 数量上限，都用这张表）
 # --------------------------------------------------------------------------
-def heartbeat(conn, worker_id: str) -> None:
+
+
+def heartbeat(conn: Conn, worker_id: str) -> None:
     """worker 每轮循环调用：按 worker 注册行 UPSERT，开销可忽略。
 
     单行 worker_hb（历史）升级为按 worker 一行的 worker_reg——同一张表
@@ -486,7 +500,7 @@ def heartbeat(conn, worker_id: str) -> None:
     )
 
 
-def worker_age(conn) -> float | None:
+def worker_age(conn: Conn) -> float | None:
     """距最近一次 worker 心跳的秒数；从无心跳返回 None。"""
     row = conn.execute("SELECT MAX(ts) AS ts FROM worker_reg").fetchone()
     if row is None or not row["ts"]:
@@ -494,7 +508,7 @@ def worker_age(conn) -> float | None:
     return max(0.0, time.time() - row["ts"])
 
 
-def count_live_workers(conn, fresh: float = 15.0) -> int:
+def count_live_workers(conn: Conn, fresh: float = 15.0) -> int:
     """心跳在 fresh 秒内的 worker 数——拉起闸门的上限判断用。"""
     row = conn.execute(
         "SELECT COUNT(*) AS n FROM worker_reg WHERE ts > ?", (time.time() - fresh,)
@@ -502,7 +516,7 @@ def count_live_workers(conn, fresh: float = 15.0) -> int:
     return int(row["n"] or 0)
 
 
-def worker_leave(conn, worker_id: str) -> None:
+def worker_leave(conn: Conn, worker_id: str) -> None:
     """worker 退出时注销自己；失败不影响退出流程。"""
     try:
         conn.execute("DELETE FROM worker_reg WHERE id = ?", (worker_id,))
@@ -510,7 +524,7 @@ def worker_leave(conn, worker_id: str) -> None:
         pass
 
 
-def worker_purge_stale(conn, older_than: float = 300.0) -> None:
+def worker_purge_stale(conn: Conn, older_than: float = 300.0) -> None:
     """清理硬杀残留的注册行（心跳停更超过 older_than 秒）。"""
     try:
         conn.execute("DELETE FROM worker_reg WHERE ts < ?", (time.time() - older_than,))
@@ -518,7 +532,7 @@ def worker_purge_stale(conn, older_than: float = 300.0) -> None:
         pass
 
 
-def claim_worker_slot(conn, cap: int, fresh: float = 15.0) -> bool:
+def claim_worker_slot(conn: Conn, cap: int, fresh: float = 15.0) -> bool:
     """拉起 worker 前的占位闸门——必须在 WriteLock 内调用（串行化竞态）。
 
     清理过期行 → 数存活 worker → 未达 cap 则写一行 '_spawn_intent' 占位。
@@ -549,7 +563,7 @@ def claim_worker_slot(conn, cap: int, fresh: float = 15.0) -> bool:
         return True
 
 
-def pid_alive(pid) -> bool:
+def pid_alive(pid: int | None) -> bool:
     """进程是否还在。与 vdb_endpoint.pid_alive 同样的实现，但放在 store 里
     避免「闸门 → 端点模块 → store」的循环导入。"""
     try:
@@ -580,7 +594,7 @@ def pid_alive(pid) -> bool:
     return True
 
 
-def _purge_dead_pids(conn, older_than: float = 3.0) -> int:
+def _purge_dead_pids(conn: Conn, older_than: float = 3.0) -> int:
     """删掉「pid 已死」的注册行，返回删除条数。"""
     try:
         rows = conn.execute(
@@ -598,7 +612,7 @@ def _purge_dead_pids(conn, older_than: float = 3.0) -> int:
     return len(dead)
 
 
-def _job_row(r) -> dict:
+def _job_row(r: Row) -> dict:
     d = dict(r)
     try:
         d["payload"] = json.loads(d["payload"])
@@ -611,7 +625,7 @@ def _job_row(r) -> dict:
     return d
 
 
-def list_jobs(conn, status: str | None = None, limit: int = 20) -> list[dict]:
+def list_jobs(conn: Conn, status: str | None = None, limit: int = 20) -> list[dict]:
     if status:
         rows = conn.execute("SELECT * FROM jobs WHERE status=? ORDER BY id DESC LIMIT ?", (status, limit)).fetchall()
     else:
@@ -619,7 +633,7 @@ def list_jobs(conn, status: str | None = None, limit: int = 20) -> list[dict]:
     return [_job_row(r) for r in rows]
 
 
-def get_jobs(conn, ids: list[int]) -> list[dict]:
+def get_jobs(conn: Conn, ids: list[int]) -> list[dict]:
     """按 job_id 精确取（MCP queue_status 用：智能体只关心自己刚提交的那几条）。"""
     ids = [int(i) for i in ids if i is not None]
     if not ids:
@@ -634,7 +648,9 @@ def get_jobs(conn, ids: list[int]) -> list[dict]:
 # --------------------------------------------------------------------------
 # 标签
 # --------------------------------------------------------------------------
-def bind_tags(conn, memory_ids: list[str], tags: list[str], source: str = "user") -> int:
+
+
+def bind_tags(conn: Conn, memory_ids: list[str], tags: list[str], source: str = "user") -> int:
     now = time.time()
     rows = []
     for mid in memory_ids:
@@ -663,7 +679,7 @@ def bind_tags(conn, memory_ids: list[str], tags: list[str], source: str = "user"
     return conn.total_changes - before
 
 
-def tags_for(conn, memory_ids: list[str], source: str | None = None) -> dict[str, list[str]]:
+def tags_for(conn: Conn, memory_ids: list[str], source: str | None = None) -> dict[str, list[str]]:
     """批量取本地标签，避免 N+1 查询。source=None 取全部来源（同名 tag 去重）。"""
     if not memory_ids:
         return {}
@@ -682,7 +698,7 @@ def tags_for(conn, memory_ids: list[str], source: str | None = None) -> dict[str
     return out
 
 
-def untag(conn, memory_id: str | None, tag: str | None = None) -> int:
+def untag(conn: Conn, memory_id: str | None, tag: str | None = None) -> int:
     if memory_id and tag:
         cur = conn.execute("DELETE FROM tags WHERE memory_id=? AND tag=?", (memory_id, tag))
     elif memory_id:
@@ -694,7 +710,7 @@ def untag(conn, memory_id: str | None, tag: str | None = None) -> int:
     return cur.rowcount
 
 
-def tag_inventory(conn, min_count: int = 1) -> list[dict]:
+def tag_inventory(conn: Conn, min_count: int = 1) -> list[dict]:
     rows = conn.execute(
         "SELECT tag, "
         "  SUM(CASE WHEN source='user' THEN 1 ELSE 0 END) user_n, "
@@ -706,7 +722,7 @@ def tag_inventory(conn, min_count: int = 1) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def prune(conn, alive_ids: set[str] | None = None) -> int:
+def prune(conn: Conn, alive_ids: set[str] | None = None) -> int:
     """清掉指向已删记忆的标签行；alive_ids=None 时只清明显失效的自动标签。"""
     if alive_ids is None:
         return 0

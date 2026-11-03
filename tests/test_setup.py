@@ -89,7 +89,6 @@ def main() -> int:
     seq["select"] = [0, 0, 1, 0, 0, 0]
     seq["secret"] = ["sk-test-embed"]
     seq["ask"] = []
-    data_dir = str(TMP / "data")
     # 先造一个「有数据的旧目录」，避免走迁移分支
     (TMP / "data").mkdir(exist_ok=True)
     (TMP / "data" / "keep.txt").write_text("x", encoding="utf-8")

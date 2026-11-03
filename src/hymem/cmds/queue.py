@@ -353,6 +353,199 @@ class _LaneState:
             return self.dead, list(self.errors)
 
 
+def _worker_batch_round(conn, rows_batch, args, st, lane_id, get_client, lane_dead) -> bool:
+    """一次合批执行（≥2 条）+ 逐 job 入账。返回 False 表示 lane 必须退出。
+
+    等价提取自 cmd_worker::_lane_loop 的批处理段：语句顺序、日志文案、
+    异常边界（KeyboardInterrupt 上抛 / 其它异常兜底标失败）逐字保持原样。
+    """
+    st.claim_started()
+    t0 = time.time()
+    job_ids = [r["id"] for r in rows_batch]
+    try:
+        outcomes = _execute_batch(rows_batch, get_client)
+        for job_id, result, ids, note, exc in outcomes:
+            if exc is None:
+                # 入账段单独窄捕获：写库异常不能静默杀死 lane
+                try:
+                    store.mark_done(conn, job_id, ids,
+                                    extra={"note": note} if note else None)
+                except Exception as me:  # noqa: BLE001
+                    lane_dead(lane_id, "mark_done", me)
+                    return False
+                st.done_one(True)
+                ln = (result.get("batch") or {}).get("lineage_note") or ""
+                print(f"[lane{lane_id}][batch][{job_id}] add ok "
+                      f"ids={len(ids)}" + (" shadow_only" if note and not ln else ""),
+                      file=sys.stderr)
+                if args.json:
+                    emit({"ok": True, "job": job_id, "kind": "add",
+                          "batch": result.get("batch"),
+                          "memory_ids": ids, "note": note}, True)
+            else:
+                st.done_one(False)
+                try:
+                    state = store.mark_failed(
+                        conn, job_id, f"{type(exc).__name__}: {exc}", retry=True)
+                except Exception as me:  # noqa: BLE001
+                    lane_dead(lane_id, "mark_failed", me)
+                    return False
+                print(f"[lane{lane_id}][batch][{job_id}] FAILED -> {state}: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                if args.json:
+                    emit({"ok": False, "job": job_id, "state": state,
+                          "error": str(exc)}, True)
+        ms = int((time.time() - t0) * 1000)
+        print(f"[lane{lane_id}][batch] {len(rows_batch)} jobs "
+              f"judge_llm=1 in {ms}ms", file=sys.stderr)
+    except KeyboardInterrupt:
+        for jid in job_ids:
+            store.mark_failed(conn, jid, "interrupted", retry=True)
+        raise
+    except Exception as e:  # noqa: BLE001  批路径兜底：绝不留 running 僵尸
+        import traceback
+
+        traceback.print_exc()
+        for jid in job_ids:
+            st.done_one(False)
+            try:
+                state = store.mark_failed(
+                    conn, jid, f"batch aborted: {type(e).__name__}: {e}",
+                    retry=True)
+            except Exception as me:  # noqa: BLE001
+                lane_dead(lane_id, "mark_failed", me)
+                return False
+            if args.json:
+                emit({"ok": False, "job": jid, "state": state,
+                      "error": str(e)}, True)
+    finally:
+        st.claim_ended()
+    return True
+
+
+def _worker_should_stop(args, st, started, stats) -> bool:
+    """无可领任务时的四类收工判定（once / 快退 / 空闲 / 超时），顺序不变。"""
+    if args.once and st.active == 0:
+        # 一次性模式：无可领任务且本进程无在途 → 收工。
+        # 延迟重试的任务（not_before 未到）留待下次消费。
+        return True
+    if (
+        not getattr(args, "no_fast_exit", False)
+        and not st.claimed_any
+        and time.time() - started >= 30
+        and stats["pending"] == 0
+    ):
+        # 空闲快速释放：拉起后 30s 从没抢到过任务且队列空 → 尽早退出
+        return True
+    if (
+        args.idle_exit
+        and time.time() - st.last_active >= args.idle_exit
+        and stats["pending"] == 0
+        and st.active == 0
+    ):
+        # 空闲释放：只在队列真正清空时退——延迟任务到期前
+        # pending>0，不会误退，supervisor 会守到它可领。
+        return True
+    if args.timeout and time.time() - started >= args.timeout:
+        return True
+    return False
+
+
+def _worker_single_round(conn, row, args, st, lane_id, get_client, lane_dead) -> bool:
+    """单条任务执行 + 入账。返回 False 表示 lane 必须退出（入账段失败）。"""
+    job_id, kind = row["id"], row["kind"]
+    st.claim_started()
+    t0 = time.time()
+    try:
+        # 任务执行仍是 per-job 捕获（不扩大到一个大 except 里）
+        try:
+            result, ids, note = _execute_job(conn, row, get_client)
+        except KeyboardInterrupt:
+            try:
+                store.mark_failed(conn, job_id, "interrupted", retry=True)
+            except Exception:  # noqa: BLE001  中断收尾失败不掩盖原异常
+                pass
+            raise
+        except Exception as e:  # noqa: BLE001
+            st.done_one(False)
+            try:
+                state = store.mark_failed(
+                    conn, job_id, f"{type(e).__name__}: {e}", retry=True)
+            except Exception as me:  # noqa: BLE001  入账失败：lane 记账后退出
+                lane_dead(lane_id, "mark_failed", me)
+                return False
+            print(
+                f"[lane{lane_id}][{job_id}] {kind} FAILED -> {state}: "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+            if args.json:
+                emit({"ok": False, "job": job_id, "state": state,
+                      "error": str(e)}, True)
+            # 退避写在任务行（not_before），这里不 sleep，立刻领下一个
+        else:
+            # 入账段单独窄捕获：mark_done 失败不能静默杀死 lane
+            try:
+                store.mark_done(conn, job_id, ids,
+                                extra={"note": note} if note else None)
+            except Exception as me:  # noqa: BLE001
+                lane_dead(lane_id, "mark_done", me)
+                return False
+            st.done_one(True)
+            ms = int((time.time() - t0) * 1000)
+            print(f"[lane{lane_id}][{job_id}] {kind} ok {ms}ms ids={len(ids)}"
+                  + (" shadow_only" if note else ""), file=sys.stderr)
+            if args.json:
+                emit({"ok": True, "job": job_id, "kind": kind, "ms": ms,
+                      "memory_ids": ids, "note": note}, True)
+    finally:
+        st.claim_ended()
+    return True
+
+
+def _worker_finish(args, lanes, wid, st, interrupted, clients, hb_conn) -> int:
+    """收尾：注销注册行、关客户端、汇总统计并输出（退出码由 lane 死亡决定）。"""
+    try:
+        store.worker_leave(hb_conn, wid)  # 注销注册行，立即腾出拉起名额
+    except Exception:  # noqa: BLE001
+        pass
+    for c in clients.values():
+        try:
+            c.close()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        hb_conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+    stats = None
+    conn = store.connect()
+    try:
+        stats = store.queue_stats(conn)
+    finally:
+        conn.close()
+    processed = st.processed()
+    deaths, lane_errors = st.deaths()
+    payload = {
+        "ok": not deaths, "lanes": lanes, "processed": processed,
+        "succeeded": st.ok, "failed": st.failed, "queue": stats,
+    }
+    if deaths:
+        # 「全部 lane 死掉但退出码 0」是旧缺陷：这里显式标记并汇总可诊断信息
+        payload["lane_deaths"] = deaths
+        payload["lane_errors"] = lane_errors
+    if interrupted:
+        payload["interrupted"] = True
+    tail = f"，延迟重试 {stats['delayed']} 条" if stats.get("delayed") else ""
+    human = (f"worker 退出：{lanes} 线程，成功 {st.ok} / 失败 {st.failed} / "
+             f"剩余待处理 {stats['pending']}{tail}")
+    if deaths:
+        human += f"；{deaths} 条 lane 异常退出（详见 lane_errors 与 stderr）"
+    rc = ok(payload, args.json, human)
+    return rc if not deaths else EXIT_RUNTIME
+
+
 def cmd_worker(args) -> int:
     """队列消费者：单进程 supervisor + N 个消费线程（lane）。
 
@@ -449,67 +642,9 @@ def cmd_worker(args) -> int:
                         _lane_dead(lane_id, "claim_batch", e)
                         return
                 if len(rows_batch) >= 2:
-                    st.claim_started()
-                    t0 = time.time()
-                    job_ids = [r["id"] for r in rows_batch]
-                    try:
-                        outcomes = _execute_batch(rows_batch, get_client)
-                        for job_id, result, ids, note, exc in outcomes:
-                            if exc is None:
-                                # 入账段单独窄捕获：写库异常不能静默杀死 lane
-                                try:
-                                    store.mark_done(conn, job_id, ids,
-                                                    extra={"note": note} if note else None)
-                                except Exception as me:  # noqa: BLE001
-                                    _lane_dead(lane_id, "mark_done", me)
-                                    return
-                                st.done_one(True)
-                                ln = (result.get("batch") or {}).get("lineage_note") or ""
-                                print(f"[lane{lane_id}][batch][{job_id}] add ok "
-                                      f"ids={len(ids)}" + (" shadow_only" if note and not ln else ""),
-                                      file=sys.stderr)
-                                if args.json:
-                                    emit({"ok": True, "job": job_id, "kind": "add",
-                                          "batch": result.get("batch"),
-                                          "memory_ids": ids, "note": note}, True)
-                            else:
-                                st.done_one(False)
-                                try:
-                                    state = store.mark_failed(
-                                        conn, job_id, f"{type(exc).__name__}: {exc}", retry=True)
-                                except Exception as me:  # noqa: BLE001
-                                    _lane_dead(lane_id, "mark_failed", me)
-                                    return
-                                print(f"[lane{lane_id}][batch][{job_id}] FAILED -> {state}: "
-                                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
-                                if args.json:
-                                    emit({"ok": False, "job": job_id, "state": state,
-                                          "error": str(exc)}, True)
-                        ms = int((time.time() - t0) * 1000)
-                        print(f"[lane{lane_id}][batch] {len(rows_batch)} jobs "
-                              f"judge_llm=1 in {ms}ms", file=sys.stderr)
-                    except KeyboardInterrupt:
-                        for jid in job_ids:
-                            store.mark_failed(conn, jid, "interrupted", retry=True)
-                        raise
-                    except Exception as e:  # noqa: BLE001  批路径兜底：绝不留 running 僵尸
-                        import traceback
-
-                        traceback.print_exc()
-                        for jid in job_ids:
-                            st.done_one(False)
-                            try:
-                                state = store.mark_failed(
-                                    conn, jid, f"batch aborted: {type(e).__name__}: {e}",
-                                    retry=True)
-                            except Exception as me:  # noqa: BLE001
-                                _lane_dead(lane_id, "mark_failed", me)
-                                return
-                            if args.json:
-                                emit({"ok": False, "job": jid, "state": state,
-                                      "error": str(e)}, True)
-                    finally:
-                        st.claim_ended()
+                    if not _worker_batch_round(conn, rows_batch, args, st,
+                                               lane_id, get_client, _lane_dead):
+                        return
                     continue
                 if rows_batch:
                     # 只领到 1 条（约束/异 user 止批）：退回单条路径语义
@@ -527,84 +662,15 @@ def cmd_worker(args) -> int:
                         except Exception as e:  # noqa: BLE001  统计段异常，lane 无法继续
                             _lane_dead(lane_id, "queue_stats", e)
                             return
-                    qs = stats
-                    if args.once and st.active == 0:
-                        # 一次性模式：无可领任务且本进程无在途 → 收工。
-                        # 延迟重试的任务（not_before 未到）留待下次消费。
-                        stop.set()
-                        break
-                    if (
-                        not getattr(args, "no_fast_exit", False)
-                        and not st.claimed_any
-                        and time.time() - started >= 30
-                        and qs["pending"] == 0
-                    ):
-                        # 空闲快速释放：拉起后 30s 从没抢到过任务且队列空 → 尽早退出
-                        stop.set()
-                        break
-                    if (
-                        args.idle_exit
-                        and time.time() - st.last_active >= args.idle_exit
-                        and qs["pending"] == 0
-                        and st.active == 0
-                    ):
-                        # 空闲释放：只在队列真正清空时退——延迟任务到期前
-                        # pending>0，不会误退，supervisor 会守到它可领。
-                        stop.set()
-                        break
-                    if args.timeout and time.time() - started >= args.timeout:
+                    if _worker_should_stop(args, st, started, stats):
                         stop.set()
                         break
                     time.sleep(args.poll)
                     continue
 
-                job_id, kind = row["id"], row["kind"]
-                st.claim_started()
-                t0 = time.time()
-                try:
-                    # 任务执行仍是 per-job 捕获（不扩大到一个大 except 里）
-                    try:
-                        result, ids, note = _execute_job(conn, row, get_client)
-                    except KeyboardInterrupt:
-                        try:
-                            store.mark_failed(conn, job_id, "interrupted", retry=True)
-                        except Exception:  # noqa: BLE001  中断收尾失败不掩盖原异常
-                            pass
-                        raise
-                    except Exception as e:  # noqa: BLE001
-                        st.done_one(False)
-                        try:
-                            state = store.mark_failed(
-                                conn, job_id, f"{type(e).__name__}: {e}", retry=True)
-                        except Exception as me:  # noqa: BLE001  入账失败：lane 记账后退出
-                            _lane_dead(lane_id, "mark_failed", me)
-                            return
-                        print(
-                            f"[lane{lane_id}][{job_id}] {kind} FAILED -> {state}: "
-                            f"{type(e).__name__}: {e}",
-                            file=sys.stderr,
-                        )
-                        if args.json:
-                            emit({"ok": False, "job": job_id, "state": state,
-                                  "error": str(e)}, True)
-                        # 退避写在任务行（not_before），这里不 sleep，立刻领下一个
-                    else:
-                        # 入账段单独窄捕获：mark_done 失败不能静默杀死 lane
-                        try:
-                            store.mark_done(conn, job_id, ids,
-                                            extra={"note": note} if note else None)
-                        except Exception as me:  # noqa: BLE001
-                            _lane_dead(lane_id, "mark_done", me)
-                            return
-                        st.done_one(True)
-                        ms = int((time.time() - t0) * 1000)
-                        print(f"[lane{lane_id}][{job_id}] {kind} ok {ms}ms ids={len(ids)}"
-                              + (" shadow_only" if note else ""), file=sys.stderr)
-                        if args.json:
-                            emit({"ok": True, "job": job_id, "kind": kind, "ms": ms,
-                                  "memory_ids": ids, "note": note}, True)
-                finally:
-                    st.claim_ended()
+                if not _worker_single_round(conn, row, args, st, lane_id,
+                                            get_client, _lane_dead):
+                    return
         finally:
             try:
                 conn.close()
@@ -647,45 +713,7 @@ def cmd_worker(args) -> int:
         for t in threads:
             t.join(timeout=240)  # 挂着的 LLM 调用留足收尾时间
 
-    try:
-        store.worker_leave(hb_conn, wid)  # 注销注册行，立即腾出拉起名额
-    except Exception:  # noqa: BLE001
-        pass
-    for c in clients.values():
-        try:
-            c.close()
-        except Exception:  # noqa: BLE001
-            pass
-    try:
-        hb_conn.close()
-    except Exception:  # noqa: BLE001
-        pass
-
-    stats = None
-    conn = store.connect()
-    try:
-        stats = store.queue_stats(conn)
-    finally:
-        conn.close()
-    processed = st.processed()
-    deaths, lane_errors = st.deaths()
-    payload = {
-        "ok": not deaths, "lanes": lanes, "processed": processed,
-        "succeeded": st.ok, "failed": st.failed, "queue": stats,
-    }
-    if deaths:
-        # 「全部 lane 死掉但退出码 0」是旧缺陷：这里显式标记并汇总可诊断信息
-        payload["lane_deaths"] = deaths
-        payload["lane_errors"] = lane_errors
-    if interrupted:
-        payload["interrupted"] = True
-    tail = f"，延迟重试 {stats['delayed']} 条" if stats.get("delayed") else ""
-    human = (f"worker 退出：{lanes} 线程，成功 {st.ok} / 失败 {st.failed} / "
-             f"剩余待处理 {stats['pending']}{tail}")
-    if deaths:
-        human += f"；{deaths} 条 lane 异常退出（详见 lane_errors 与 stderr）"
-    rc = ok(payload, args.json, human)
-    return rc if not deaths else EXIT_RUNTIME
+    return _worker_finish(args, lanes, wid, st, interrupted, clients, hb_conn)
 
 
 def cmd_queue(args) -> int:

@@ -187,6 +187,7 @@ def which() -> str | None:
 # 用户就得手工排雷。这里把「发现旧壳 → 改指当前安装」收进 install 流程。
 # ---------------------------------------------------------------------------
 
+
 _LAUNCHER_NAMES = ("hy-mem.cmd", "hy-mem")  # hy-mem.exe 是二进制，不在接管范围
 
 
@@ -286,6 +287,7 @@ def adopt_stale() -> tuple[list[Path], list[str]]:
 # 运行时探测：PATH 上若指向另一个带 config.json 的 hy-mem 安装根，就把配置
 # 复制过来、storage.dataDir 改指旧数据目录（**原位复用，不拷贝几百 MB 数据**）。
 # ---------------------------------------------------------------------------
+
 
 _LAUNCHER_NAMES_ALL = ("hy-mem.cmd", "hy-mem", "hy-mem.exe")
 

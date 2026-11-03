@@ -106,6 +106,8 @@ class McpClient:
 
 
 # 同主题、细节各异——落在 L6 的可用区：太散不成簇，太像会被判重合并。
+
+
 FACTS = [
     "hy-mem 的向量库用 Chroma 嵌入式，多进程必须由 serve 仲裁。",
     "hy-mem 的向量库 collection 按嵌入维度命名，当前是 agent_memories_1024。",

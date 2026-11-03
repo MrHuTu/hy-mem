@@ -16,6 +16,17 @@ from hymem.cmds.base import (  # noqa: F401
 
 def _cmd_search_scene(args, scene: str) -> int:
     """S2：生产力场景检索——facts/experiences 双路 + chain_block（S4 开关）。"""
+    # U4：lite / coding 关闭时 SDK 把 scene 检索降级成 chat 单路，
+    # facts/experiences 必为 0——明确失败，不返回"看起来成功的空结果"。
+    from hymem.core import config as _cfgsc
+
+    _ok_scene, _why = _cfgsc.scene_status(getattr(args, "mode", None))
+    if not _ok_scene:
+        return fail(
+            f"scene={scene} 当前配置不可用：{_why}；未执行检索",
+            hint="改用不带 --scene 的 chat 检索，或按提示修正配置后重试",
+            err_code="E_SCENE_UNAVAILABLE",
+        )
     ws = getattr(args, "workspace", None)
     branch = getattr(args, "branch", None)
     if branch and not ws:

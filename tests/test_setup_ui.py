@@ -67,6 +67,8 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 # ---------------------------------------------------------------------------
 # 假 OpenAI 兼容端点：每台只认自己的一套 key，别家 key 一律 401
 # ---------------------------------------------------------------------------
+
+
 EMB_KEY1 = "sk-emb-key-s1-111"   # 只被假端点1 接受
 EMB_ROT = "sk-emb-key-s1-rot9"   # S1 的轮换新 key（同端点升级场景用）
 EMB_KEY2 = "sk-emb-key-s2-222"   # 只被假端点2 接受 —— 跨端点必须换 key 的判据
@@ -129,6 +131,8 @@ def start_fake(emb_key: str, llm_key: str, tag: str) -> tuple[ThreadingHTTPServe
 # ---------------------------------------------------------------------------
 # 驱动器：真子进程跑 setup，管道喂键
 # ---------------------------------------------------------------------------
+
+
 def drive(step, keys, sandbox, env_extra=None, timeout=120):
     """跑 `hy-mem setup --step <step>`，返回 (退出码, 合并输出, 最终 config)。"""
     env = {
@@ -183,6 +187,8 @@ def mkcfg(sb: Path, emb_base: str, llm_base: str | None = None, mode: str = "lit
 # ---------------------------------------------------------------------------
 # 场景
 # ---------------------------------------------------------------------------
+
+
 def scenario_first_use(base: str) -> None:
     """A. 首次设置：config 不存在 → 走通整个管道（自定义 + 环境变量 key）。"""
     print("\nA. 首次设置（config 不存在）")
@@ -335,7 +341,7 @@ def scenario_settings_menu(base1: str) -> None:
     # 1(向量) → 回车(自定义) → baseUrl/模型回车 → 三选一回车(存文件) → 探针
     # → 覆盖(y) → 写入(y) → 回菜单 → 9(退出)
     # 菜单 2026-10-30 起多一行「沉淀模型」（插在 LLM 之后），退出从 8 变 9。
-    rc, out, cfg = drive("all", f"1\n\n\n\n\ny\ny\n9\n", sb,
+    rc, out, cfg = drive("all", "1\n\n\n\n\ny\ny\n9\n", sb,
                          {"MEMORY_EMBEDDER_API_KEY": EMB_KEY1})
     req = SEEN[m:]
     check("G1 设置菜单出现（每项带当前值）", "设置（选一项改一项" in out and "向量模型 · test-emb-1" in out, out[:400])
@@ -359,14 +365,12 @@ def scenario_pro_linkage(base: str) -> None:
         "embedding": {"preset": "custom", "provider": "openai", "baseUrl": base,
                       "model": "test-emb-1", "dims": 8, "apiKey": "sk-any", "keyEnv": ""},
     }, ensure_ascii=False), encoding="utf-8")
-    m = len(SEEN)
     # mode 选 2(pro) → 联动警告 → LLM:4(自定义) → baseUrl → 模型 → key 追问 → KEY2
     # → 三选一回车(存文件) → 探针 → 覆盖(y) → 写入(y)
     # 预填段 keyEnv=YSJX_API_KEY 且本机真实存在——沙箱必须清掉，否则
     # _pick_key 会判「LLM 已配好」跳过联动（G/H 语义测的是手配路径）
     rc, out, cfg = drive("mode", f"2\n4\n{base}\ntest-llm-1\n{LLM_KEY2}\n\ny\ny\n", sb,
                          {"MEMORY_LLM_API_KEY": LLM_KEY2, "YSJX_API_KEY": ""})
-    req = SEEN[m:]
     check("H1 选 pro 触发 LLM 联动引导", "需要 LLM 抽取事实" in out, out[-400:])
     check("H2 同流完成 LLM 配置并固化 key",
           cfg.get("llm", {}).get("model") == "test-llm-1"

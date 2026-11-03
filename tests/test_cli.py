@@ -139,7 +139,7 @@ def main() -> int:
     # ---- 5. 全局选项位置无关 ----
     print("\n全局选项位置无关")
     cfg = str((ROOT / "config.json").resolve())
-    p1 = run(["--json", "config", "path"])
+    run(["--json", "config", "path"])  # 基线：不带 --config 也能跑（结果不作断言）
     p2 = run(["--json", "config", "path", "--config", cfg])
     check("--config 放末尾不报错", p2.returncode == 0, p2.stderr.strip()[:80])
     check("--config 确实被采用", Path(p2.stdout.strip().strip('"')) == Path(cfg) or cfg in p2.stdout, p2.stdout.strip()[:80])
@@ -895,6 +895,244 @@ def main() -> int:
         import shutil as _shutil3
 
         _shutil3.rmtree(_sil_dir, ignore_errors=True)
+
+    # ---- L SDK 一致性：scene 能力声明 / chat 检索钉死（UPSTREAM-ISSUES U4/U5）----
+    print("\nL SDK 一致性：scene 能力 / chat 钉死")
+    import contextlib as _ctx
+    import io as _io
+
+    from hymem.mcp import server as _scmod
+
+    class _SceneCapClient:
+        """假 client：记录 add/search 调用，用于判断入口是否真的进了 SDK。"""
+
+        _mode = "pro"
+
+        def __init__(self) -> None:
+            self.adds: list = []
+            self.searches: list = []
+            self.add_scene: str | None = None  # 覆盖 SDK 回执 scene（模拟降级）
+
+        def close(self) -> None:
+            pass
+
+        def add(self, content, **kw):
+            self.adds.append((content, kw))
+            return {"success": True, "scene": self.add_scene or kw.get("scene") or "chat",
+                    "fact_ids": ["f1"], "experience_ids": []}
+
+        def search(self, query=None, **kw):
+            self.searches.append((query, kw))
+            return {"memories": {"normal": [
+                {"memory_id": "chat1", "content": "chat 命中", "score": 0.9}]}, "elapsed_ms": 1.0}
+
+    class _RouteClient(_SceneCapClient):
+        """假 client：按 scene 参数返回 chat 或生产力结构（模拟 SDK 三分类）。"""
+
+        def __init__(self, route: str) -> None:
+            super().__init__()
+            self.route = route
+
+        def search(self, query=None, **kw):
+            self.calls = self.searches
+            self.searches.append((query, kw))
+            if kw.get("scene") == "chat":
+                return {"memories": {"normal": [
+                    {"memory_id": "chat1", "content": "chat 库命中", "score": 0.9}]},
+                    "elapsed_ms": 1.0}
+            if self.route == "productivity":
+                return {"scene": "productivity", "facts": [{"fact": "f"}],
+                        "experiences": [], "elapsed_ms": 1.0}
+            return {"memories": {"normal": [
+                {"memory_id": "m1", "content": "chat ok", "score": 0.9}]}, "elapsed_ms": 1.0}
+
+    _sc_dir = Path(tempfile.mkdtemp(prefix="hymem-scencap-"))
+    (_sc_dir / "data").mkdir()
+    _sc_cfg = _sc_dir / "config.json"
+    _sc_env = {k: os.environ.get(k) for k in (
+        "HY_MEM_CONFIG", "MEMORY_DATA_DIR", "HY_MEM_DATA_DIR", "MEMORY_CODING_ENABLED")}
+    _sc_trace = [{"role": "assistant", "content": "改超时",
+                  "tool_calls": [{"id": "1", "type": "function",
+                                  "function": {"name": "edit", "arguments": "{}"}}]}]
+    _old_sc_client = _scmod._CLIENT
+    try:
+        os.environ["MEMORY_DATA_DIR"] = str(_sc_dir / "data")
+        os.environ["HY_MEM_CONFIG"] = str(_sc_cfg)
+        os.environ.pop("MEMORY_CODING_ENABLED", None)
+        _fake_cap = _SceneCapClient()
+        _scmod._CLIENT = _fake_cap
+
+        # L1/L2/L3：lite —— 能力声明为 false，add/search 必须明确失败且零写入
+        _sc_cfg.write_text(json.dumps({"mode": "lite"}), encoding="utf-8")
+        _ver = json.loads(_scmod._tool_get_version({}))
+        check("L1 lite 下 capabilities.scene=false",
+              _ver.get("capabilities", {}).get("scene") is False,
+              str(_ver.get("capabilities")))
+        _add = json.loads(_scmod._tool_add_memory(
+            {"scene": "working", "messages": _sc_trace}))
+        check("L2 lite 下 add scene=working 明确失败（非 ok=true 谎报）",
+              _add.get("ok") is False and _add.get("error") == "scene_unavailable",
+              str(_add)[:160])
+        check("L2b lite 下 add scene 零写入（未触达 SDK）", not _fake_cap.adds,
+              f"adds={len(_fake_cap.adds)}")
+        check("L2c 失败响应 applied_scene=null（不冒充已落库场景）",
+              _add.get("applied_scene") is None, str(_add.get("applied_scene")))
+        _srch = json.loads(_scmod._tool_search_memory({"query": "q", "scene": "coding"}))
+        check("L3 lite 下 search scene 明确失败（可解释）",
+              _srch.get("ok") is False and _srch.get("error") == "scene_unavailable",
+              str(_srch)[:160])
+
+        # L4：pro + MEMORY_CODING_ENABLED=false（SDK 生产力链路关闭）
+        os.environ["MEMORY_CODING_ENABLED"] = "false"
+        _sc_cfg.write_text(json.dumps({"mode": "pro"}), encoding="utf-8")
+        _ver2 = json.loads(_scmod._tool_get_version({}))
+        check("L4 coding 关闭时 capabilities.scene=false",
+              _ver2.get("capabilities", {}).get("scene") is False,
+              str(_ver2.get("capabilities")))
+        _add2 = json.loads(_scmod._tool_add_memory(
+            {"scene": "coding", "messages": _sc_trace}))
+        check("L4b coding 关闭时 add scene 明确失败且零写入",
+              _add2.get("ok") is False and _add2.get("error") == "scene_unavailable"
+              and not _fake_cap.adds, str(_add2)[:160])
+
+        # L5：pro + coding 默认开启 —— 行为不变
+        os.environ.pop("MEMORY_CODING_ENABLED", None)
+        _sc_cfg.write_text(json.dumps({"mode": "pro"}), encoding="utf-8")
+        _ver3 = json.loads(_scmod._tool_get_version({}))
+        check("L5 正常配置 capabilities.scene=true",
+              _ver3.get("capabilities", {}).get("scene") is True,
+              str(_ver3.get("capabilities")))
+        _add3 = json.loads(_scmod._tool_add_memory(
+            {"scene": "working", "messages": _sc_trace}))
+        check("L5b 正常配置 add scene 仍成功且真实进入 SDK",
+              _add3.get("ok") is True and _add3.get("mode") == "working"
+              and len(_fake_cap.adds) == 1
+              and _fake_cap.adds[0][1].get("scene") == "working",
+              f"ok={_add3.get('ok')} mode={_add3.get('mode')} adds={len(_fake_cap.adds)}")
+
+        # L10/L11：ISSUE-C —— scene schema 的 default/enum/描述要点
+        _toolsmap = {t["name"]: t for t in _scmod.TOOLS}
+        _sch_add = _toolsmap["add_memory"]["inputSchema"]["properties"]["scene"]
+        _sch_srch = _toolsmap["search_memory"]["inputSchema"]["properties"]["scene"]
+        check("L10 add scene schema 有 default=chat 且 enum 明确",
+              _sch_add.get("default") == "chat"
+              and _sch_add.get("enum") == ["chat", "working", "coding"],
+              f"default={_sch_add.get('default')} enum={_sch_add.get('enum')}")
+        _d10 = str(_sch_add.get("description") or "")
+        check("L10b add scene 描述含判定规则/错库后果/跨库/能力开关",
+              all(k in _d10 for k in ("diff", "coding", "working", "0 命中",
+                                      "跨库", "capabilities.scene")),
+              _d10)
+        check("L11 search scene schema 有 default=chat 且 enum 含 chat",
+              _sch_srch.get("default") == "chat"
+              and _sch_srch.get("enum") == ["chat", "working", "coding"],
+              f"default={_sch_srch.get('default')} enum={_sch_srch.get('enum')}")
+        _d11 = str(_sch_srch.get("description") or "")
+        check("L11b search scene 描述区分 working/coding 且写清错库后果",
+              all(k in _d11 for k in ("working", "coding", "空结果", "跨库",
+                                      "capabilities.scene")),
+              _d11)
+
+        # L12/L13：ISSUE-C —— add 回执给 request/stored 两值，降级要显式告警
+        check("L12 正常写入回执 requested_scene=stored_scene=working",
+              _add3.get("requested_scene") == "working"
+              and _add3.get("stored_scene") == "working"
+              and _add3.get("scene_degraded") is False,
+              f"req={_add3.get('requested_scene')} stored={_add3.get('stored_scene')} "
+              f"deg={_add3.get('scene_degraded')}")
+        _deg_client = _SceneCapClient()
+        _deg_client.add_scene = "chat"   # 模拟 SDK 把 working 降级写进 chat
+        _old_deg = _scmod._CLIENT
+        _scmod._CLIENT = _deg_client
+        try:
+            _add_deg = json.loads(_scmod._tool_add_memory(
+                {"scene": "working", "messages": _sc_trace}))
+        finally:
+            _scmod._CLIENT = _old_deg
+        check("L13 降级回执：stored_scene=chat / scene_degraded=true / 有 warning",
+              _add_deg.get("stored_scene") == "chat"
+              and _add_deg.get("scene_degraded") is True
+              and bool(_add_deg.get("warning"))
+              and "stored_scene" in str(_add_deg.get("note") or ""),
+              str(_add_deg)[:180])
+
+        # L14：ISSUE-C —— scene 检索回执区分 requested / resolved
+        _srch2 = json.loads(_scmod._tool_search_memory({"query": "q", "scene": "coding"}))
+        check("L14 scene 检索回执：scene_requested=scene_resolved=coding，旧 scene 保留",
+              _srch2.get("scene_requested") == "coding"
+              and _srch2.get("scene_resolved") == "coding"
+              and "scene" in _srch2,
+              f"req={_srch2.get('scene_requested')} res={_srch2.get('scene_resolved')} "
+              f"scene={_srch2.get('scene')}")
+
+        # L6/L7：ISSUE-B —— 三分类判 productivity 时必须钉回 chat 库
+        from hymem.core.searchops import searchcore as _searchcore
+
+        _fake_prod = _RouteClient("productivity")
+        _r1 = _searchcore(_fake_prod, None, queries=["a", "b"], search_mode="agentic")
+        check("L6 productivity 路由被钉回 chat 库（有命中，不再返回 0）",
+              [x.get("memory_id") for x in _r1["items"]] == ["chat1"],
+              str(_r1["items"])[:140])
+        check("L6b 只在误路由时重试一次，且重试用 scene=chat + 目标 query",
+              len(_fake_prod.searches) == 2
+              and _fake_prod.searches[0][1].get("scene") is None
+              and _fake_prod.searches[1][1].get("scene") == "chat"
+              and _fake_prod.searches[1][0] == "b",
+              str([(q, k.get("scene")) for q, k in _fake_prod.searches]))
+        _fake_chat = _RouteClient("chat")
+        _r2 = _searchcore(_fake_chat, None, queries=["a", "b"], search_mode="agentic")
+        check("L7 判 chat 时不重试，queries/agentic 能力原样保留",
+              len(_fake_chat.searches) == 1
+              and _fake_chat.searches[0][1].get("queries") == ["a", "b"]
+              and _fake_chat.searches[0][1].get("search_mode") == "agentic"
+              and [x.get("memory_id") for x in _r2["items"]] == ["m1"],
+              str([(q, sorted(k)) for q, k in _fake_chat.searches]))
+
+        # L8：MCP 入口同样受保护
+        _fake_mcp_prod = _RouteClient("productivity")
+        _old_cli = _scmod._CLIENT
+        _scmod._CLIENT = _fake_mcp_prod
+        try:
+            _mcp_s = json.loads(_scmod._tool_search_memory(
+                {"queries": ["a", "b"], "search_mode": "agentic"}))
+        finally:
+            _scmod._CLIENT = _old_cli
+        check("L8 MCP search 入口返回 chat 库命中",
+              [x.get("memory_id") for x in _mcp_s.get("hits") or []] == ["chat1"],
+              str(_mcp_s.get("hits"))[:140])
+
+        # L9：CLI 入口同样受保护
+        from hymem.cmds import read as _readmod2
+        from hymem.cmds.parser import build_parser as _build_parser2
+
+        _fake_cli_prod = _RouteClient("productivity")
+        _real_make2, _real_ready2 = _readmod2.make_client, _readmod2.require_ready
+        try:
+            _readmod2.make_client = lambda mode: _fake_cli_prod
+            _readmod2.require_ready = lambda *a, **k: None
+            _cli_args2 = _build_parser2().parse_args(
+                ["--json", "-u", "u1", "search", "--queries", "a,b",
+                 "--search-mode", "agentic"])
+            _buf2 = _io.StringIO()
+            with _ctx.redirect_stdout(_buf2):
+                _rc2 = _readmod2.cmd_search(_cli_args2)
+            _cli_obj2 = json.loads(_buf2.getvalue().strip() or "{}")
+        finally:
+            _readmod2.make_client, _readmod2.require_ready = _real_make2, _real_ready2
+        check("L9 CLI search 入口返回 chat 库命中",
+              [x.get("memory_id") for x in _cli_obj2.get("results") or []] == ["chat1"]
+              and _rc2 == 0,
+              f"rc={_rc2} results={str(_cli_obj2.get('results'))[:120]}")
+    finally:
+        _scmod._CLIENT = _old_sc_client
+        for _k, _v in _sc_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+        import shutil as _shutil4
+
+        _shutil4.rmtree(_sc_dir, ignore_errors=True)
 
     bad = results.count(False)
     print(f"\n{'全部通过' if bad == 0 else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")

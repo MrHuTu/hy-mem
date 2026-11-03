@@ -103,6 +103,7 @@ def make_client(mode: str | None):
 # 保留 SDK 的演化链/标签索引簿记），SDK 升级修复级联后本助手自动变空转。
 # ---------------------------------------------------------------------------
 
+
 def _vector_collection(client: object):
     """拿 SDK 内部 chroma collection；内部结构变化时返回 None（调用方降级）。"""
     vs = getattr(client, "_vector_store", None)

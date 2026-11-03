@@ -210,6 +210,8 @@ def _sha256(p: Path) -> str:
 # 行会在块边界被截断 —— 实测出现过「一行 rem 的后半截被当成命令执行」并打印
 # `'…窗口一闪而过）' is not recognized`。纯 ASCII 的批处理没有这个问题；
 # `type` 只把字节原样吐给控制台，不参与解析，因此中文安全。
+
+
 LAUNCHER_CMD = r"""@echo off
 chcp 65001 >nul 2>&1
 setlocal

@@ -39,6 +39,8 @@ def _tr(text: str) -> str:
 
 # 2 与 3 的分界线是「能不能靠改配置/换网络解决」：端点、密钥、维度、文件
 # 权限属于 2；TypeError/KeyError 这类只可能是程序自己写错了，属于 3。
+
+
 _RUNTIME_TYPES = {
     "RuntimeError", "ValueError", "OSError", "ConnectionError", "TimeoutError",
     "SSLError", "HTTPError", "URLError", "JSONDecodeError", "OperationalError",

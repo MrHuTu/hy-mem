@@ -34,6 +34,8 @@ def _worker_cap() -> int:
         return max(1, int(os.getenv("HY_MEM_MAX_WORKERS") or 3))
     except ValueError:
         return 3
+
+
 def _spawn_detached_worker(idle_exit: float = 90.0,
                            extra_args: list[str] | None = None) -> bool:
     """拉起一个脱管的后台消费 supervisor（空闲自退出），成功返回 True。
@@ -95,6 +97,8 @@ def _spawn_detached_worker(idle_exit: float = 90.0,
         return True
     except OSError:
         return False
+
+
 def _spawn_detached_serve(idle_exit: float = 1800.0) -> bool:
     """拉起 detached 的向量库服务（数据唯一所有者）。
 

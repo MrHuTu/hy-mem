@@ -128,6 +128,19 @@ def _close_client() -> None:
     _CLIENT = None
 
 
+def _scene_status() -> tuple[bool, str]:
+    """scene 在当前配置下是否真实可用（与 SDK 生效条件同口径）。
+
+    配置读坏时不误伤：返回可用，让 SDK 的真实行为决定结果。
+    """
+    try:
+        from hymem.core import config as cfgmod
+
+        return cfgmod.scene_status(_memory_mode())
+    except Exception:  # noqa: BLE001
+        return True, ""
+
+
 def _memory_mode() -> str:
     """当前记忆模式（lite/pro/ultra）。只读配置，不构造 client——要快。"""
     try:
@@ -168,6 +181,34 @@ def _parse_scene_scope(args: dict) -> tuple[str | None, str | None, str | None]:
     return scene, ws, branch
 
 
+def _scene_receipt(r: dict, requested: str) -> dict:
+    """U6：从 SDK 回执取真实落库场景，与请求值对比（可选字段，不改旧字段）。
+
+    SDK coding 回执形如 {"scene": "productivity", "variant": "working|coding"}，
+    chat 回执是 {"scene": "chat"}。因此以 variant 优先，其次认 chat/working/coding；
+    都没有（含 productivity 无 variant）时退回请求值，避免凭空猜测。
+    """
+    sdk_variant = str((r or {}).get("variant") or "").strip().lower()
+    sdk_scene = str((r or {}).get("scene") or "").strip().lower()
+    if sdk_variant in ("working", "coding"):
+        stored = sdk_variant
+    elif sdk_scene in ("chat", "working", "coding"):
+        stored = sdk_scene
+    else:
+        stored = requested
+    out = {
+        "requested_scene": requested,
+        "stored_scene": stored,
+        "scene_degraded": stored != requested,
+    }
+    if stored != requested:
+        out["warning"] = (
+            f"请求 scene={requested}，SDK 实际落库 {stored}（已降级）。"
+            f"以 stored_scene 为准：检索要用 scene={stored} 才找得到。"
+        )
+    return out
+
+
 def _add_productivity(args: dict, scene: str, ws: str | None, branch: str | None) -> str:
     """生产力场景写入：SDK client.add(messages, scene=...) 整段，同步落库。
 
@@ -177,6 +218,24 @@ def _add_productivity(args: dict, scene: str, ws: str | None, branch: str | None
     import os as _os
 
     from hymem.core import store
+
+    # U4：SDK 在 lite / coding 关闭时会把这行 scene 写入静默降级到 chat。
+    # 门口拦死（零写入），绝不返回 ok=true + mode=working 的假成功。
+    _ok_scene, _why = _scene_status()
+    if not _ok_scene:
+        return json.dumps(
+            {
+                "mode": scene,
+                "ok": False,
+                "error": "scene_unavailable",
+                "applied_scene": None,
+                "guidance": (
+                    f"{_why}；本条未写入（零写入）。要写记忆请省略 scene 走 chat（参数 text），"
+                    "或按提示修正配置后重试。"
+                ),
+            },
+            ensure_ascii=False,
+        )
 
     raw = args.get("messages")
     if raw is None:
@@ -256,6 +315,13 @@ def _add_productivity(args: dict, scene: str, ws: str | None, branch: str | None
             ensure_ascii=False,
             default=str,
         )
+    _receipt = _scene_receipt(r, scene)
+    _note = (
+        "生产力管线是同步写入（与 chat 的异步队列不同）：返回时已落库，"
+        f"可直接用 search_memory(query, scene={_receipt['stored_scene']}) 验证。"
+    )
+    if _receipt["scene_degraded"]:
+        _note += f"（mode 是请求值，真实落库为 {_receipt['stored_scene']}，以 stored_scene 为准）"
     return json.dumps(
         {
             "mode": scene,
@@ -266,10 +332,8 @@ def _add_productivity(args: dict, scene: str, ws: str | None, branch: str | None
             "chain_rounds": r.get("chain_rounds"),
             "workspace_id": ws,
             "branch": branch,
-            "note": (
-                "生产力管线是同步写入（与 chat 的异步队列不同）：返回时已落库，"
-                f"可直接用 search_memory(query, scene={scene}) 验证。"
-            ),
+            **_receipt,
+            "note": _note,
         },
         ensure_ascii=False,
         default=str,
@@ -579,6 +643,22 @@ def _tool_queue_status(args: dict) -> str:
 def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
                   inc: list[str] | None, exc: list[str] | None) -> str:
     """生产力场景检索：facts / experiences 分路返回（与 chat 单路 hit 列表不同）。"""
+    # U4：lite / coding 关闭时 SDK 会把 scene 检索降级成 chat 单路，
+    # 再按 facts/experiences 取值只会得到 0——明确失败比"看起来成功"诚实。
+    _ok_scene, _why = _scene_status()
+    if not _ok_scene:
+        return json.dumps(
+            {
+                "scene": scene,
+                "ok": False,
+                "error": "scene_unavailable",
+                "guidance": (
+                    f"{_why}；scene 检索未执行（零结果）。改用省略 scene 的 chat 检索，"
+                    "或按提示修正配置后重试。"
+                ),
+            },
+            ensure_ascii=False,
+        )
     query = str(args.get("query") or "").strip()
     if not query:
         raise ParamError("query 不能为空：检索必须提供查询词")
@@ -645,8 +725,13 @@ def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
                 os.environ["MEMORY_CODING_CHAIN_BLOCK_ENABLED"] = _prev_cb
     facts = r.get("facts") or []
     experiences = r.get("experiences") or []
+    _sdk_scene = str(r.get("scene") or "").strip().lower()
     out = {
+        # 旧字段保持原语义（SDK 回执值，可能是笼统的 productivity）
         "scene": r.get("scene") or scene,
+        # U6：请求值 / 真实库（working|coding），供智能体区分两个生产力库
+        "scene_requested": scene,
+        "scene_resolved": (_sdk_scene if _sdk_scene in ("working", "coding") else scene),
         "query": query,
         "count": len(facts) + len(experiences),
         "facts": facts,
@@ -1019,7 +1104,8 @@ def _tool_get_version(_args: dict) -> str:
         "capabilities": {
             "evolve": mem_mode == "ultra",
             "l6Search": mem_mode == "ultra",
-            "scene": mem_mode in ("pro", "ultra"),
+            # U4：不能只看 memoryMode——SDK 还要 mode != lite 且 coding 链路开启
+            "scene": _scene_status()[0],
         },
         "distMode": dist_mode,
         # 兼容旧调用方，语义仍是打包形态（已 deprecated，用 distMode）
@@ -1078,7 +1164,15 @@ TOOLS = [
                 "scene": {
                     "type": "string",
                     "enum": ["chat", "working", "coding"],
-                    "description": "省略=chat。working=生产力记忆，coding=编码记忆（带 diff 演进链）；两者同步写入，返回即已落库",
+                    "default": "chat",
+                    "description": (
+                        "省略或 chat=普通对话记忆（默认）。判定规则：内容含 diff/patch/源码改动 → coding；"
+                        "其它带工具轨迹的生产力操作 → working；纯文本 → 省略（走 chat）。"
+                        "注意：scene 传错不会报错，只会写进另一个库，导致对应检索 0 命中；"
+                        "working / coding / chat 三个库互不可见，跨库检索要分别调用。"
+                        "capabilities.scene=false（lite 模式或 MEMORY_CODING_ENABLED=false）时不要传 scene，"
+                        "会被明确拒绝（零写入）。working/coding 必须同时传 messages。"
+                    ),
                 },
                 "workspace_id": {"type": "string", "description": "仓库/项目隔离（建议 git remote URL）；仅 scene=working/coding"},
                 "branch": {"type": "string", "description": "分支隔离，必须同时传 workspace_id"},
@@ -1143,8 +1237,16 @@ TOOLS = [
                 "min_score": {"type": "number", "description": "相似度阈值，默认用配置值（0.35）"},
                 "scene": {
                     "type": "string",
-                    "enum": ["working", "coding"],
-                    "description": "搜生产力（working）或编码（coding）记忆，返回 facts/experiences 两路。省略=只搜 chat；跨库要搜两次",
+                    "enum": ["chat", "working", "coding"],
+                    "default": "chat",
+                    "description": (
+                        "省略或 chat=只搜 chat 记忆（默认）。working=生产力记忆库；coding=编码记忆库"
+                        "（带 diff 演进链，与 working 也不互见），两者返回 facts/experiences 两路。"
+                        "注意：scene 传错不会报错，只会搜到空结果，看起来像「库里没有」；"
+                        "chat / working / coding 互不可见，跨库检索要分别调用。"
+                        "capabilities.scene=false（lite 模式或 MEMORY_CODING_ENABLED=false）时不要传 "
+                        "working/coding，会被明确拒绝。"
+                    ),
                 },
                 "workspace_id": {"type": "string", "description": "按仓库/项目过滤（须与写入时一致）；仅 scene=working/coding"},
                 "branch": {"type": "string", "description": "按分支过滤（须与写入时一致），必须同时传 workspace_id"},
@@ -1306,6 +1408,8 @@ _HANDLERS = {
 # --------------------------------------------------------------------------
 # JSON-RPC 派发
 # --------------------------------------------------------------------------
+
+
 def _resp(id_, result) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "result": result}
 

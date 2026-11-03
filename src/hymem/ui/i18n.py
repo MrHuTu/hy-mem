@@ -97,6 +97,8 @@ def label(v: str | None = None) -> str:
 #   记忆=memory 检索=search 标签=tag 队列=queue 身份=identity
 #   向量模型=embedding model 写入=write 拆条=split 落库=persist
 #   阈值=threshold 设置=Settings 帮助=Help
+
+
 EN: dict[str, str] = {
     # ---- 全局 / 导航 ----
     "记忆库命令行": "memory CLI",

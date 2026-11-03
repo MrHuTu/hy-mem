@@ -75,7 +75,7 @@ def main() -> int:
     check("迁移幂等：二次 connect 不报错", True)
 
     # ---- 2. claim_next 原子性：两个连接抢同一行，只有一个领到 ----
-    jid = store.enqueue(conn, {"text": "job-A"}, max_attempts=3)
+    store.enqueue(conn, {"text": "job-A"}, max_attempts=3)
     other = store.connect()
     r1 = store.claim_next(conn, "w1")
     r2 = store.claim_next(other, "w2")
@@ -86,7 +86,7 @@ def main() -> int:
     other.close()
 
     # ---- 3. 退避曲线：mark_failed 写 not_before，claim 跳过未到期任务 ----
-    jid = store.enqueue(conn, {"text": "flaky"}, max_attempts=3)
+    store.enqueue(conn, {"text": "flaky"}, max_attempts=3)
     row = store.claim_next(conn, "w1")
     store.mark_failed(conn, row["id"], "boom", retry=True)
     j = conn.execute("SELECT * FROM jobs WHERE id=?", (row["id"],)).fetchone()
@@ -120,7 +120,7 @@ def main() -> int:
 
     # ---- 5. requeue_stale：running→pending 且清 not_before ----
     store.mark_done(conn, r4["id"], ["m2"])
-    jid = store.enqueue(conn, {"text": "stale-running"}, max_attempts=3)
+    store.enqueue(conn, {"text": "stale-running"}, max_attempts=3)
     row = store.claim_next(conn, "w1")
     conn.execute("UPDATE jobs SET not_before=?, started_at=? WHERE id=?",
                  (time.time() + 999, time.time() - 1000, row["id"]))

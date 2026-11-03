@@ -23,6 +23,18 @@ def _cmd_add_scene(args, scene: str) -> int:
     """
     import json as _json
 
+    # U4：lite / coding 关闭时 SDK 会把这次 scene 写入静默降级到 chat（零写 chat）。
+    # 门口拦死比"写了但进错库"诚实。
+    from hymem.core import config as _cfgsc
+
+    _ok_scene, _why = _cfgsc.scene_status(getattr(args, "mode", None))
+    if not _ok_scene:
+        return fail(
+            f"scene={scene} 当前配置不可用：{_why}；本条未写入",
+            hint="要写记忆请去掉 --scene 走 chat，或按提示修正配置后重试",
+            err_code="E_SCENE_UNAVAILABLE",
+        )
+
     trace_path = getattr(args, "trace", None)
     if not trace_path:
         return fail(

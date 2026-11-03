@@ -424,42 +424,12 @@ def commit_extracted_with_retry(
 # ---------------------------------------------------------------------------
 
 
-def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
-    """多条 job 的锁内合并提交：一次判定 LLM，逐 job 保 lineage。
+def _batch_dedup(writer, run, jobs: list[dict]) -> tuple[list[str], list[dict], dict[str, int], dict]:
+    """① 批级 dedup：跨 job 的重复 facts 收敛为一条（gmt 按序保首个）。
 
-    jobs：[{text, prepared, add_kw...}, ...]（同 user+agent 已由
-    claim_next_batch 保证；prepared 为 prepare_commit 的结果）。
-    调用方必须已持有 WriteLock。返回与 jobs 等长的 result dict 列表
-    （与 commit_extracted 同形态，另带 batch 字段）。
-
-    流水线（spec §1 批次流水线）：
-      ① 批级 dedup：合并各 job 的 facts 互相判重（_dedup_extracted
-         原生批量入口，内容唯一化；content→job 映射随之收紧）
-      ② 逐 job：L1 根 upsert（各自原文/向量，SDK 规范不变）
-      ③ 一次 _reconcile_and_store(全部 facts, source_raw_memory_id="")
-         —— 空 root：SDK 批量入口只收单一根 id，传任何一个 job 的根
-         都会把整批挂错；UPDATE 路径空串不写（writer.py:1417 守卫），
-         历史挂链零扰动
-      ④ lineage 修复：按 content→job 精确映射（对齐 SDK
-         _inherit_exact_input_structure 的 no-fuzzy 原则），
-         update_payload 逐 ADD 节点回填正确的 source_raw_memory_id
-      ⑤ 逐 job：basic_info（各判各的）、L1→SHADOW、结果 dict
-
-    失败语义：reconcile 整批失败抛 CommitFailed（调用方对批内全部
-    mark_failed）；lineage 修复段失败不判失败——L2 已正确落库可检索，
-    note 落 batch 结果（lineage_partial），诚实降级不假绿（P4/P6）。
+    返回 (all_texts, all_metas, job_of_text, precomputed)；dedup 失败 non-fatal，
+    未去重的原样进判定（与 batch_commit 文档一致）。
     """
-    from hy_memory.models.memory import MemoryLayer, MemoryStatus
-    from hy_memory.pipelines import writer as writer_mod
-
-    writer = _writer_of(client)
-    run = lambda coro: _run(client, coro)  # noqa: E731
-    vs = run(writer._get_vector_store())
-    if not jobs:
-        return []
-    t0 = time.monotonic()
-
-    # ① 批级 dedup（跨 job 的重复 facts 收敛为一条；gmt 按序保首个）
     all_texts: list[str] = []
     all_metas: list[dict] = []
     job_of_text: dict[str, int] = {}   # content → job 下标（精确映射）
@@ -487,9 +457,18 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
             job_of_text = {t: job_of_text[t] for t in all_texts if t in job_of_text}
         except Exception:  # noqa: BLE001  dedup 失败 non-fatal，未去重直接进判定
             pass
+    return all_texts, all_metas, job_of_text, precomputed
 
-    # ② 逐 job L1 存档（各自原文/向量；SDK 规范：原始内容始终存 L1_RAW）
-    from hy_memory.models.memory import MemoryNode, SourceType
+
+def _batch_l1_archive(writer, run, vs, jobs: list[dict]) -> tuple[list[str], list]:
+    """② 逐 job L1 存档（各自原文/向量；SDK 规范：原始内容始终存 L1_RAW）。"""
+    from hy_memory.models.memory import (
+        MemoryLayer,
+        MemoryNode,
+        MemoryStatus,
+        SourceType,
+    )
+
     l1_ids: list[str] = []
     l1_nodes: list = []
     for j in jobs:
@@ -511,8 +490,18 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
         )
         l1_ids.append(run(vs.upsert(node)))
         l1_nodes.append(node)
+    return l1_ids, l1_nodes
 
-    # ③ 一次判定（空 root；RECONCILE_ENABLED=false 走 _direct_store 同样空 root）
+
+def _batch_reconcile(writer, run, vs, jobs: list[dict], all_texts: list[str],
+                     all_metas: list[dict], precomputed: dict,
+                     l1_ids: list[str]) -> tuple[list[str], dict, dict]:
+    """③ 一次判定（空 root；RECONCILE_ENABLED=false 走 _direct_store 同样空 root）。
+
+    返回 (stored_ids, ops_counts, recon_tokens)；reconcile 整体失败抛 CommitFailed。
+    """
+    from hy_memory.pipelines import writer as writer_mod
+
     stored_ids: list[str] = []
     recon_error = None
     ops_counts: dict = {}
@@ -528,7 +517,7 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
                     request=base_wr,
                     vector_store=vs,
                     req_id=req_id,
-                    source_raw_memory_id="",   # 空 root：见 docstring ③
+                    source_raw_memory_id="",   # 空 root：见 batch_commit docstring ③
                     precomputed_embeddings=precomputed,
                 )
             )
@@ -548,8 +537,15 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
                 f"RECONCILE_FAILED(batch): {recon_error}; "
                 f"l1_memory_ids={','.join(l1_ids)}"
             )
+    return stored_ids, ops_counts, recon_tokens
 
-    # ④ lineage 修复：ADD 节点按 content→job 精确回填正确的根
+
+def _batch_lineage_fix(run, vs, stored_ids: list[str], job_of_text: dict[str, int],
+                       l1_ids: list[str]) -> tuple[dict, str]:
+    """④ lineage 修复：ADD 节点按 content→job 精确回填正确的根。
+
+    返回 (id_to_node, lineage_note)；修复段失败不判失败（诚实降级，见文档）。
+    """
     lineage_note = ""
     id_to_node: dict = {}
     if stored_ids:
@@ -569,6 +565,58 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
                 lineage_note = f"lineage_partial: {fixed} 已回填，{e}"
         if fixed < len(stored_ids) and not lineage_note:
             lineage_note = f"lineage_partial: {fixed}/{len(stored_ids)} 映射命中"
+    return id_to_node, lineage_note
+
+
+def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
+    """多条 job 的锁内合并提交：一次判定 LLM，逐 job 保 lineage。
+
+    jobs：[{text, prepared, add_kw...}, ...]（同 user+agent 已由
+    claim_next_batch 保证；prepared 为 prepare_commit 的结果）。
+    调用方必须已持有 WriteLock。返回与 jobs 等长的 result dict 列表
+    （与 commit_extracted 同形态，另带 batch 字段）。
+
+    流水线（spec §1 批次流水线）：
+      ① 批级 dedup：合并各 job 的 facts 互相判重（_dedup_extracted
+         原生批量入口，内容唯一化；content→job 映射随之收紧）
+      ② 逐 job：L1 根 upsert（各自原文/向量，SDK 规范不变）
+      ③ 一次 _reconcile_and_store(全部 facts, source_raw_memory_id="")
+         —— 空 root：SDK 批量入口只收单一根 id，传任何一个 job 的根
+         都会把整批挂错；UPDATE 路径空串不写（writer.py:1417 守卫），
+         历史挂链零扰动
+      ④ lineage 修复：按 content→job 精确映射（对齐 SDK
+         _inherit_exact_input_structure 的 no-fuzzy 原则），
+         update_payload 逐 ADD 节点回填正确的 source_raw_memory_id
+      ⑤ 逐 job：basic_info（各判各的）、L1→SHADOW、结果 dict
+
+    失败语义：reconcile 整批失败抛 CommitFailed（调用方对批内全部
+    mark_failed）；lineage 修复段失败不判失败——L2 已正确落库可检索，
+    note 落 batch 结果（lineage_partial），诚实降级不假绿（P4/P6）。
+    """
+    from hy_memory.models.memory import MemoryStatus
+
+    writer = _writer_of(client)
+    run = lambda coro: _run(client, coro)  # noqa: E731
+    vs = run(writer._get_vector_store())
+    if not jobs:
+        return []
+    t0 = time.monotonic()
+
+    # ① 批级 dedup（跨 job 的重复 facts 收敛为一条；gmt 按序保首个）
+    all_texts, all_metas, job_of_text, precomputed = _batch_dedup(writer, run, jobs)
+
+    # ② 逐 job L1 存档（各自原文/向量；SDK 规范：原始内容始终存 L1_RAW）
+    l1_ids, l1_nodes = _batch_l1_archive(writer, run, vs, jobs)
+
+    # ③ 一次判定（空 root；RECONCILE_ENABLED=false 走 _direct_store 同样空 root）
+    stored_ids, ops_counts, recon_tokens = _batch_reconcile(
+        writer, run, vs, jobs, all_texts, all_metas, precomputed, l1_ids
+    )
+
+    # ④ lineage 修复：ADD 节点按 content→job 精确回填正确的根
+    id_to_node, lineage_note = _batch_lineage_fix(
+        run, vs, stored_ids, job_of_text, l1_ids
+    )
 
     # ⑤ 逐 job 结果（L1→SHADOW、basic_info、shadow_only 判定）
     # 批处理是「一次判定 + 一次 reconcile」，批次内的 job 共享同一段锁内

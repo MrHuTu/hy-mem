@@ -55,6 +55,8 @@ def config_path() -> Path:
 # --------------------------------------------------------------------------
 # 默认值
 # --------------------------------------------------------------------------
+
+
 DEFAULTS: dict[str, Any] = {
     "version": CONFIG_VERSION,
     "setupComplete": False,
@@ -182,6 +184,8 @@ def exists() -> bool:
 # 最近一次 load_raw 的失败信息。损坏的 config.json 会被隔离成 .bad-<ts>，
 # 真正隔离不了时（权限/只读卷）由 config set 拒绝覆盖——绝不能让默认值
 # 静默盖掉用户原来的密钥配置。
+
+
 _last_load_error: dict[str, Any] | None = None
 
 
@@ -439,6 +443,8 @@ def _tighten(p: Path) -> None:
 # --------------------------------------------------------------------------
 # 映射到环境变量
 # --------------------------------------------------------------------------
+
+
 def resolve_llm_key(cfg: dict) -> str:
     """LLM 密钥：配置里的明文 > keyEnv 指定的环境变量。"""
     llm = cfg.get("llm") or {}
@@ -471,6 +477,8 @@ def resolve_embed_key(cfg: dict) -> str:
 
 
 # 从聊天窗口/文档粘密钥时最容易带进来的不可见字符
+
+
 _INVISIBLE = {
     "\ufeff": "BOM 标记",
     "\u200b": "零宽空格",
@@ -563,6 +571,8 @@ def apply_env(cfg: dict) -> None:
 # --------------------------------------------------------------------------
 # 校验
 # --------------------------------------------------------------------------
+
+
 def _as_int(value: Any) -> tuple[int | None, str | None]:
     """安全转 int：返回 (值, 错误说明)。None/空串表示「未设置」，不算错误。"""
     if value is None or (isinstance(value, str) and not value.strip()):
@@ -750,3 +760,31 @@ def probe_dim_change(old_cfg: dict, new_cfg: dict) -> tuple[bool, str]:
         f"模型 {oe.get('model')} → {ne.get('model')}（维度同为 {ne.get('dims')}）："
         f"维度兼容但语义空间不同，混用会导致检索失真，建议重建"
     )
+
+
+def coding_enabled() -> bool:
+    """SDK 生产力链路（coding/enable）是否开启——与 `CodingConfig.enable` 同口径。
+
+    SDK 只从环境变量 `MEMORY_CODING_ENABLED` 读该开关（默认 True，
+    见 vendor/hy-memory/hy_memory/config.py）；config.json 的 `coding` 段只有
+    `chainRepo`，不承载 enable，因此这里也必须以 env 为唯一事实源。
+    """
+    v = os.getenv("MEMORY_CODING_ENABLED")
+    if v is None:
+        return True
+    return v.lower() in ("true", "1", "yes", "on")
+
+
+def scene_status(mode: str | None = None) -> tuple[bool, str]:
+    """scene（working/coding）在当前配置下是否真实可用；返回 (可用, 原因)。
+
+    与 SDK 的生效条件对齐（vendor client.py 的 add/search scene 分支）：
+    `mode != lite` 且 coding 链路开启。lite 只做 chat 原始向量检索，
+    显式 scene 会被 SDK 静默降级——能力声明与入口都必须按这个真实条件判断。
+    """
+    m = str(mode or (load().get("mode") or "pro"))
+    if m == "lite":
+        return False, "lite 模式只做 chat 原始向量检索（SDK 会忽略 scene 管线）"
+    if not coding_enabled():
+        return False, "MEMORY_CODING_ENABLED=false：SDK 生产力链路已关闭"
+    return True, ""

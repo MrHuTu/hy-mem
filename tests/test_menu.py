@@ -33,8 +33,7 @@ os.environ["HY_MEM_TUI"] = "0"          # 强制走行输入（非按键交互�
 os.environ.pop("HY_MEM_LANG", None)
 os.environ.pop("HY_MEM_USER_ID", None)
 
-from hymem.ui import tui  # noqa: E402
-from hymem.ui import menu  # noqa: E402
+from hymem.ui import menu  # noqa: E402  （tui 随 menu 一并加载）
 
 results: list[bool] = []
 
@@ -47,6 +46,8 @@ def check(name: str, passed: bool, detail: str = "") -> None:
 # --------------------------------------------------------------------------
 # 假 dispatch：按子命令返回固定 JSON，绝不碰真库
 # --------------------------------------------------------------------------
+
+
 CALLS: list[tuple[list[str], str | None]] = []
 
 
@@ -114,6 +115,8 @@ def run_cmd(line: str, *, stdin: str = "", dispatch=None) -> tuple[int, str, lis
 # --------------------------------------------------------------------------
 # 1. 注册表
 # --------------------------------------------------------------------------
+
+
 def case_registry() -> None:
     print("\n注册表：命令 / 别名 / 用法")
     names = [c.name for c in menu.COMMANDS]
@@ -164,6 +167,8 @@ def case_registry() -> None:
 # --------------------------------------------------------------------------
 # 2. 切词与旗标
 # --------------------------------------------------------------------------
+
+
 def case_parse() -> None:
     print("\n切词与旗标")
     check("普通空格切词", menu.split_args("search 部署 流程") == ["search", "部署", "流程"])
@@ -191,6 +196,8 @@ def case_parse() -> None:
 # --------------------------------------------------------------------------
 # 3. 补全
 # --------------------------------------------------------------------------
+
+
 def case_complete() -> None:
     print("\nTab 补全")
     sh = menu.Shell(make_dispatch())
@@ -210,6 +217,8 @@ def case_complete() -> None:
 # --------------------------------------------------------------------------
 # 4. 逐命令执行
 # --------------------------------------------------------------------------
+
+
 def case_commands() -> None:
     print("\n逐命令执行（假 dispatch，不碰真库）")
 
@@ -402,6 +411,8 @@ def case_unknown() -> None:
 # --------------------------------------------------------------------------
 # 5. 真 run_menu：循环 / 历史 / 退出
 # --------------------------------------------------------------------------
+
+
 def case_loop() -> None:
     print("\n真控制台循环（管道输入）")
     script = (

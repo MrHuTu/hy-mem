@@ -158,6 +158,8 @@ def _flatten_search(resp: dict) -> list:
 #   2. `_l6_schema_stats` 空结果时 `get_all_nodes(limit=1000)` 全量拉取：
 #      改为短 TTL 缓存，避免「空结果 = 最慢路径」在 MCP 长驻进程里反复放大。
 # 缓存只影响「省一次调用」，不参与打分/排序，命中与否都不改变检索结果。
+
+
 _L6_STATS_TTL = 10.0   # 秒；schema 统计变化不频繁，短 TTL 足够挡住连续检索
 _L6_VEC_TTL = 300.0    # 秒；query→向量只与模型/文本有关，可以缓存更久
 _L6_VEC_MAX = 64       # 单进程最多缓存多少个 query 向量（防长驻进程无界增长）
@@ -406,6 +408,8 @@ def _pending_jobs() -> int:
             conn.close()
     except Exception:  # noqa: BLE001
         return 0
+
+
 def fill_chain_block(client, resp: dict, query: str, *, user_id: str,
                      workspace_id: str | None) -> dict:
     """补齐 scene=coding 检索的 diff 链块（SDK 在 workspace 作用域下会滤空）。
@@ -460,6 +464,8 @@ def _embedding_unhealthy() -> str:
         return "" if good else msg
     except Exception as e:  # noqa: BLE001
         return f"{type(e).__name__}: {e}"
+
+
 def _bind_tags(ids: list[str], tags: list[str], source: str = "user") -> int:
     if not ids or not tags:
         return 0
@@ -569,6 +575,28 @@ def _filter_by_tags(items: list[dict], tags: list[str] | None, tag_mode: str = "
     return out
 
 
+def _routed_productivity(resp: dict) -> bool:
+    """SDK 未显式 scene 时按 queries/agentic 做 LLM 三分类，可能判到生产力库。"""
+    return str((resp or {}).get("scene") or "").strip().lower() == "productivity"
+
+
+def _chat_pinned_search(client, query: str | None, kw: dict,
+                        queries: list[str] | None) -> dict:
+    """U5：chat 检索只认 chat 库——误路由后以 `scene="chat"` 重取一次。
+
+    未显式 scene 时 SDK 会 LLM 三分类；判为 working/coding 就返回
+    facts/experiences，而 CLI/MCP 拍平只认 memories → "库里有、返回 0"。
+    这里钉死 chat 库重取，目标 query 与 SDK 自身口径一致（queries 取最后一路）。
+    正常判 chat 的路径不会走到这里，因此 queries 改写与 agentic 能力不受影响；
+    仅这次本来就该被误路由时，丢失该次 rewrite（原响应不含改写文本）。
+    """
+    retry_kw = dict(kw)
+    retry_kw.pop("queries", None)   # SDK：query 与 queries 互斥，同时传会 ValueError
+    retry_kw["scene"] = "chat"
+    target = query or (list(queries)[-1] if queries else "")
+    return client.search(target, **retry_kw)
+
+
 def searchcore(
     client,
     query: str | None,
@@ -632,6 +660,8 @@ def searchcore(
         kw.update(ident)
 
     resp = client.search(query, **kw)
+    if _routed_productivity(resp):
+        resp = _chat_pinned_search(client, query, kw, queries)
     items = _flatten_search(resp)
     probe_error = ""
     if not items and not tags and probe_empty:

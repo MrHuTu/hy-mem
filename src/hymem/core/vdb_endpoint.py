@@ -59,6 +59,7 @@ class EndpointUnavailable(RuntimeError):
 
 # ---------------------------------------------------------------- 端口文件
 
+
 def port_file() -> Path:
     """server.port 的位置：与队列库同级（MEMORY_DATA_DIR）。"""
     return store.data_dir() / PORT_FILE_NAME
@@ -192,6 +193,7 @@ def remove_port_file(expect_pid: int | None = None) -> bool:
 
 # ---------------------------------------------------------------- 心跳
 
+
 def heartbeat_ok(port: int, timeout: float = 1.0) -> bool:
     """chroma /api/v2/heartbeat 探活。走 netprobe（出站唯一出口）且
     direct=True——本机回环绝不能被系统/环境代理劫持；也不用 chromadb：
@@ -203,6 +205,7 @@ def heartbeat_ok(port: int, timeout: float = 1.0) -> bool:
 
 
 # ---------------------------------------------------------------- serve 侧
+
 
 def sdk_persist_dir() -> Path:
     """与 hy_memory.config 的向量库目录解析保持一字不差：
@@ -378,6 +381,7 @@ def stop_server_thread(handle: Any, port: int, join_s: float = 5.0) -> None:
 
 
 # ---------------------------------------------------------------- 客户端侧
+
 
 def _inject_env(port: int) -> int:
     """注入端点 env 并打来源标记（复验依据，见模块 docstring 第 2 条）。"""
