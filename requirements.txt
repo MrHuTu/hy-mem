@@ -34,7 +34,7 @@ httptools==0.9.0
 httpx==0.28.1
 httpx2==2.16.0
 huggingface_hub==1.33.0
-hy-memory==2.0.12
+hy-memory==2.0.13
 idna==3.20
 importlib_resources==7.1.0
 jieba==0.42.1
