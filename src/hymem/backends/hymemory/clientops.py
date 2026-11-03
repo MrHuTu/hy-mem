@@ -8,7 +8,7 @@ S3-1（2026-10-29）：本模块从入口 cli.py 平移而来（纯搬家，逻�
 from __future__ import annotations
 
 import os
-from hymem.core import config as cfgmod
+
 from hymem.core import vdb_endpoint
 
 
@@ -148,6 +148,41 @@ def sweep_derived_nodes(client: object, root_id: str) -> tuple[list[str], str]:
         except Exception:  # noqa: BLE001
             pass
     return purged, ""
+
+
+def delete_memory_with_cascade(client: object, memory_id: str) -> dict:
+    """删除一条记忆并级联清扫派生节点（CLI / MCP 共用）。
+
+    返回 SDK 原始结果 + derived_purged（已清扫的派生 id）+ cascade_note
+    （非空表示无法确认是否残留，调用方必须透传）。写锁在这里统一持有，
+    避免 CLI 与 MCP 各自实现时锁范围分叉。
+    """
+    from hymem.core import store
+
+    with store.WriteLock():
+        r = dict(client.delete(memory_id) or {})
+        purged: list[str] = []
+        cascade_note = ""
+        if r.get("success"):
+            purged, cascade_note = sweep_derived_nodes(client, memory_id)
+    r["derived_purged"] = purged
+    if cascade_note:
+        r["cascade_note"] = cascade_note
+    return r
+
+
+def update_memory(client: object, memory_id: str, content: str) -> dict | None:
+    """更新一条记忆的内容；不存在返回 None（调用方给「未找到」）。
+
+    成功与否仍由调用方校验 result["success"]（SDK 可能返回 success=False
+    但 HTTP 层没抛异常）；写锁在这里统一持有，CLI / MCP 不再各写一份。
+    """
+    from hymem.core import store
+
+    if client.get(memory_id) is None:
+        return None
+    with store.WriteLock():
+        return client.update(memory_id, content)
 
 
 def is_transient_db_error(e: BaseException) -> bool:

@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 
-from hymem.core import install_ops
 from hymem.core import store
 
 

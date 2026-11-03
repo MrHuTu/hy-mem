@@ -122,9 +122,14 @@ def check_target(path: str, need_bytes: int = 0) -> tuple[bool, str]:
     return True, "可用"
 
 
-def _copy_tree(src: Path, dst: Path) -> int:
-    """逐文件复制，跳过锁文件。返回复制的文件数。"""
+def _copy_tree(src: Path, dst: Path) -> tuple[int, list[str]]:
+    """逐文件复制，跳过锁文件。返回 (复制的文件数, 失败文件列表)。
+
+    单个文件失败不立即中断（尽量抢救数据），但失败必须回传给 migrate：
+    「复制了 1/100 个文件」不能算迁移成功，否则调用方会切到残缺目录。
+    """
     n = 0
+    failed: list[str] = []
     for root, _dirs, names in os.walk(src):
         rel = Path(root).relative_to(src)
         target_dir = dst / rel
@@ -136,10 +141,10 @@ def _copy_tree(src: Path, dst: Path) -> int:
             try:
                 shutil.copy2(s, target_dir / name)
                 n += 1
-            except Exception:  # noqa: BLE001
-                # 单个文件失败不该中断整次迁移：chroma 的 sqlite 有时被占用
-                continue
-    return n
+            except Exception as e:  # noqa: BLE001
+                # chroma 的 sqlite 有时被占用；记录失败文件，由 migrate 汇总阻断。
+                failed.append(f"{rel / name}（{type(e).__name__}: {e}）")
+    return n, failed
 
 
 def migrate(src: str, dst: str) -> tuple[bool, str]:
@@ -154,9 +159,16 @@ def migrate(src: str, dst: str) -> tuple[bool, str]:
     if not ok:
         return False, msg
     try:
-        n = _copy_tree(s, d)
+        n, failed = _copy_tree(s, d)
     except Exception as e:  # noqa: BLE001
         return False, f"复制失败：{type(e).__name__}: {e}"
+    if failed:
+        shown = "；".join(failed[:5])
+        more = f" 等共 {len(failed)} 个" if len(failed) > 5 else ""
+        return False, (
+            f"迁移未完成：{len(failed)} 个文件复制失败（{shown}{more}）；"
+            f"已复制 {n}/{files}，源目录保留：{src}"
+        )
     if n == 0:
         return False, "没有复制到任何文件（源目录可能被占用）"
     return True, f"已复制 {n}/{files} 个文件（{human_size(size)}），源目录保留：{src}"
@@ -179,8 +191,14 @@ def backup(path: str) -> tuple[bool, str]:
 
 def wipe(path: str) -> tuple[bool, str]:
     """先备份再清空内容（保留目录本身）。维度不兼容时用。"""
-    ok, msg = backup(path)
     p = Path(path)
+    if p.exists():
+        ok, msg = backup(path)
+        if not ok:
+            # 备份失败必须阻断：清空是不可逆操作，不能只剩一句提示还继续删。
+            return False, f"已中止清空：{msg}"
+    else:
+        ok, msg = True, "目录不存在，已创建"
     try:
         if p.exists():
             for item in p.iterdir():
@@ -194,4 +212,4 @@ def wipe(path: str) -> tuple[bool, str]:
         p.mkdir(parents=True, exist_ok=True)
     except Exception as e:  # noqa: BLE001
         return False, f"清空失败：{type(e).__name__}: {e}"
-    return True, (msg if ok else "（旧数据未能备份，已直接清空）")
+    return True, msg

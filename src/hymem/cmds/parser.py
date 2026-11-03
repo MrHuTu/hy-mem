@@ -5,11 +5,9 @@ S2 拆分（docs/specs/2026-11-02-cli-split-ports/）：本模块从 hymem/cli.p
 """
 from __future__ import annotations
 
-import sys
-
 from hymem.cmds.base import (  # noqa: F401
-    EXIT_OK, EXIT_USAGE, _FIELDS, _project, argparse,
-    c, fail, json, sys,
+    EXIT_OK, EXIT_USAGE, _project, argparse,
+    fail, json, sys,
 )
 from hymem.cmds import base as _base  # 全局状态经 _base 读写
 from hymem.cmds.write import (  # noqa: F401

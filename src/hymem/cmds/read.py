@@ -5,16 +5,13 @@ S2 拆分（docs/specs/2026-11-02-cli-split-ports/）：本模块从 hymem/cli.p
 """
 from __future__ import annotations
 
-import sys
-
 from hymem.cmds.base import (  # noqa: F401
-    EXIT_OK, EXIT_RUNTIME, EXIT_USAGE, _embedding_unhealthy, _filter_by_tags,
-    _flatten_search, _in_range, _item_ts, _parse_when, _pending_jobs,
+    EXIT_OK, EXIT_RUNTIME, EXIT_USAGE, _filter_by_tags,
+    _parse_when, _pending_jobs,
     _remember_auto, c, config_defaults_user, fail, identity,
     identity_lists, json, make_client, ok, os,
     require_ready, sys,
 )
-from hymem.cmds import base as _base  # 全局状态经 _base 读写
 
 
 def _cmd_search_scene(args, scene: str) -> int:
@@ -24,31 +21,37 @@ def _cmd_search_scene(args, scene: str) -> int:
     if branch and not ws:
         return fail("--branch 需要同时传 --workspace", EXIT_USAGE)
     chain_block = bool(getattr(args, "chain_block", False))
+    _prev_cb = os.environ.get("MEMORY_CODING_CHAIN_BLOCK_ENABLED")
     if chain_block:
+        # client 必须在开关设好之后构造（SDK 在初始化时读 env）——用完必须还原，
+        # 否则一次 --chain-block 会污染同进程后续所有检索（多烧 token 且结果变样）。
         os.environ["MEMORY_CODING_CHAIN_BLOCK_ENABLED"] = "true"
-    client = make_client(args.mode)
     try:
-        r = client.search(
-            args.query,
-            scene=scene,
-            workspace_id=ws or None,
-            branch=branch or None,
-            limit=args.limit,
-            user_ids=[identity(args).get("user_id") or config_defaults_user()],
-            **({"include_sources": [args.source_filter]} if getattr(args, "source_filter", None) else {}),
-        )
-    except Exception as e:  # noqa: BLE001
-        return fail(f"scene 检索失败：{type(e).__name__}: {e}")
-    if chain_block:
-        # SDK 在带 workspace_id 时会把链全滤掉（上游 _in_scope 拿仓名比文件相对
-        # 路径），这里用同一份链库兜底补块；无 workspace 时 SDK 自己就出了块。
-        from hymem.core.searchops import fill_chain_block
+        client = make_client(args.mode)
+        try:
+            from hymem.core.searchops import scenecore
 
-        r = fill_chain_block(
-            client, r, args.query,
-            user_id=identity(args).get("user_id") or config_defaults_user(),
-            workspace_id=ws,
-        )
+            uid = identity(args).get("user_id") or config_defaults_user()
+            r = scenecore(
+                client,
+                args.query,
+                scene=scene,
+                workspace_id=ws or None,
+                branch=branch or None,
+                limit=args.limit,
+                user_ids=[uid],
+                source_filter=getattr(args, "source_filter", None),
+                chain_block=chain_block,
+                chain_user_id=uid,
+            )
+        except Exception as e:  # noqa: BLE001
+            return fail(f"scene 检索失败：{type(e).__name__}: {e}")
+    finally:
+        if chain_block:
+            if _prev_cb is None:
+                os.environ.pop("MEMORY_CODING_CHAIN_BLOCK_ENABLED", None)
+            else:
+                os.environ["MEMORY_CODING_CHAIN_BLOCK_ENABLED"] = _prev_cb
     facts = r.get("facts") or []
     experiences = r.get("experiences") or []
     payload = {
@@ -187,7 +190,6 @@ def cmd_search(args) -> int:
             until = _parse_when(getattr(args, "until", None))
         except ValueError as e:
             return fail(str(e), EXIT_USAGE)  # 坏时间格式是用法错，exit 1
-        kw = {"created_after": since} if since is not None else {}
 
         # S3：L6 由我们自己跑正路。给 SDK 传 schema_limit=0 把它的「正路语义 +
         # 反路证据反查」一起关掉——反路不看 query，且注入时 score 被 RRF 融合分
@@ -203,54 +205,52 @@ def cmd_search(args) -> int:
         )
         schema_min = float(_ev.get("schemaMinScore") or 0.25)
 
-        r = client.search(
+        from hymem.core.searchops import searchcore
+
+        uid = identity(args).get("user_id") or config_defaults_user()
+        res = searchcore(
+            client,
             primary,
-            **({"queries": queries} if queries else {}),
+            queries=queries or None,
             search_mode=getattr(args, "search_mode", None) or "default",
             rerank=bool(getattr(args, "rerank", True)),
-            limit=fetch_limit,
+            fetch_limit=fetch_limit,
+            offset=0,
+            limit=args.limit,
             min_score=min_score,
-            schema_limit=0,
-            **kw,
-            **identity_lists(args),
+            since=since,
+            until=until,
+            ident=identity_lists(args),
+            tags=want_tags,
+            tag_mode=getattr(args, "tag_mode", "all"),
+            schema=want_schema,
+            schema_query=primary,
+            schema_limit=schema_limit,
+            schema_min=schema_min,
+            schema_user_id=uid,
+            remember_auto=True,
+            probe_empty=True,
+            pending_always=False,
         )
-        items = _flatten_search(r)
-        # schema 单独取、单独给，绝不混进 items：混进去就会在 normal 命中不足
-        # limit 时补位冒充搜索结果，agent 会拿一条无关归纳当事实用。
-        schemas: list[dict] = []
-        schema_state = "off"
-        if want_schema:
-            uid = identity(args).get("user_id") or config_defaults_user()
-            from hymem.core.searchops import fetch_l6_schemas
-
-            schemas, schema_state = fetch_l6_schemas(
-                client, primary, user_id=uid,
-                limit=schema_limit, min_score=schema_min,
-            )
-        if not items and not want_tags:
+        if res["probe_error"]:
             # 空结果有两种截然不同的原因：真的没有相似记忆，或者嵌入端点挂了。
             # SDK 会吞掉异常并返回空列表（日志里才有 401），不区分的话 agent
             # 会把「密钥失效」当成「没有相关记忆」，一路错下去。空手时补一次
             # 真实探测，把真实原因说出来。
-            why = _embedding_unhealthy()
-            if why:
-                return fail(
-                    f"检索失败：嵌入端点在报错（{why}）—— 这不代表没有相关记忆。"
-                    "修：hy-mem setup --step embedding",
-                    EXIT_RUNTIME,
-                )
-        _remember_auto(items)
-        if since is not None or until is not None:
-            items = [x for x in items if _in_range(_item_ts(x), since, until)]
-        if want_tags:
-            items = _filter_by_tags(items, want_tags, args.tag_mode)
-        items = items[: args.limit]
+            return fail(
+                f"检索失败：嵌入端点在报错（{res['probe_error']}）—— 这不代表没有相关记忆。"
+                "修：hy-mem setup --step embedding",
+                EXIT_RUNTIME,
+            )
+        items = res["items"]
+        schemas = res["schemas"]
+        schema_state = res["schema_state"]
 
         if args.json:
             _payload = {
                 "count": len(items),
                 "min_score": min_score,
-                "elapsed_ms": r.get("elapsed_ms"),
+                "elapsed_ms": res["elapsed_ms"],
                 "tags_filter": want_tags,
                 "results": items,
                 "schemas": schemas,
@@ -266,7 +266,7 @@ def cmd_search(args) -> int:
             if not items:
                 # agent 只看 JSON，这条线索必须进结构体，否则它只会得出
                 # 「没有相关记忆」的结论，而真相是「还没落库」。
-                _pend = _pending_jobs()
+                _pend = res["pending"]
                 if _pend:
                     _payload["pending_jobs"] = _pend
                     _payload["hint"] = f"队列里还有 {_pend} 条未落库，先跑 hy-mem worker --once"
@@ -274,7 +274,7 @@ def cmd_search(args) -> int:
         if not items:
             extra = f"（标签过滤：{','.join(want_tags)}）" if want_tags else ""
             print(f"（无命中）{extra}")
-            pend = _pending_jobs()
+            pend = res["pending"]
             if pend:
                 print(
                     c.dim(f"  但队列里还有 {pend} 条没落库 —— 刚写的记忆很可能就在其中。")
@@ -333,8 +333,9 @@ def cmd_list(args) -> int:
             _no_ident_hint = "未指定 -u/--user：SDK 拒绝无用户的全库列举，恒返回 0 条；请带 -u <用户> 重试"
             print(c.dim(f"  {_no_ident_hint}"), file=sys.stderr)
         r = client.list_memories(limit=fetch_limit, offset=args.offset, order=args.order, **_ident)
-        vdb = r.get("vdb") or {}
-        items = vdb.get("memories") or []
+        from hymem.core.searchops import vdb_memories
+
+        items = vdb_memories(r)
         source = "vdb"
         # lite 模式下 l1_raw 不进 vdb 列表，回退到最近历史
         if not items and args.user:

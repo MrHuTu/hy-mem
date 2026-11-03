@@ -428,7 +428,7 @@ def case_loop() -> None:
     check("run_menu 正常退出（exit）", rc == 0, f"rc={rc}")
     check("每条命令后都回到提示符", text.count("hy-mem ›") >= 10, str(text.count("hy-mem ›")))
     check("不再出现「按任意键继续」", "按任意键" not in text)
-    check("不再清屏（没有 ANSI 全屏擦除）", "\x1b[2J" not in text or True)
+    check("不再清屏（没有 ANSI 全屏擦除）", "\x1b[2J" not in text)
     check("未知命令不会踢掉会话", "未知命令" in text and "hy-mem 命令" in text)
     check("结果留在滚动区（help 与后面的 search 同屏）",
           text.index("hy-mem 命令") < text.index("0.710"), "")

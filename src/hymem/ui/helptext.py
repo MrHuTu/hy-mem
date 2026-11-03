@@ -475,13 +475,14 @@ CMD_META: dict[str, dict] = {
     "stats": {
         "group": "诊断",
         "when": "看体积/条数/写入延迟预期；--health 是「库要不要收缩」的唯一入口。",
-        "mutates": "--vacuum 会清理 jobs 表",
+        "mutates": "--vacuum 会按保留期清理已完成 jobs（失败记录永久保留）",
         "examples": ["hy-mem --json stats", "hy-mem --json stats --health", "hy-mem --json stats --health --vacuum"],
         "output": {
             "metrics": "SDK get_metrics 原始结构",
             "health": "{ok, verdict(OK|WARN|CRIT), memory_count, layers{}, size_mb, estimated_write_latency_s, queue{}, top_tags[], checks[], advice[]}",
         },
-        "notes": ["pro 写入延迟随条数上升，verdict=CRIT 时应改 --async 或归档收缩。"],
+        "notes": ["pro 写入延迟随条数上升，verdict=CRIT 时应改 --async 或归档收缩。",
+                  "done 记录默认保留 30 天（store.DONE_RETENTION_DAYS），dead 永久保留。"],
     },
     "serve": {
         "group": "队列",
@@ -513,7 +514,8 @@ CMD_META: dict[str, dict] = {
         "mutates": "--recover 会把僵死任务放回待处理",
         "examples": ["hy-mem --json queue", "hy-mem --json queue --status dead", "hy-mem --json queue --recover"],
         "output": {"resp": "{ok, stats{pending,running,done,dead,oldest_pending_age_s}, jobs[]}"},
-        "notes": ["death 通常意味着 LLM 或嵌入端点持续失败，先 doctor 再 retry。"],
+        "notes": ["death 通常意味着 LLM 或嵌入端点持续失败，先 doctor 再 retry。",
+                  "jobs[] 只含仍在 jobs 表里的记录：done 超过保留期会被 stats --vacuum 清掉，历史列表相应变短（dead 永久保留）。"],
     },
     "drain": {
         "group": "队列",

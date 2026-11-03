@@ -5,10 +5,8 @@ S2 拆分（docs/specs/2026-11-02-cli-split-ports/）：本模块从 hymem/cli.p
 """
 from __future__ import annotations
 
-import sys
-
 from hymem.cmds.base import (  # noqa: F401
-    EXIT_OK, _EXIT_CODES, _GLOBAL_FLAGS, _GLOBAL_VALUED, _LAST_FAIL,
+    EXIT_OK, _EXIT_CODES, _GLOBAL_FLAGS, _GLOBAL_VALUED,
     classify_error, error_detail, fail, hoist_globals, load_env,
     os, sys, time,
 )

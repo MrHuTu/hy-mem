@@ -5,16 +5,13 @@ S2 拆分（docs/specs/2026-11-02-cli-split-ports/）：本模块从 hymem/cli.p
 """
 from __future__ import annotations
 
-import sys
-
 from hymem.cmds.base import (  # noqa: F401
     CommitFailed, EXIT_USAGE, ExtractFailed, _add_kwargs, _bind_tags_to_new,
     _decode_stdin, _ids_of, _read_text, _snapshot_ids, _spawn_detached_worker,
-    _split_lines, commit_extracted_with_retry, extract_phase, fail, find_derived_nodes,
-    identity, json, make_client, ok, os,
-    prepare_commit, require_ready, store, sweep_derived_nodes, sys,
+    _split_lines, commit_extracted_with_retry, delete_memory_with_cascade, extract_phase, fail,
+    find_derived_nodes, identity, json, make_client, ok, os,
+    prepare_commit, require_ready, store, sys, update_memory,
 )
-from hymem.cmds import base as _base  # 全局状态经 _base 读写
 
 
 def _cmd_add_scene(args, scene: str) -> int:
@@ -57,7 +54,7 @@ def _cmd_add_scene(args, scene: str) -> int:
     )
     if not has_trace:
         return fail(
-            f"轨迹中没有 tool_calls / role=tool——SDK 会静默回退 chat 管线，已拦截（零写入）",
+            "轨迹中没有 tool_calls / role=tool——SDK 会静默回退 chat 管线，已拦截（零写入）",
             hint="生产力记忆的价值在工具轨迹；确认 trace 文件含 assistant.tool_calls 或 tool 消息，"
                  "或去掉 --scene 走 chat",
             err_code="E_NO_TRACE",
@@ -178,11 +175,27 @@ def cmd_add(args) -> int:
     try:
         parts = _split_lines(text) if args.split else [text]
         ident = identity(args)
-        before = _snapshot_ids(client, ident) if tags else set()
+        before, before_complete = _snapshot_ids(client, ident) if tags else (set(), True)
         all_ids: list[str] = []
         tagged: list[str] = []
         last: dict = {}
         raw_ids: list[str] = []
+        tag_note = ""
+        tagged_once = False
+
+        def _bind_all_once() -> None:
+            """多段 add 只做一次 after 快照：before 复用，避免每段全量扫描。"""
+            nonlocal tag_note, tagged_once
+            if not tags or tagged_once or not all_ids:
+                return
+            tagged_once = True
+            fresh, note = _bind_tags_to_new(
+                client, ident, before, all_ids, tags, before_complete=before_complete,
+            )
+            tagged.extend(fresh)
+            if note:
+                tag_note = note
+
         for p in parts:
             # R4 两段式（2026-10-29）：抽取（LLM 网络调用）在锁外，可多进程并行；
             # WriteLock 只包 SDK 标准提交段（L1 存档 → L2 reconcile → SHADOW），
@@ -195,6 +208,7 @@ def cmd_add(args) -> int:
                 with store.WriteLock(timeout=lock_timeout):
                     pass
             except TimeoutError:
+                _bind_all_once()
                 mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
                 return fail(
                     f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）{mid_note}",
@@ -205,6 +219,7 @@ def cmd_add(args) -> int:
             try:
                 agent_result = extract_phase(client, p, source=args.source, **extra, **ident)
             except ExtractFailed as e:
+                _bind_all_once()
                 mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
                 return fail(
                     f"LLM 抽取失败，本条未入库（零写入）{mid_note}：{e.message}",
@@ -221,6 +236,7 @@ def cmd_add(args) -> int:
                         source=args.source, **extra, **ident,
                     )
             except TimeoutError:
+                _bind_all_once()
                 mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
                 return fail(
                     f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）{mid_note}",
@@ -229,6 +245,7 @@ def cmd_add(args) -> int:
                     err_code="E_LOCK",
                 )
             except CommitFailed as e:
+                _bind_all_once()
                 mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
                 return fail(
                     f"落库提交失败{mid_note}：{e}",
@@ -241,13 +258,13 @@ def cmd_add(args) -> int:
                 raw_ids.append(str(rid))
             ids = _ids_of(last)
             all_ids.extend(ids)
-            if tags:
-                fresh, before = _bind_tags_to_new(client, ident, before, ids, tags)
-                tagged.extend(fresh)
+        _bind_all_once()
         if len(parts) > 1:
             payload = {"ok": True, "count": len(all_ids), "memory_ids": all_ids,
                        "tagged_ids": tagged, "tags": tags,
                        "raw_memory_ids": raw_ids}
+            if tag_note:
+                payload["tag_note"] = tag_note
             return ok(payload, args.json, f"已写入 {len(all_ids)} 条：{', '.join(i[:8] for i in all_ids)}")
         payload = dict(last)
         payload["memory_ids"] = all_ids
@@ -262,7 +279,11 @@ def cmd_add(args) -> int:
         if tags:
             payload["tagged_ids"] = tagged
             payload["tags"] = tags
+        if tag_note:
+            payload["tag_note"] = tag_note
         suffix = f"，标签 {','.join(tags)}" if tags else ""
+        if tag_note:
+            suffix += f"（{tag_note}）"
         return ok(payload, args.json, f"已写入 memory_id={(all_ids[0] if all_ids else payload.get('memory_id') or '?')}{suffix}")
     finally:
         client.close()
@@ -282,14 +303,9 @@ def cmd_delete(args) -> int:
             payload = {"ok": True, "dryRun": True, "wouldDelete": r, "derivedNodes": derived}
             note = f"（含 {len(derived)} 个派生节点将级联清理）" if derived else ""
             return ok(payload, args.json, "[dry-run] 将删除：\n" + json.dumps(r, ensure_ascii=False, indent=2, default=str) + note)
-        with store.WriteLock():
-            r = client.delete(args.memory_id)
-            # 上游 delete 不级联 l2_fact 派生节点（幽灵节点），锁内补扫。
-            # note 非空 = 无法确认是否残留，必须透传，不许静默当成功。
-            purged: list[str] = []
-            cascade_note = ""
-            if r.get("success"):
-                purged, cascade_note = sweep_derived_nodes(client, args.memory_id)
+        r = delete_memory_with_cascade(client, args.memory_id)
+        purged = r.get("derived_purged") or []
+        cascade_note = r.get("cascade_note") or ""
         # SDK 公开返回没有 found 键（success=False 时区分「没这条」与「没删净」
         # 靠 partial / error_code）；vdb_deleted 因上游恒 True 不可信，不作判据。
         if r.get("success"):
@@ -332,11 +348,14 @@ def cmd_update(args) -> int:
         return fail("没有新内容（位置参数或 stdin）", EXIT_USAGE)
     client = make_client(args.mode)
     try:
-        # 改前先确认存在，给出「未找到」而不是 SDK 的深层报错
-        if client.get(args.memory_id) is None:
+        r = update_memory(client, args.memory_id, content)
+        if r is None:
             return fail(f"未找到 {args.memory_id}（可先 hy-mem list 拿 id）")
-        with store.WriteLock():
-            r = client.update(args.memory_id, content)
+        if isinstance(r, dict) and r.get("success") is False:
+            return fail(
+                f"更新失败：{r.get('error_message') or r.get('error') or 'unknown'}",
+                extra={"error_code": r.get("error_code"), "partial": bool(r.get("partial"))},
+            )
         return ok(
             r, args.json,
             f"已更新 {args.memory_id}（旧版本保留在演化链，hy-mem history {args.memory_id[:8]} 可查）",

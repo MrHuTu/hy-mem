@@ -50,6 +50,7 @@ hy-mem 的跨进程 WriteLock 此前覆盖整个 client.add（含 LLM 抽取 8~4
 """
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -232,6 +233,7 @@ def commit_extracted(client: object, text: str, agent_result: Any, *, prepared: 
     from hy_memory.pipelines import writer as writer_mod
     from hy_memory.agent.tools.basic_profile import upsert_basic_profile
 
+    t0 = time.monotonic()
     writer = _writer_of(client)
     run = lambda coro: _run(client, coro)  # noqa: E731
 
@@ -365,7 +367,7 @@ def commit_extracted(client: object, text: str, agent_result: Any, *, prepared: 
     except Exception:  # noqa: BLE001
         pass
 
-    elapsed_ms = 0.0
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
     try:
         extract_tok = {
             "prompt": getattr(agent_result, "extract_prompt_tokens", 0) or 0,
@@ -455,6 +457,7 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
     vs = run(writer._get_vector_store())
     if not jobs:
         return []
+    t0 = time.monotonic()
 
     # ① 批级 dedup（跨 job 的重复 facts 收敛为一条；gmt 按序保首个）
     all_texts: list[str] = []
@@ -568,6 +571,9 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
             lineage_note = f"lineage_partial: {fixed}/{len(stored_ids)} 映射命中"
 
     # ⑤ 逐 job 结果（L1→SHADOW、basic_info、shadow_only 判定）
+    # 批处理是「一次判定 + 一次 reconcile」，批次内的 job 共享同一段锁内
+    # 耗时；给每个 job 报批次总时长比报 0 更诚实（--json 里能看出成本）。
+    batch_elapsed_ms = int((time.monotonic() - t0) * 1000)
     results: list[dict] = []
     for ji, j in enumerate(jobs):
         p = j["prepared"]
@@ -608,13 +614,15 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
             }
         except Exception:  # noqa: BLE001
             extract_tok = {"prompt": 0, "completion": 0, "total": 0}
+        # 批处理是「一次判定 + 一次 reconcile」，批次内的 job 共享同一段锁内
+        # 耗时；给每个 job 报批次总时长比报 0 更诚实（--json 里能看出成本）。
         results.append({
             "success": True,
             "scene": "chat",
             "memory_id": l1_ids[ji],
             "memory_ids": mine_ids,
             "request_id": p["request_id"],
-            "elapsed_ms": 0.0,
+            "elapsed_ms": batch_elapsed_ms,
             "error_code": None,
             "error_message": None,
             "extract_tokens": extract_tok,

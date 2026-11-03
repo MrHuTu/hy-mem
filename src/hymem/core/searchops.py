@@ -21,4 +21,7 @@ from hymem.backends.hymemory.searchops import (  # noqa: F401
     fetch_l6_schemas,
     fill_chain_block,
     schema_state_meta,
+    scenecore,
+    searchcore,
+    vdb_memories,
 )

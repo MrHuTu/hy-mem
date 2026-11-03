@@ -12,7 +12,7 @@ hy-mem 用绝对阈值过滤（默认 0.35），所以模型整体分低不要�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

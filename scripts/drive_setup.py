@@ -1,7 +1,7 @@
 """用真实 CLI 驱动 setup 各步骤——黑盒复现/回归交互配置 bug。
 
 为什么不直接调 setup_wizard.step_*：那等于绕过菜单、绕过 tui、绕过了 stdin 解码，
-而这几层恰恰是 bug 的栖息地。这里全程走 `cli/hy_mem_cli.py` 子进程，键盘输入
+而这几层恰恰是 bug 的栖息地。这里全程走 `src/hymem/cli.py` 子进程，键盘输入
 用管道喂（非 TTY 时 tui 会降级成编号菜单，正好可脚本化）。
 
 密钥只从环境变量读（Windows 上环境变量没进当前 shell 时，回落到用户级注册表），
@@ -73,7 +73,7 @@ def main() -> int:
     env["HY_MEM_CONFIG"] = str(cfg_path)
     env["MEMORY_DATA_DIR"] = str(Path(cfg_path).parent / "data")
 
-    cmd = [sys.executable, str(ROOT / "cli" / "hy_mem_cli.py"), "setup", "--step", step]
+    cmd = [sys.executable, str(ROOT / "src" / "hymem" / "cli.py"), "setup", "--step", step]
     print(f"$ hy-mem setup --step {step}   (stdin={keys!r})")
     proc = subprocess.run(cmd, input=keys, capture_output=True, text=True, env=env, encoding="utf-8", errors="replace")
     out = (proc.stdout or "") + (proc.stderr or "")

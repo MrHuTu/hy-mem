@@ -177,6 +177,253 @@ def main() -> int:
     qs2 = json.loads(mcp_server._tool_queue_status({"job_ids": [9002]}))
     check("正常 done 仍提示可 search 验证", "可以 search_memory 验证" in qs2["hint"], qs2["hint"][:120])
 
+    # ---- 9. P0-1 批路径语义：带 tags 不入批；失败码/空 ids 不被绕过 ----
+    print("\nP0-1 批处理语义")
+
+    from hymem.cmds import queue as queue_cmd
+    from hymem.core import two_phase
+
+    def _row(jid, text, **extra):
+        return {
+            "id": jid, "kind": "add", "mode": "pro",
+            "payload": json.dumps({"text": text, "identity": {"user_id": "u1"}, **extra},
+                                  ensure_ascii=False),
+        }
+
+    check("带 tags 的 add 不入批（回退单条路径，标签不丢）",
+          queue_cmd._batch_compat(_row(1, "带标签", tags=["proj:x"])) is False)
+    check("无显式字段的 add 仍可入批",
+          queue_cmd._batch_compat(_row(2, "普通")) is True)
+
+    results_by_text = {
+        "ok": {"success": True, "memory_id": "l1-ok", "memory_ids": ["m-ok"]},
+        "sdk-fail": {"success": False, "error_message": "boom",
+                     "memory_id": "l1-f", "memory_ids": ["m-f"]},
+        "agent-fail": {"success": True, "agent_error_code": "EMPTY_RESPONSE",
+                       "agent_error": "空响应", "memory_id": "l1-a", "memory_ids": ["m-a"]},
+        "no-ids": {"success": True, "memory_ids": [], "memory_id": None},
+    }
+    real = (two_phase.extract_phase, two_phase.prepare_commit, two_phase.batch_commit)
+
+    def fake_extract(client, text, **kw):
+        return {"text": text}
+
+    def fake_prepare(client, text, ar, **kw):
+        return {"text": text}
+
+    def fake_batch(client, jobs):
+        return [dict(results_by_text[j["text"]]) for j in jobs]
+
+    two_phase.extract_phase, two_phase.prepare_commit, two_phase.batch_commit = (
+        fake_extract, fake_prepare, fake_batch,
+    )
+    try:
+        rows = [_row(11, "ok"), _row(12, "sdk-fail"), _row(13, "agent-fail"), _row(14, "no-ids")]
+        outcomes = queue_cmd._execute_batch(rows, lambda mode: object())
+    finally:
+        two_phase.extract_phase, two_phase.prepare_commit, two_phase.batch_commit = real
+    by_id = {job_id: exc for job_id, _r, _ids, _note, exc in outcomes}
+    check("批路径 success=False 记为失败（不标 done）", by_id.get(12) is not None, str(by_id.get(12)))
+    check("批路径 agent_error_code 记为失败", by_id.get(13) is not None, str(by_id.get(13)))
+    check("批路径空 ids 记为失败（防抽取失败被吞）", by_id.get(14) is not None, str(by_id.get(14)))
+    check("批路径正常任务仍成功", by_id.get(11) is None)
+
+    # ---- 10. P1-2 快照完整性：不完整/失败时禁止打标签 ----
+    print("\nP1-2 标签快照完整性")
+    from hymem.backends.hymemory import searchops as so
+
+    def _page(ids):
+        return {"vdb": {"memories": [{"memory_id": i} for i in ids]}}
+
+    class _PagedClient:
+        def __init__(self, pages):
+            self.pages = list(pages)
+            self.calls = 0
+
+        def list_memories(self, limit=200, offset=0, **kw):
+            if self.calls >= len(self.pages):
+                raise RuntimeError("listing failed")
+            page = self.pages[self.calls]
+            self.calls += 1
+            return page
+
+    full = _page([f"i{n}" for n in range(200)])
+    ids, complete = so._snapshot_ids(_PagedClient([full]), {"user_id": "u"}, cap=200)
+    check("快照达到上限时 complete=False", complete is False and len(ids) == 200, f"{complete}|{len(ids)}")
+    ids, complete = so._snapshot_ids(_PagedClient([_page(["a", "b"]), _page([])]), {"user_id": "u"})
+    check("完整分页解包 vdb 且 complete=True", complete is True and ids == {"a", "b"}, f"{complete}|{ids}")
+    ids, complete = so._snapshot_ids(_PagedClient([_page(["a"])]), {"user_id": "u"})
+    check("中途抛错保留部分 id 且 complete=False（不再静默清空）",
+          complete is False and ids == {"a"}, f"{complete}|{ids}")
+
+    bound: list[list[str]] = []
+    real_bind = so._bind_tags
+    so._bind_tags = lambda ids, tags, source="user": bound.append(list(ids)) or len(ids)
+    try:
+        _t, note = so._bind_tags_to_new(
+            _PagedClient([_page(["old"])]), {"user_id": "u"},
+            before={"old"}, returned=["new"], tags=["t"], before_complete=False,
+        )
+        check("写入前快照不完整：跳过绑定并写 note",
+              bound == [] and "不完整" in note, f"{bound}|{note}")
+        _t, note = so._bind_tags_to_new(
+            _PagedClient([_page(["old"])]), {"user_id": "u"},
+            before={"old"}, returned=["new"], tags=["t"],
+        )
+        check("写入后快照不完整：跳过绑定并写 note",
+              bound == [] and "不完整" in note, f"{bound}|{note}")
+        _t, note = so._bind_tags_to_new(
+            _PagedClient([_page(["old"]), _page(["old", "new"]), _page([])]), {"user_id": "u"},
+            before={"old"}, returned=["new"], tags=["t"],
+        )
+        check("完整快照只给新节点打标签", bound[-1] == ["new"] and note == "", f"{bound}|{note}")
+    finally:
+        so._bind_tags = real_bind
+
+    # worker 调用方：快照失败时同样必须跳过
+    wclient = type("WC", (), {"_mode": "lite"})()
+    wclient.add = lambda text, **kw: {"success": True, "memory_id": "l1w", "memory_ids": ["neww"]}
+    wclient.list_memories = lambda **kw: (_ for _ in ()).throw(RuntimeError("list boom"))
+    wrow = {"id": 90, "kind": "add", "mode": "lite",
+            "payload": json.dumps({"text": "x", "identity": {"user_id": "u"}, "tags": ["tw"]},
+                                  ensure_ascii=False)}
+    worker_bound: list[list[str]] = []
+    so._bind_tags = lambda ids, tags, source="user": worker_bound.append(list(ids)) or len(ids)
+    try:
+        _r, _ids, wnote = queue_cmd._execute_job(conn, wrow, lambda mode: wclient)
+    finally:
+        so._bind_tags = real_bind
+    check("worker 快照失败时跳过标签绑定并写 note",
+          worker_bound == [] and "未绑定" in (wnote or ""), f"{worker_bound}|{wnote}")
+
+    # ---- 11. P1-3 lane 领取/统计异常必须可诊断且不静默退出 0 ----
+    print("\nP1-3 lane 异常可诊断")
+    import types
+
+    captured: dict = {}
+    real_ok = queue_cmd.ok
+
+    def _cap_ok(obj, as_json, human=None):
+        if isinstance(obj, dict):
+            captured.update(obj)
+        return real_ok(obj, as_json, human)
+
+    queue_cmd.ok = _cap_ok
+    real_require = queue_cmd.require_ready
+    queue_cmd.require_ready = lambda *a, **k: None
+    real_claim_next, real_claim_batch = store.claim_next, store.claim_next_batch
+
+    def _boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    store.claim_next, store.claim_next_batch = _boom, _boom
+    try:
+        wargs = types.SimpleNamespace(
+            lanes=1, no_recover=True, once=True, idle_exit=0, timeout=0,
+            max=0, poll=0.01, json=True, no_fast_exit=True,
+        )
+        wrc = queue_cmd.cmd_worker(wargs)
+    finally:
+        store.claim_next, store.claim_next_batch = real_claim_next, real_claim_batch
+        queue_cmd.require_ready = real_require
+        queue_cmd.ok = real_ok
+    check("lane 领取异常时 worker 非零退出", wrc != 0, f"rc={wrc}")
+    check("输出含 lane_errors 诊断",
+          any("database is locked" in str(e) for e in (captured.get("lane_errors") or [])),
+          str(captured.get("lane_errors")))
+    check("输出标记 ok=False", captured.get("ok") is False, str(captured.get("ok")))
+
+    # ---- 12. P1-4 完成态保留 / shadow_only 显式列 / stats 复用 ----
+    print("\nP1-4 队列保留与读取放大")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    check("jobs 有显式 shadow_only 列", "shadow_only" in cols, f"cols={sorted(cols)}")
+
+    conn.execute("DELETE FROM jobs")
+    now = time.time()
+
+    def _ins_job(status: str, age_days: float, error: str | None = None) -> int:
+        cur = conn.execute(
+            "INSERT INTO jobs (kind,payload,status,attempts,max_attempts,error,created_at,finished_at)"
+            " VALUES ('add','{}',?,1,3,?,?,?)",
+            (status, error, now - age_days * 86400, now - age_days * 86400),
+        )
+        return int(cur.lastrowid)
+
+    old_done = _ins_job("done", 40)
+    kept_done = _ins_job("done", 2)
+    old_dead = _ins_job("dead", 400, "LLM 持续失败")
+    old_pending = _ins_job("pending", 40)
+    purge = getattr(store, "purge_finished_jobs", None)
+    if purge is None:
+        check("完成态保留策略函数存在", False, "缺少 purge_finished_jobs")
+    else:
+        purge(conn, keep_days=30)
+        left = {r["id"] for r in conn.execute("SELECT id FROM jobs").fetchall()}
+        check("超期 done 被清理", old_done not in left, f"left={sorted(left)}")
+        check("保留期内 done 保留", kept_done in left, f"left={sorted(left)}")
+        check("dead（失败）永不清理", old_dead in left, f"left={sorted(left)}")
+        check("pending 不受保留策略影响", old_pending in left, f"left={sorted(left)}")
+
+    if "shadow_only" in cols:
+        conn.execute("DELETE FROM jobs")
+        sid = store.enqueue(conn, {"text": "shadow"})
+        store.claim_next(conn, "w-shadow")
+        store.mark_done(conn, sid, [], extra={"note": "shadow_only: 只落影子节点"})
+        hit = conn.execute("SELECT shadow_only FROM jobs WHERE id=?", (sid,)).fetchone()
+        check("mark_done 的 shadow_only note 写进显式列",
+              hit and hit["shadow_only"] == 1, f"{dict(hit) if hit else None}")
+        check("queue_stats 的 shadow_only 来自显式列",
+              store.queue_stats(conn)["shadow_only"] == 1, str(store.queue_stats(conn)["shadow_only"]))
+        check("requeue_shadow 按显式列重投", store.requeue_shadow(conn) == 1)
+        requeued = conn.execute("SELECT status, shadow_only FROM jobs WHERE id=?", (sid,)).fetchone()
+        check("重投后清掉 shadow_only 标记",
+              requeued and requeued["status"] == "pending" and requeued["shadow_only"] == 0,
+              f"{dict(requeued) if requeued else None}")
+        # 仅有旧式 error 文本、列=0 的行不该再被统计/重投
+        legacy = _ins_job("done", 0)
+        conn.execute("UPDATE jobs SET error='shadow_only: legacy text' WHERE id=?", (legacy,))
+        check("error 文本不再影响 shadow_only 统计",
+              store.queue_stats(conn)["shadow_only"] == 0, str(store.queue_stats(conn)["shadow_only"]))
+        check("requeue_shadow 不再按 error LIKE 重投", store.requeue_shadow(conn) == 0)
+
+    conn.execute("DELETE FROM jobs")
+    for _ in range(3):
+        store.enqueue(conn, {"text": "stats-hint"})
+    try:
+        r0 = store.claim_next_batch(conn, "w-hint", limit=4, stats={"pending": 0})
+        check("stats.pending=0 时批领取直接空返回", r0 == [], f"got {len(r0)}")
+        r2 = store.claim_next_batch(conn, "w-hint", limit=4, stats={"pending": 2})
+        check("stats.pending 作为批上限", len(r2) == 2, f"got {len(r2)}")
+    except TypeError as e:
+        check("claim_next_batch 接受 stats 参数", False, f"{type(e).__name__}: {e}")
+
+    # worker 每轮只查一次 stats：1 条任务的一轮消费 + 收工，旧实现 4 次，新实现 3 次
+    conn.execute("DELETE FROM jobs")
+    store.enqueue(conn, {"text": "one"})
+    real_stats = store.queue_stats
+    calls = {"n": 0}
+
+    def _count_stats(c):
+        calls["n"] += 1
+        return real_stats(c)
+
+    store.queue_stats = _count_stats
+    real_exec = queue_cmd._execute_job
+    real_require = queue_cmd.require_ready
+    queue_cmd._execute_job = lambda c, r, g: ({}, ["m"], None)
+    queue_cmd.require_ready = lambda *a, **k: None
+    try:
+        wargs = types.SimpleNamespace(
+            lanes=1, no_recover=True, once=True, idle_exit=0, timeout=0,
+            max=0, poll=0.01, json=True, no_fast_exit=True,
+        )
+        queue_cmd.cmd_worker(wargs)
+    finally:
+        store.queue_stats = real_stats
+        queue_cmd._execute_job = real_exec
+        queue_cmd.require_ready = real_require
+    check("一轮消费+收工只读 3 次 stats（旧实现 4 次）", calls["n"] == 3, f"calls={calls['n']}")
+
     conn.close()
     n_pass = sum(results)
     print(f"\n{'全部通过' if n_pass == len(results) else '存在失败'}（{n_pass}/{len(results)}）")

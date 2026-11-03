@@ -5,13 +5,10 @@ S2 拆分（docs/specs/2026-11-02-cli-split-ports/）：本模块从 hymem/cli.p
 """
 from __future__ import annotations
 
-import sys
-
 from hymem.cmds.base import (  # noqa: F401
     EXIT_OK, EXIT_RUNTIME, EXIT_USAGE, Path, fail,
     json, ok, os, store, sys,
 )
-from hymem.cmds import base as _base  # 全局状态经 _base 读写
 
 
 def cmd_install(args) -> int:
@@ -299,23 +296,36 @@ def cmd_config(args) -> int:
     if action == "validate":
         results = cfgmod.validate(cfg)
         bad = [r for r in results if not r[1]]
+        # 有 FAIL 时返回非零（P1-6）：脚本/CI 才能拦住坏配置；--json 输出保持原契约。
+        code = EXIT_USAGE if bad else EXIT_OK
         if args.json:
-            return ok(
+            ok(
                 {
                     "ok": not bad,
                     "checks": [{"name": n, "pass": p, "detail": d} for n, p, d in results],
                 },
                 True,
             )
+            return code
         lines = []
         for name, passed, detail in results:
             mark = "PASS" if passed else "FAIL"
             lines.append(f"[{mark}] {name:<22}{detail}")
         lines.append("")
         lines.append("结论：配置完整" if not bad else f"结论：{len(bad)} 项未通过")
-        return ok(results, False, "\n".join(lines))
+        ok(results, False, "\n".join(lines))
+        return code
 
     if action == "set":
+        # P1-6：坏配置读不出来又没能备份时，默认值整体覆盖会把密钥冲掉——
+        # 宁可拒绝，也不静默改写用户的 config.json。
+        _le = cfgmod.load_error()
+        if _le and not _le.get("backup"):
+            return fail(
+                f"配置文件读取失败且无法备份（{_le['reason']}），拒绝覆盖 {_le['path']}；"
+                "请先修好或手工移走该文件",
+                EXIT_RUNTIME,
+            )
         if not args.pairs:
             return fail("用法：hy-mem config set key=value（点路径，如 embedding.model=xxx）", EXIT_USAGE)
         import copy

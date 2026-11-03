@@ -4,13 +4,13 @@
 > **目标**：只读这一份，就能改代码、跑测试、打 exe、排障、判断该不该动。
 > **边界**：本文件是**开发者视角**。面向调用方（智能体实际怎么用命令）的说明在 `skill/hy-mem/SKILL.md`，那份会被打包进产物发出去，两者不重复。
 > **动代码前先读**：`skill/hy-dev/SKILL.md` —— 开发/修复流水线（分道 → 契约文档 → 分片 → 测试 → 回写 → 提交）。本文是「事实与规则」，那份是「执行顺序」，冲突时以本文的事实为准、按那份的步骤执行。
-> **最后校准**：2026-10-28（0.9.13 发版），对应 hy-mem **0.9.13**。文中所有数字都是实测值，附了复核命令。
+> **最后校准**：2026-11-03（1.0.0-rc.11），对应 hy-mem **1.0.0-rc.11**。文中所有数字都是实测值，附了复核命令。
 
 ---
 
 ## 0. 一句话定位
 
-**hy-mem = 给 AI 智能体用的本地长期记忆 CLI**，外层是一套零依赖终端 UI（方向键菜单 / 设置向导 / 按键解码），底层是 Hy-Memory SDK 2.0.5 + chromadb 向量库，可 PyInstaller 打成自包含目录 `dist/hy-mem/`（355 MB，整个拷走即可用，对方不需要 Python）。
+**hy-mem = 给 AI 智能体用的本地长期记忆 CLI**，外层是一套零依赖终端 UI（方向键菜单 / 设置向导 / 按键解码），底层是 Hy-Memory SDK 2.0.13 + chromadb 向量库，可 PyInstaller 打成自包含目录 `dist/hy-mem/`（355 MB，整个拷走即可用，对方不需要 Python）。
 
 核心能力：写入记忆（同步/异步）→ LLM 抽取成 `l2_fact` / `l3_schema` → 语义检索 → 标签归档；多智能体可用 `user_id` 共享或隔离记忆。
 
@@ -20,16 +20,16 @@
 
 | 项 | 值 | 复核方式 |
 |---|---|---|
-| 版本 | `0.9.13`（`cli/helptext.py: VERSION`） | `dist/hy-mem/hy-mem.exe --version` |
+| 版本 | `1.0.0-rc.11`（`src/hymem/core/version.py: VERSION`） | `.venv/Scripts/python.exe -m hymem --version` |
 | 语言/运行时 | Python **3.12.10**，venv 在 `.venv/` | `.venv/Scripts/python.exe -V` |
-| 核心 SDK | `hy-memory 2.0.5` | `.venv/Scripts/python.exe -m pip show hy-memory` |
+| 核心 SDK | `hy-memory 2.0.13` | `.venv/Scripts/python.exe -m pip show hy-memory` |
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |
-| 源码规模 | **35 个 py，16900 行**（`cli/` 20 个 12634 行 + `scripts/` 15 个 4266 行；`.local-test/` 里的临时脚本不计、不入库） | `cat cli/*.py scripts/*.py \| wc -l` |
-| 子命令 | **39** 个（0.9.6 新增 `mcp` / `version` / `migrate`；0.9.7 新增 `update` / `history`；0.9.8 `worker` 加 `--lanes` 与延迟队列 `jobs.not_before`；0.9.9 `worker` 内嵌 chroma server；0.9.10 拆出 `serve`（数据所有者），`worker` 退回纯消费者；**0.9.11 新增 `log`**；rc.9 新增 `backup` / `restore` / `vdb-*` ×5 / `graph-build`） | `grep -c "add_parser(" cli/hy_mem_cli.py` |
-| 测试用例 | **842**（CLI 120 / UI 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / MCP 35 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80） | 见 §8 |
-| 产物 | 目录 `dist/hy-mem/` **476 MB**（exe 本体 33 MB）；对外分发 `dist/hy-mem-0.9.13-win64.zip` **178 MB** | `du -sh dist/hy-mem dist/*.zip` |
+| 源码规模 | **62 个 py，17332 行**（`src/hymem/` 56 个 16329 行 + `scripts/` 6 个 1003 行；`tests/` 与 `.local-test/` 不计） | `(Get-ChildItem src/hymem,scripts -Recurse -Filter *.py \| Get-Content \| Measure-Object -Line).Lines` |
+| 子命令 | **43** 个（分组见 §7） | `grep -c "add_parser(" src/hymem/cmds/parser.py` |
+| 测试用例 | **921**（CLI 162 / UI 110 / menu 113 / setup 168 / setup_ui 41 / vdb 44 / MCP 39 / queue 51 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 84 + concurrency 2 场景） | 见 §8 |
+| 产物 | 目录 `dist/hy-mem/` **473 MB**（exe 本体 33 MB）；对外分发 `dist/hy-mem-win64.zip` **179 MB** | `du -sh dist/hy-mem dist/*.zip` |
 | 启动开销 | `--version` / `help` 冷启 **0.4 s 量级**（实测 0.36~0.46 s，视磁盘缓存；判断「要不要换编译器」的基线） | `time dist/hy-mem/hy-mem.exe --version` |
 | 构建耗时 | 约 **160 s**（含压缩包 24 s） | 构建日志末行 |
 | 默认数据目录 | `<安装根>/data`（源码=`仓库/data`，exe=`dist/hy-mem/data`） | `hy-mem config show` |
@@ -352,7 +352,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 
 ---
 
-## 7. 命令面（34 个）
+## 7. 命令面（43 个）
 
 | 分组 | 命令 |
 |---|---|
@@ -380,14 +380,14 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | 套件 | 用例 | 覆盖 | 跑法 |
 |---|---|---|---|
 | `tests/test_ui.py` | **110** | 按键解码（Windows 扫描码 / VT / SGR 鼠标 / DSR）、行编辑、**历史翻找 / Tab 补全 / Ctrl+R 反查 / Ctrl+D / Ctrl+K**、宽度裁剪、不折行、菜单导航、控制台连写连查 | `.venv/Scripts/python.exe tests/test_ui.py` |
-| `tests/test_setup.py` | **148** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）**、**沉淀模型设置项两遍（R 节：首次指定 / 改回沿用 / 验证失败两分支 / 真落盘 / 不串 llm.model）** | `.venv/Scripts/python.exe tests/test_setup.py` |
-| `tests/test_cli.py` | **97** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**） | 见下 |
-| `tests/test_queue.py` | **21** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1 | `.venv/Scripts/python.exe tests/test_queue.py` |
+| `tests/test_setup.py` | **168** | 向导各步、存储运维、推理模型探活判定、**密钥字符集（中文粘贴）**、**出站请求收口（源码守卫）**、队列积压可见、**运行环境自检 + 双击启动器 + HF 镜像**、**第二次配置（密钥只在环境变量里，Q 节）**、**首次安装 env 回填（Q6/Q7）**、**沉淀模型设置项两遍（R 节：首次指定 / 改回沿用 / 验证失败两分支 / 真落盘 / 不串 llm.model）**、**配置边界（P1-6：非法值/nulls 出 FAIL 行、registry 失败不吞、坏 JSON 备份或被拒绝覆盖、BOM 容错）** | `.venv/Scripts/python.exe tests/test_setup.py` |
+| `tests/test_cli.py` | **162** | 退出码、stdout/stderr 分流、全局选项位置无关、`--fields`、身份、`E_CONFIG`（缺项 / **非 ASCII 密钥**）、**`config validate` 有 FAIL 时非零退出且 `--json` 契约不变** | 见下 |
+| `tests/test_queue.py` | **51** | 0.9.8 队列核心：旧库 not_before 幂等迁移、claim 原子性、退避曲线（2/4s）、未到期不可领、死信与 retry 重投、requeue_stale 清延迟、spawn 闸门 cap=1；**P1-4：done 按天保留（dead 永存）、shadow_only 显式列+部分索引、stats 传入批领取、worker 每轮只查一次 stats** | `.venv/Scripts/python.exe tests/test_queue.py` |
 | `tests/test_concurrency.py` | 场景 | 4 并发 add --async + 2 MCP 检索进程风暴（独立沙箱，等队列 idle 判定） | `.venv/Scripts/python.exe tests/test_concurrency.py [exe]` |
-| `tests/test_mcp.py` | **31** | MCP stdio 工具端到端（pro 下 8 个；ultra 多一个 `evolve`）：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe tests/test_mcp.py [exe]` |
+| `tests/test_mcp.py` | **39** | MCP stdio 工具端到端（pro 下 8 个；ultra 多一个 `evolve`）：握手/tools/list/add→**queue_status 进度**→落库→search/list/get/update/delete/get_version、confirm 守门、stderr 无栈 | `.venv/Scripts/python.exe tests/test_mcp.py [exe]` |
 | `tests/test_scene.py` | **43** | scene（working/coding）全量：tools/list schema、参数拦截（无轨迹/二选一/branch 缺 workspace/chat 传 messages·chain_block）、两轮同文件写入 → 独立 coding 库 + diff 链两版 → chain_block 两版、默认不注入、scope 不匹配零命中、config chainRepo 校验、profile 读 L0 画像、helptext 同步 | `.venv/Scripts/python.exe tests/test_scene.py [exe]` |
-| `tests/test_evolve.py` | **80** | L6 认知层五面向：A 离线（help/config/validate/exit）、B CLI（pro 拦截 exit 1）、C MCP（pro 下 tools/list 无 evolve、tools/call 被拒、**模式热切换发 list_changed**）、E 状态可见性离线桩（graph_unavailable / empty / no_embedding / 命中 / state 映射 / 默认 0.25）、F 语言原生通道桩测（auto 不传 language / zh/en 原生透传 / 非法值警告软降级 / 老版本 TypeError 降级 / MCP 注册表）、G 自动沉淀状态机桩测（首次默认 / 冷却拦截与放行 / 2^n 退避与 7 天封顶 / 损坏容忍与原子写 / 触发门 mode+enabled / 冷却内不起线程）、H 可见性（CLI evolve-status pro/ultra/故障注入 / get_version 的 evolve_health 信号出现与零噪声 / 工具主描述 ≤200 字回归钉）、D ultra 真模型（弱模型空转 `completion<150` 判 idle / 强模型产出 schema / `--model` 跑完 `config.json` 不变 / 同素材二次无产出）；缺密钥 D 面显式跳过 | `.venv/Scripts/python.exe tests/test_evolve.py [exe]` |
-| `tests/test_vdb_endpoint.py` | **36** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe tests/test_vdb_endpoint.py` |
+| `tests/test_evolve.py` | **84** | L6 认知层五面向：A 离线（help/config/validate/exit）、B CLI（pro 拦截 exit 1）、C MCP（pro 下 tools/list 无 evolve、tools/call 被拒、**模式热切换发 list_changed**）、E 状态可见性离线桩（graph_unavailable / empty / no_embedding / 命中 / state 映射 / 默认 0.25）、F 语言原生通道桩测（auto 不传 language / zh/en 原生透传 / 非法值警告软降级 / 老版本 TypeError 降级 / MCP 注册表）、G 自动沉淀状态机桩测（首次默认 / 冷却拦截与放行 / 2^n 退避与 7 天封顶 / 损坏容忍与原子写 / 触发门 mode+enabled / 冷却内不起线程）、H 可见性（CLI evolve-status pro/ultra/故障注入 / get_version 的 evolve_health 信号出现与零噪声 / 工具主描述 ≤200 字回归钉）、D ultra 真模型（弱模型空转 `completion<150` 判 idle / 强模型产出 schema / `--model` 跑完 `config.json` 不变 / 同素材二次无产出）；缺密钥 D 面显式跳过 | `.venv/Scripts/python.exe tests/test_evolve.py [exe]` |
+| `tests/test_vdb_endpoint.py` | **44** | 端点层契约：端口文件 owner 校验、**pid 复用识破**、心跳、六个 ensure 分支（外部/复验/主人活着失败/主人已死/拉起/自注入失效）、真实 server 线程读写与持久性 | `.venv/Scripts/python.exe tests/test_vdb_endpoint.py` |
 | `tests/test_encoding.py` | **10** | stdin 解码链（UTF-8/GBK/BOM/UTF-16/垃圾）、代理项闸门、**复刻事故环境**（`PYTHONIOENCODING=gbk:surrogateescape`） | `.venv/Scripts/python.exe tests/test_encoding.py` |
 | `tests/test_oplog.py` | **25** | 操作日志：只留 50 条且保留最新、脱敏、正文不落盘、写不进去也不影响命令 | `.venv/Scripts/python.exe tests/test_oplog.py` |
 | `tests/test_menu.py` | **113** | 控制台全覆盖：18 条命令逐个跑通、旧菜单 18 项逐一映射到命令、别名/补全/切词、未知命令给建议、真 `run_menu` 管道循环（命令后仍回到提示符、不「按任意键」、EOF 干净退出）、历史落盘与去重 | `.venv/Scripts/python.exe tests/test_menu.py` |
@@ -404,7 +404,7 @@ HY_MEM_TEST_EXE=dist/hy-mem/hy-mem.exe .venv/Scripts/python.exe tests/test_cli.p
 
 三套都**不需要真终端**（test_ui 用假 Reader）、**不需要网络**（test_cli 只跑 help/config/queue/install/参数错误）。
 
-**验收口径**：十四套全绿（cli 120 / ui 110 / menu 113 / setup 148 / setup_ui 41 / vdb 36 / mcp 35 / queue 21 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 80 / concurrency 场景 = **842**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
+**验收口径**：十四套全绿（cli 162 / ui 110 / menu 113 / setup 168 / setup_ui 41 / vdb 44 / mcp 39 / queue 51 / oplog 25 / i18n 31 / encoding 10 / scene 43 / evolve 84 / concurrency 2 场景 = **921**）+ exe 上再跑一遍 test_cli 全绿 + `doctor` 全 PASS（19 项），三者同时满足才算完成。
 
 ### 8.1 怎么测 CLI —— 四条铁律（2026-10-28 补，源自 401 事故）
 

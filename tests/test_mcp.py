@@ -260,9 +260,33 @@ def main() -> int:
     # manual_tags（手工）——只看 tags 会误判手工标签被 update 冲掉
     _first = items[0] if items else {}
     check("list 条目带 tags 与 manual_tags 分列",
-          "tags" in _first and "manual_tags" in _first, str(_first)[:120])
+          isinstance(_first.get("tags"), list) and isinstance(_first.get("manual_tags"), list),
+          str(_first)[:120])
     if items and mid is None:
         mid = str(items[0].get("memory_id") or items[0].get("id") or "")
+
+    # ---- 6b. 手工标签必须真的可检索（不是「字段存在」就算过）----
+    # add_memory 传的 tags 由 _bind_tags_to_new 写进本地 SQLite；MCP list 的
+    # manual_tags 来自 SDK _tags（手工标签不在那里），所以这里用 CLI 的
+    # `list --tag` 走完整的本地索引过滤——命中的必须是这次写入的记忆本身。
+    _tag_run = subprocess.run(
+        [*cli_base, "list", "--tag", "mcp-e2e", "--json"],
+        capture_output=True, text=True, encoding="utf-8", timeout=120, env=env,
+    )
+    try:
+        _tag_payload = json.loads(_tag_run.stdout)
+    except json.JSONDecodeError:
+        _tag_payload = {}
+    _tag_items = [m for m in (_tag_payload.get("memories") or []) if isinstance(m, dict)]
+    _tag_ids = [str(m.get("memory_id") or m.get("id") or "") for m in _tag_items]
+    check("add 的 tags 可按 tag 精确检索到该记忆",
+          bool(mid) and mid in _tag_ids,
+          f"mid={str(mid)[:18]} ids={_tag_ids[:5]} rc={_tag_run.returncode} "
+          f"err={_tag_run.stderr.strip()[-120:]}")
+    _tag_hit = next((m for m in _tag_items if str(m.get("memory_id") or "") == mid), {})
+    check("tags 过滤结果带正确 tag 值 mcp-e2e",
+          "mcp-e2e" in {str(t).strip().lower() for t in (_tag_hit.get("_tags") or [])},
+          f"_tags={_tag_hit.get('_tags')}")
 
     # ---- 7. get_memory：按 id 读全文（返回 {"found": true, "memory": {...}}）----
     res = tool("get_memory", {"memory_id": mid})
@@ -301,7 +325,25 @@ def main() -> int:
           json.dumps(qh, ensure_ascii=False)[:120])
 
     # ---- 11. 协议纪律：全程无 JSON-RPC error（除守门用例外）----
-    check("worker.err 无致命栈（supervisor 退出痕迹允许）", True)
+    # 后台 worker 的 stderr 由 _spawn_detached_worker 显式重定向到
+    # <MEMORY_DATA_DIR>/logs/worker.err —— 这里读的就是那个被拉起的消费进程
+    # 的输出。文件缺失 = 拉起/落盘链路坏了；出现 Traceback = worker 崩过
+    # （静默死亡正是最难查的那类故障，不能再用恒真断言盖过去）。
+    _werr = sandbox / "data" / "logs" / "worker.err"
+    try:
+        _wtext = _werr.read_text(encoding="utf-8", errors="replace")
+        _werr_read, _werr_err = True, str(_werr)
+    except OSError as e:
+        _wtext, _werr_read, _werr_err = "", False, f"{type(e).__name__}: {e}"
+    check("worker.err 已落盘（后台消费进程 stderr 可观测）", _werr_read, _werr_err)
+    _wtb = [ln for ln in _wtext.splitlines() if "Traceback (most recent call last)" in ln]
+    check("worker.err 无致命栈（supervisor 退出痕迹允许）", not _wtb,
+          _wtb[0][:100] if _wtb else f"{len(_wtext)} 字节")
+    # 确认读的确实是 worker 本体：它的 stderr 会带 lane 消费行 / 写锁等待行，
+    # 而不是 MCP 服务进程的输出（后者在 cli.stderr 里单独检查）。
+    check("worker.err 是 worker 本体的输出（含 lane/写锁日志）",
+          ("[lane" in _wtext) or ("hy-mem:" in _wtext),
+          _wtext.strip().splitlines()[-1][:100] if _wtext.strip() else "空文件")
     cli.close()
     err_out = cli.p.stderr.read() if cli.p.stderr else ""
     bad = [ln for ln in err_out.splitlines() if "Traceback" in ln]

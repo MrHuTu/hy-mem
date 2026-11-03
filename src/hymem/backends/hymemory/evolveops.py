@@ -27,8 +27,6 @@ kuzu 独占（重要）
 """
 from __future__ import annotations
 
-import os
-
 # 空转判据（C6）：模型被调用过、但几乎没输出。实测意图分类模型 7 个 token，
 # 强模型 2700~5000。150 是两者之间的安全分界，留足余量避免误杀短归纳。
 IDLE_COMPLETION_TOKENS = 150

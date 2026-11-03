@@ -1,6 +1,6 @@
 # hy-mem
 
-本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 [Tencent Hy-Memory SDK](https://github.com/Tencent-Hunyuan/Hy-Memory) 2.0.12 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
+本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 [Tencent Hy-Memory SDK](https://github.com/Tencent-Hunyuan/Hy-Memory) 2.0.13 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
 
 > A local long-term memory CLI for AI agents — write, fact-extract via LLM, semantic search, and tag archiving, with a built-in MCP stdio server (9 tools).
 
@@ -139,9 +139,9 @@ python scripts/build_exe.py
 ### 测试
 
 ```bash
-python tests/test_cli.py        # CLI（122 项，含分层守护 G1/G2）
-python tests/test_setup_ui.py   # 设置向导 UI 级（40 项）
-# 共 14 套 850+ 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
+python tests/test_cli.py        # CLI（162 项，含分层守护 G1/G2）
+python tests/test_setup_ui.py   # 设置向导 UI 级（41 项）
+# 共 14 套 921 项：cli / ui / menu / setup / setup_ui / mcp / queue / vdb / oplog /
 # i18n / encoding / concurrency / scene / evolve。其中 mcp、concurrency、scene、evolve
 # 会真调模型（缺密钥时显式跳过，不产出假绿）
 ```

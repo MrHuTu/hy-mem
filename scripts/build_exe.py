@@ -396,7 +396,7 @@ def _sanitize() -> list[str]:
     data/ 是开发期的测试记忆，不该跟着发布。
 
     发布纪律：**产品不带任何模型 key**。用户自己填，填不全就由配置闸门
-    给出缺项与修复命令（见 hy_mem_cli.require_ready）。所以这里不只是删
+    给出缺项与修复命令（见 hymem.cmds.base.require_ready）。所以这里不只是删
     两个固定文件，还要真扫一遍：PyInstaller 的 `--add-data`、某个模块的
     data 文件、或者手工拷进去的 .env，都可能把 key 带进包。
 

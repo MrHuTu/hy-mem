@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""分层守卫（S1 契约 A4）—— 扫 cli/ 三层包结构的依赖违例。
+"""分层守卫（S1 契约 A4）—— 扫 src/hymem 三层包结构的依赖违例。
 
 判据（docs/specs/2026-10-29-s1-layering/00-contract.md）：
-  L1  core 不得 import ui / mcp / hy_mem_cli
+  L1  core 不得 import ui / mcp / hymem.cli
   L2  ui 与 mcp 互不 import；两者可依赖 core
-  L3  除 hy_mem_cli.py 外，任何模块不得 import 入口 hy_mem_cli
-      —— 例外存量：mcp/server.py 的 12 处 from hymem.cli import（S3 消除）
+  L3  除 cli.py 外，任何模块不得 import 入口 hymem.cli
+      —— 例外存量：0（S3 已消除）
   L4  __init__.py 必须为空（防 import 副作用串包）
   L5  禁止裸模块名 import（import store / from config import ...）：
       分层后必须用包全名（from hymem.core import store），裸名在包模式下
-      只有 cli/ 目录在 path 时才能碰巧工作，掩盖结构破坏
+      只有 src/hymem 在 path 时才能碰巧工作，掩盖结构破坏
 
 用法：.venv/Scripts/python.exe scripts/check_layering.py
 退出码：0 = 无违例；1 = 有违例（发版门禁用）
@@ -37,7 +37,7 @@ BARE_NAMES = [
     "config", "errors", "netprobe", "oplog", "presets", "runtime_check",
     "storage_ops", "store", "vdb_endpoint", "local_embedder", "install_ops",
     "helptext", "i18n", "menu", "setup_wizard", "skill_ops", "tui",
-    "mcp_server", "hy_mem_cli",
+    "mcp_server", "cli",
 ]
 
 IMPORT_RE = re.compile(
@@ -72,7 +72,7 @@ def check() -> int:
                 root = mod.split(".")[0]
                 if root in BARE_NAMES:
                     violations.append(
-                        f"L5 {where} 裸名 import：{mod}（应用包全名 cli.<层>.<模块>）"
+                        f"L5 {where} 裸名 import：{mod}（应用包全名 hymem.<层>.<模块>）"
                     )
                 continue
             # L1：core 不许碰 ui/mcp/入口
@@ -85,9 +85,9 @@ def check() -> int:
                 violations.append(f"L2 {where} import mcp：{mod}")
             if layer == "mcp" and mod.startswith("hymem.ui"):
                 violations.append(f"L2 {where} import ui：{mod}")
-            # L3：不得 import 入口（例外：mcp/server.py 存量 + 入口自身）
+            # L3：不得 import 入口（例外：入口自身 cli.py）
             if mod == "hymem.cli" or mod.startswith("hymem.cli"):
-                if where != "hy_mem_cli.py" and (where, "hymem.cli") not in KNOWN_EXCEPTIONS:
+                if where != "cli.py" and (where, "hymem.cli") not in KNOWN_EXCEPTIONS:
                     violations.append(f"L3 {where} import 入口：{mod}")
 
     if violations:

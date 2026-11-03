@@ -5,8 +5,6 @@ S2 拆分（docs/specs/2026-11-02-cli-split-ports/）：本模块从 hymem/cli.p
 """
 from __future__ import annotations
 
-import sys
-
 from hymem.cmds.base import (  # noqa: F401
     EXIT_RUNTIME, EXIT_USAGE, _bind_tags_to_new, _ids_of, _snapshot_ids,
     _worker_cap, commit_extracted_with_retry, datetime, emit, extract_phase,
@@ -14,7 +12,26 @@ from hymem.cmds.base import (  # noqa: F401
     prepare_commit, require_ready, socket, store, sys,
     time, vdb_endpoint,
 )
-from hymem.cmds import base as _base  # 全局状态经 _base 读写
+
+
+def _wanted_serve_port() -> int:
+    """servePort 配置 → 固定端口；0 = 随机端口（历史默认）。
+
+    配置读坏/值非法时**不阻断起库**，但必须往 stderr 说明原因——静默回退会让
+    "端口怎么又变了" 变成无迹可查的现场。`servePort` 非法（如 "abc"）走同一条
+    告警路径，回退随机端口。
+    """
+    try:
+        from hymem.core import config as _cfgmod
+
+        return int(_cfgmod.load().get("servePort") or 0)
+    except Exception as e:  # noqa: BLE001  配置坏了不该拦住 serve 起库
+        print(
+            f"hy-mem: 读取 servePort 配置失败（{type(e).__name__}: {e}），"
+            "serve 将以随机端口启动（不阻断起库）",
+            file=sys.stderr,
+        )
+        return 0
 
 
 def cmd_serve(args) -> int:
@@ -37,12 +54,7 @@ def cmd_serve(args) -> int:
     persist = vdb_endpoint.sdk_persist_dir()
     # U3（docs/specs/2026-11-02-endpoint-refresh/）：servePort 配置的固定端口，
     # 0/缺省 = 随机（历史行为）；被占用时 start_server_thread 自行回退并告警。
-    try:
-        from hymem.core import config as _cfgmod
-
-        _want_port = int(_cfgmod.load().get("servePort") or 0)
-    except Exception:  # noqa: BLE001  配置坏了不该拦住 serve 起库
-        _want_port = 0
+    _want_port = _wanted_serve_port()
     t0 = time.time()
     port, handle = vdb_endpoint.start_server_thread(persist, port=_want_port or None)
 
@@ -94,7 +106,12 @@ def _worker_id() -> str:
 
 
 def _batch_compat(row) -> bool:
-    """批次约束（spec §1 合批约束）：显式字段/request 级参数不入批。"""
+    """批次约束（spec §1 合批约束）：显式字段/request 级参数不入批。
+
+    tags 也在此列：批路径没有逐 job 的 before/after 快照，无法只给本条新
+    节点打标签（见 _execute_job 的 _bind_tags_to_new）。带标签的 add 必须
+    回退单条路径，否则标签会静默丢失。
+    """
     import json as _json
 
     try:
@@ -105,13 +122,36 @@ def _batch_compat(row) -> bool:
         return False
     if str(row["mode"] or "").strip().lower() == "lite":
         return False
-    for k in ("memory_at", "metadata", "request_id"):
+    for k in ("memory_at", "metadata", "request_id", "tags"):
         if payload.get(k):
             return False
     return True
 
 
-def _execute_batch(conn, rows, get_client) -> list[tuple[int, dict, list[str], str | None, Exception | None]]:
+def _result_failure(result: dict) -> str | None:
+    """单条/批路径共用的静默失败防线（0.9.8）。
+
+    L1 原始层写成功 ≠ 记忆可用。SDK 在 L2 事实抽取失败时仍可能返回
+    success=True + 非空 ids（含 L1 id），诊断字段 agent_error_code 会带
+    EMPTY_RESPONSE / RECONCILE_FAILED 等。只判 ids 会把「抽取失败」标成 done，
+    记忆永远停在未抽取的 L1 状态 —— 这里统一判定为失败进重试。
+
+    注意区分：extractor 判定「无可提取事实」是正常结论（agent_status=success、
+    agent_error_code 为空、L1 退居 shadow），不误判、不重试。
+    """
+    if result.get("success") is False:
+        return f"SDK 写入失败：{result.get('error_message') or 'unknown'}"
+    agent_code = result.get("agent_error_code") or ""
+    if agent_code:
+        return f"agent 抽取失败（{agent_code}）：{result.get('agent_error') or ''}"
+    if not _ids_of(result):
+        # SDK 偶发把上游失败吞成「成功 + 空 ids」：实测 LLM 抽取 EMPTY_RESPONSE
+        # 时会回滚 L1 并返回 ok+[]。必须视为失败，否则静默丢数据。
+        return f"SDK add 返回空 memory_ids（疑似抽取失败被吞）：{str(result)[:200]}"
+    return None
+
+
+def _execute_batch(rows, get_client) -> list[tuple[int, dict, list[str], str | None, Exception | None]]:
     """S3 批次执行：逐 job 锁外 extract+prepare → 一次 batch_commit（锁内）。
 
     返回逐 job 五元组 (job_id, result, ids, note, exc)：
@@ -161,14 +201,15 @@ def _execute_batch(conn, rows, get_client) -> list[tuple[int, dict, list[str], s
             continue
         r = results[ri]
         ri += 1
+        fail = _result_failure(r)
+        if fail:
+            out.append((row["id"], r, [], None, RuntimeError(fail)))
+            continue
         ids = _ids_of(r)
         note = None
         ln = (r.get("batch") or {}).get("lineage_note") or ""
         if ln:
             note = f"{ln}（挂链缺失但记忆可检索）"
-        elif not ids:
-            note = ("shadow_only: 抽取未产出可检索节点（只落 l1_raw 影子），本条检索不到；"
-                    "内容确有可抽取的事实时可 `hy-mem retry --shadow` 重做")
         out.append((row["id"], r, ids, note, None))
     return out
 
@@ -201,7 +242,7 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str], str | None]:
             pass  # 坏时间戳不入参（解析在入队前已拦截，这里是防御）
     if payload.get("request_id"):
         add_kw["request_id"] = str(payload["request_id"])
-    before = _snapshot_ids(client, ident) if tags else set()
+    before, before_complete = _snapshot_ids(client, ident) if tags else (set(), True)
     # R4 两段式（worker 侧，2026-10-29）：3 lane 线程共享一把跨进程 WriteLock，
     # 旧写法「锁内整段 client.add（含 LLM）」把 3 车道退化成串行 × 全程耗时。
     # 改为 extract 锁外（3 lane 真·并行过 LLM）+ 锁内 SDK 标准提交段。
@@ -233,24 +274,10 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str], str | None]:
         # 两段式的失败都走异常（ExtractFailed/CommitFailed → 上层 mark_failed
         # 重试，与旧路径 success=False / agent_error_code 语义对齐）；
         # extract 成功但 0 facts 是正常结论 → stored_ids 空 → shadow_only note。
+    fail = _result_failure(result)
+    if fail:
+        raise RuntimeError(fail)
     ids = _ids_of(result)
-    # 静默失败防线（0.9.8）：L1 原始层写成功 ≠ 记忆可用。
-    # SDK 在 L2 事实抽取失败时仍可能返回 success=True + 非空 ids（含 L1 id），
-    # 但诊断字段 agent_error_code 会带 EMPTY_RESPONSE / RECONCILE_FAILED 等。
-    # 只判 ids 会把「抽取失败」标成 done，记忆永远停在未抽取的 L1 状态。
-    # 这里把它变成重试（退避写在任务行 not_before），耗尽进死信可见。
-    # 注意区分：extractor 判定「无可提取事实」是正常结论（agent_status=success、
-    # agent_error_code 为空、L1 退居 shadow），不误判、不重试。
-    if result.get("success") is False:
-        raise RuntimeError(f"SDK 写入失败：{result.get('error_message') or 'unknown'}")
-    agent_code = result.get("agent_error_code") or ""
-    if agent_code:
-        raise RuntimeError(f"agent 抽取失败（{agent_code}）：{result.get('agent_error') or ''}")
-    if not ids:
-        # SDK 偶发把上游失败吞成「成功 + 空 ids」：实测 LLM 抽取 EMPTY_RESPONSE
-        # 时会回滚 L1 并返回 ok+[]。这里必须视为失败进重试，否则静默丢数据；
-        # 重试预算用尽进死信，可 queue --status dead 排查。
-        raise RuntimeError(f"SDK add 返回空 memory_ids（疑似抽取失败被吞）：{str(result)[:200]}")
 
     # 只落了 l1_raw 影子节点（PRD F9）：抽取没报错，但没产出可检索节点，
     # 记忆实际"写进去了却永远搜不到"。不做静默成功——打 stderr 告警，并把
@@ -264,7 +291,12 @@ def _execute_job(conn, row, get_client) -> tuple[dict, list[str], str | None]:
 
     tagged: list[str] = []
     if tags:
-        tagged, _ = _bind_tags_to_new(client, ident, before, ids, [str(t) for t in tags])
+        tagged, tag_note = _bind_tags_to_new(
+            client, ident, before, ids, [str(t) for t in tags],
+            before_complete=before_complete,
+        )
+        if tag_note:
+            note = f"{note}；{tag_note}" if note else tag_note
     return result, (tagged or ids), note
 
 
@@ -280,6 +312,9 @@ class _LaneState:
         self.active = 0  # 正在执行任务的 lane 数
         self.claimed_any = False
         self.last_active = time.time()
+        # lane 因领取/统计/入账异常而退出：必须可诊断，且不能装作正常收工
+        self.dead = 0
+        self.errors: list[str] = []
 
     def claim_started(self) -> None:
         with self._lock:
@@ -303,6 +338,19 @@ class _LaneState:
     def processed(self) -> int:
         with self._lock:
             return self.ok + self.failed
+
+    def lane_died(self, lane_id: int, where: str, exc: Exception) -> None:
+        """记录一条 lane 死亡（限流错误条数），供 cmd_worker 汇总诊断。"""
+        with self._lock:
+            self.dead += 1
+            if len(self.errors) < 5:
+                self.errors.append(
+                    f"lane{lane_id} died at {where}: {type(exc).__name__}: {exc}"
+                )
+
+    def deaths(self) -> tuple[int, list[str]]:
+        with self._lock:
+            return self.dead, list(self.errors)
 
 
 def cmd_worker(args) -> int:
@@ -358,11 +406,19 @@ def cmd_worker(args) -> int:
     stop = threading.Event()
     st = _LaneState()
     started = time.time()
-    conn_share: dict[int, object] = {}  # 每 lane 独享的 sqlite 连接（sqlite 不跨线程）
 
-    def lane(lane_id: int) -> None:
-        conn = store.connect()
-        conn_share[lane_id] = conn
+    def _lane_dead(lane_id: int, where: str, exc: Exception) -> None:
+        """lane 因领取/统计/入账异常退出：记账 + 打一条可诊断日志。"""
+        st.lane_died(lane_id, where, exc)
+        print(f"hy-mem: lane died: lane{lane_id} at {where}: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+
+    def _lane_loop(lane_id: int) -> None:
+        try:
+            conn = store.connect()
+        except Exception as e:  # noqa: BLE001  连不上库，这条 lane 无法工作
+            _lane_dead(lane_id, "connect", e)
+            return
         try:
             while not stop.is_set():
                 if args.max and st.processed() >= args.max:
@@ -377,22 +433,36 @@ def cmd_worker(args) -> int:
                 except ValueError:
                     batch_max = 4
                 rows_batch: list = []
+                stats: dict | None = None
                 if batch_max > 1:
-                    peek = store.queue_stats(conn).get("pending") or 0
-                    if peek > 1:
-                        rows_batch = store.claim_next_batch(
-                            conn, wid, limit=batch_max, compat_check=_batch_compat,
-                        )
+                    # 领取/统计段：窄捕获，异常即 lane 无法继续，记录后退出线程。
+                    # stats 一轮只查一次，传给 claim_next_batch 并在空队列分支复用，
+                    # 不再每轮重复 4 条统计 SQL（P1-4）。
+                    try:
+                        stats = store.queue_stats(conn)
+                        if (stats.get("pending") or 0) > 1:
+                            rows_batch = store.claim_next_batch(
+                                conn, wid, limit=batch_max, compat_check=_batch_compat,
+                                stats=stats,
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        _lane_dead(lane_id, "claim_batch", e)
+                        return
                 if len(rows_batch) >= 2:
                     st.claim_started()
                     t0 = time.time()
                     job_ids = [r["id"] for r in rows_batch]
                     try:
-                        outcomes = _execute_batch(conn, rows_batch, get_client)
+                        outcomes = _execute_batch(rows_batch, get_client)
                         for job_id, result, ids, note, exc in outcomes:
                             if exc is None:
-                                store.mark_done(conn, job_id, ids,
-                                                extra={"note": note} if note else None)
+                                # 入账段单独窄捕获：写库异常不能静默杀死 lane
+                                try:
+                                    store.mark_done(conn, job_id, ids,
+                                                    extra={"note": note} if note else None)
+                                except Exception as me:  # noqa: BLE001
+                                    _lane_dead(lane_id, "mark_done", me)
+                                    return
                                 st.done_one(True)
                                 ln = (result.get("batch") or {}).get("lineage_note") or ""
                                 print(f"[lane{lane_id}][batch][{job_id}] add ok "
@@ -404,8 +474,12 @@ def cmd_worker(args) -> int:
                                           "memory_ids": ids, "note": note}, True)
                             else:
                                 st.done_one(False)
-                                state = store.mark_failed(
-                                    conn, job_id, f"{type(exc).__name__}: {exc}", retry=True)
+                                try:
+                                    state = store.mark_failed(
+                                        conn, job_id, f"{type(exc).__name__}: {exc}", retry=True)
+                                except Exception as me:  # noqa: BLE001
+                                    _lane_dead(lane_id, "mark_failed", me)
+                                    return
                                 print(f"[lane{lane_id}][batch][{job_id}] FAILED -> {state}: "
                                       f"{type(exc).__name__}: {exc}", file=sys.stderr)
                                 if args.json:
@@ -424,9 +498,13 @@ def cmd_worker(args) -> int:
                         traceback.print_exc()
                         for jid in job_ids:
                             st.done_one(False)
-                            state = store.mark_failed(
-                                conn, jid, f"batch aborted: {type(e).__name__}: {e}",
-                                retry=True)
+                            try:
+                                state = store.mark_failed(
+                                    conn, jid, f"batch aborted: {type(e).__name__}: {e}",
+                                    retry=True)
+                            except Exception as me:  # noqa: BLE001
+                                _lane_dead(lane_id, "mark_failed", me)
+                                return
                             if args.json:
                                 emit({"ok": False, "job": jid, "state": state,
                                       "error": str(e)}, True)
@@ -437,9 +515,19 @@ def cmd_worker(args) -> int:
                     # 只领到 1 条（约束/异 user 止批）：退回单条路径语义
                     row = rows_batch[0]
                 else:
-                    row = store.claim_next(conn, wid)
+                    try:
+                        row = store.claim_next(conn, wid)
+                    except Exception as e:  # noqa: BLE001  领取段异常，lane 无法继续
+                        _lane_dead(lane_id, "claim_next", e)
+                        return
                 if row is None:
-                    qs = store.queue_stats(conn)
+                    if stats is None:
+                        try:
+                            stats = store.queue_stats(conn)
+                        except Exception as e:  # noqa: BLE001  统计段异常，lane 无法继续
+                            _lane_dead(lane_id, "queue_stats", e)
+                            return
+                    qs = stats
                     if args.once and st.active == 0:
                         # 一次性模式：无可领任务且本进程无在途 → 收工。
                         # 延迟重试的任务（not_before 未到）留待下次消费。
@@ -474,29 +562,47 @@ def cmd_worker(args) -> int:
                 st.claim_started()
                 t0 = time.time()
                 try:
-                    result, ids, note = _execute_job(conn, row, get_client)
-                    store.mark_done(conn, job_id, ids,
-                                    extra={"note": note} if note else None)
-                    st.done_one(True)
-                    ms = int((time.time() - t0) * 1000)
-                    print(f"[lane{lane_id}][{job_id}] {kind} ok {ms}ms ids={len(ids)}"
-                          + (" shadow_only" if note else ""), file=sys.stderr)
-                    if args.json:
-                        emit({"ok": True, "job": job_id, "kind": kind, "ms": ms,
-                              "memory_ids": ids, "note": note}, True)
-                except KeyboardInterrupt:
-                    store.mark_failed(conn, job_id, "interrupted", retry=True)
-                    raise
-                except Exception as e:  # noqa: BLE001
-                    st.done_one(False)
-                    state = store.mark_failed(conn, job_id, f"{type(e).__name__}: {e}", retry=True)
-                    print(
-                        f"[lane{lane_id}][{job_id}] {kind} FAILED -> {state}: {type(e).__name__}: {e}",
-                        file=sys.stderr,
-                    )
-                    if args.json:
-                        emit({"ok": False, "job": job_id, "state": state, "error": str(e)}, True)
-                    # 退避写在任务行（not_before），这里不 sleep，立刻领下一个
+                    # 任务执行仍是 per-job 捕获（不扩大到一个大 except 里）
+                    try:
+                        result, ids, note = _execute_job(conn, row, get_client)
+                    except KeyboardInterrupt:
+                        try:
+                            store.mark_failed(conn, job_id, "interrupted", retry=True)
+                        except Exception:  # noqa: BLE001  中断收尾失败不掩盖原异常
+                            pass
+                        raise
+                    except Exception as e:  # noqa: BLE001
+                        st.done_one(False)
+                        try:
+                            state = store.mark_failed(
+                                conn, job_id, f"{type(e).__name__}: {e}", retry=True)
+                        except Exception as me:  # noqa: BLE001  入账失败：lane 记账后退出
+                            _lane_dead(lane_id, "mark_failed", me)
+                            return
+                        print(
+                            f"[lane{lane_id}][{job_id}] {kind} FAILED -> {state}: "
+                            f"{type(e).__name__}: {e}",
+                            file=sys.stderr,
+                        )
+                        if args.json:
+                            emit({"ok": False, "job": job_id, "state": state,
+                                  "error": str(e)}, True)
+                        # 退避写在任务行（not_before），这里不 sleep，立刻领下一个
+                    else:
+                        # 入账段单独窄捕获：mark_done 失败不能静默杀死 lane
+                        try:
+                            store.mark_done(conn, job_id, ids,
+                                            extra={"note": note} if note else None)
+                        except Exception as me:  # noqa: BLE001
+                            _lane_dead(lane_id, "mark_done", me)
+                            return
+                        st.done_one(True)
+                        ms = int((time.time() - t0) * 1000)
+                        print(f"[lane{lane_id}][{job_id}] {kind} ok {ms}ms ids={len(ids)}"
+                              + (" shadow_only" if note else ""), file=sys.stderr)
+                        if args.json:
+                            emit({"ok": True, "job": job_id, "kind": kind, "ms": ms,
+                                  "memory_ids": ids, "note": note}, True)
                 finally:
                     st.claim_ended()
         finally:
@@ -504,6 +610,13 @@ def cmd_worker(args) -> int:
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def lane(lane_id: int) -> None:
+        """线程入口：最后一道兜底只记录死亡，不改变 per-job 执行捕获语义。"""
+        try:
+            _lane_loop(lane_id)
+        except Exception as e:  # noqa: BLE001
+            _lane_dead(lane_id, "lane", e)
 
     threads = [
         threading.Thread(target=lane, args=(i,), daemon=True, name=f"lane-{i}")
@@ -555,17 +668,24 @@ def cmd_worker(args) -> int:
     finally:
         conn.close()
     processed = st.processed()
+    deaths, lane_errors = st.deaths()
     payload = {
-        "ok": True, "lanes": lanes, "processed": processed,
+        "ok": not deaths, "lanes": lanes, "processed": processed,
         "succeeded": st.ok, "failed": st.failed, "queue": stats,
     }
+    if deaths:
+        # 「全部 lane 死掉但退出码 0」是旧缺陷：这里显式标记并汇总可诊断信息
+        payload["lane_deaths"] = deaths
+        payload["lane_errors"] = lane_errors
     if interrupted:
         payload["interrupted"] = True
     tail = f"，延迟重试 {stats['delayed']} 条" if stats.get("delayed") else ""
-    return ok(
-        payload, args.json,
-        f"worker 退出：{lanes} 线程，成功 {st.ok} / 失败 {st.failed} / 剩余待处理 {stats['pending']}{tail}",
-    )
+    human = (f"worker 退出：{lanes} 线程，成功 {st.ok} / 失败 {st.failed} / "
+             f"剩余待处理 {stats['pending']}{tail}")
+    if deaths:
+        human += f"；{deaths} 条 lane 异常退出（详见 lane_errors 与 stderr）"
+    rc = ok(payload, args.json, human)
+    return rc if not deaths else EXIT_RUNTIME
 
 
 def cmd_queue(args) -> int:

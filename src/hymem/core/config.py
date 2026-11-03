@@ -20,6 +20,8 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,12 +36,10 @@ GENERAL_LABEL = "通用"
 
 
 def _root() -> Path:
-    """安装根目录。冻结成 exe 后 __file__ 不可靠，交给 hy_mem_cli 统一判断。"""
+    """安装根目录。冻结成 exe 后 __file__ 不可靠，交给 hymem.cli 统一判断。"""
     env = os.getenv("HY_MEM_HOME")
     if env:
         return Path(env).resolve()
-    import sys
-
     from hymem.core.paths import app_root as _ar
 
     return _ar()
@@ -179,13 +179,49 @@ def exists() -> bool:
     return config_path().exists()
 
 
+# 最近一次 load_raw 的失败信息。损坏的 config.json 会被隔离成 .bad-<ts>，
+# 真正隔离不了时（权限/只读卷）由 config set 拒绝覆盖——绝不能让默认值
+# 静默盖掉用户原来的密钥配置。
+_last_load_error: dict[str, Any] | None = None
+
+
+def load_error() -> dict[str, Any] | None:
+    """最近一次读取失败的信息：path/reason/backup（backup 为 None 表示没备成）。"""
+    return dict(_last_load_error) if _last_load_error else None
+
+
+def _quarantine(p: Path) -> Path | None:
+    """把读不动的配置文件挪到 .bad-<ts>，保住原内容再继续。失败返回 None。"""
+    dst = p.with_name(f"{p.name}.bad-{time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        p.replace(dst)
+        return dst
+    except OSError:
+        return None
+
+
 def load_raw() -> dict:
+    global _last_load_error
     p = config_path()
     if not p.exists():
+        _last_load_error = None
         return {}
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        # utf-8-sig：BOM 是编码问题，不该当损坏文件处理
+        data = json.loads(p.read_text(encoding="utf-8-sig"))
+        if not isinstance(data, dict):
+            raise ValueError(f"配置根不是 JSON 对象，而是 {type(data).__name__}")
+        _last_load_error = None
+        return data
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        backup = _quarantine(p)
+        _last_load_error = {
+            "path": str(p),
+            "reason": f"{type(e).__name__}: {e}",
+            "backup": str(backup) if backup else None,
+        }
+        kept = f"已备份到 {backup}" if backup else "无法备份，文件留在原处（config set 将拒绝覆盖）"
+        print(f"hy-mem: 配置文件读取失败（{_last_load_error['reason']}），{kept}", file=sys.stderr)
         return {}
 
 
@@ -249,11 +285,16 @@ def _fill_from_env(cfg: dict) -> None:
         cfg["storage"]["dataDir"] = data_dir
 
     ms = take("HY_MEM_MIN_SCORE")
-    try:
-        if ms:
+    if ms:
+        try:
             cfg["search"]["minScore"] = float(ms)
-    except ValueError:
-        pass
+        except ValueError:
+            # 坏值不能静默：用户以为设了阈值，实际跑的是默认值。告警后忽略，
+            # 保留配置文件里的 minScore（没有则用默认 0.35）。
+            print(
+                f"hy-mem: 忽略非法的 HY_MEM_MIN_SCORE={ms!r}（应为数字，如 0.35）",
+                file=sys.stderr,
+            )
 
 
 def load() -> dict:
@@ -522,28 +563,66 @@ def apply_env(cfg: dict) -> None:
 # --------------------------------------------------------------------------
 # 校验
 # --------------------------------------------------------------------------
+def _as_int(value: Any) -> tuple[int | None, str | None]:
+    """安全转 int：返回 (值, 错误说明)。None/空串表示「未设置」，不算错误。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, None
+    if isinstance(value, bool):
+        return None, f"{value!r} 不是整数"
+    try:
+        if isinstance(value, float):
+            if not value.is_integer():
+                return None, f"{value!r} 不是整数"
+            return int(value), None
+        return int(str(value).strip()), None
+    except (TypeError, ValueError):
+        return None, f"{value!r} 不是整数"
+
+
+def _as_float(value: Any) -> tuple[float | None, str | None]:
+    """安全转 float：返回 (值, 错误说明)。None/空串表示「未设置」，不算错误。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, None
+    if isinstance(value, bool):
+        return None, f"{value!r} 不是数字"
+    try:
+        return float(str(value).strip()), None
+    except (TypeError, ValueError):
+        return None, f"{value!r} 不是数字"
+
+
 def validate(cfg: dict) -> list[tuple[str, bool, str]]:
     """返回 [(检查项, 是否通过, 说明)]。不发起网络请求，纯静态校验。"""
     out: list[tuple[str, bool, str]] = []
+    _le = load_error()
+    if _le:
+        _where = f"；已备份到 {_le['backup']}" if _le.get("backup") else "；无法备份，config set 会拒绝覆盖"
+        out.append(("config.json", False, f"{_le['reason']}{_where}"))
     emb = cfg.get("embedding") or {}
     llm = cfg.get("llm") or {}
     mode = cfg.get("mode")
 
     out.append(("mode", mode in ("lite", "pro", "ultra"), f"MEMORY_MODE={mode}"))
 
-    # 记忆后端名：白名单来自 ports/registry（延迟 import 防环）
+    # 记忆后端名：白名单来自 ports/registry（延迟 import 防环）。
+    # import 失败是真实故障，必须 FAIL 并带上原因——绝不能吞成 True。
     _bk = str(((cfg.get("backend") or {}).get("memory")) or "hy-memory")
     try:
         from hymem.ports.registry import available_backends as _ab
 
         out.append(("backend.memory", _bk in _ab(), _bk))
-    except Exception:  # noqa: BLE001
-        out.append(("backend.memory", True, _bk))
+    except Exception as e:  # noqa: BLE001
+        out.append(("backend.memory", False, f"{_bk}（注册表不可用：{type(e).__name__}: {e}）"))
 
     provider = str(emb.get("provider") or "").lower()
     out.append(("embedding.provider", provider in ("openai", "local"), f"provider={provider}"))
-    dims = int(emb.get("dims") or 0)
-    out.append(("embedding.dims", dims > 0, f"dims={dims}"))
+    dims, dims_err = _as_int(emb.get("dims"))
+    if dims_err:
+        out.append(("embedding.dims", False, f"非法值：{dims_err}"))
+    elif dims is None:
+        out.append(("embedding.dims", False, "未设置"))
+    else:
+        out.append(("embedding.dims", dims > 0, f"dims={dims}"))
     if provider == "openai":
         out.append(("embedding.baseUrl", bool(emb.get("baseUrl")), str(emb.get("baseUrl") or "未设置")))
         out.append(("embedding.model", bool(emb.get("model")), str(emb.get("model") or "未设置")))
@@ -586,18 +665,29 @@ def validate(cfg: dict) -> list[tuple[str, bool, str]]:
         True,
         f"{ev_model}" if ev_model else f"未设置，沿用 llm.model={llm.get('model') or '未设置'}",
     ))
-    mt = int(ev["maxTokens"]) if ev.get("maxTokens") is not None else int(ev_def["maxTokens"])
-    out.append(("evolve.maxTokens", mt >= 2000, f"{mt}（低于 2000 会截断 schema JSON）"))
-    sl = int(ev["schemaLimit"]) if ev.get("schemaLimit") is not None else int(ev_def["schemaLimit"])
-    out.append(("evolve.schemaLimit", 0 <= sl <= 10, f"{sl}（0 关检索，上限 10）"))
-    sms = (
-        float(ev["schemaMinScore"])
-        if ev.get("schemaMinScore") is not None
-        else float(ev_def["schemaMinScore"])
-    )
+    mt, mt_err = _as_int(ev.get("maxTokens"))
+    if mt is None and mt_err is None:
+        mt = int(ev_def["maxTokens"])
+    out.append((
+        "evolve.maxTokens",
+        False if mt_err else mt >= 2000,
+        f"非法值：{mt_err}" if mt_err else f"{mt}（低于 2000 会截断 schema JSON）",
+    ))
+    sl, sl_err = _as_int(ev.get("schemaLimit"))
+    if sl is None and sl_err is None:
+        sl = int(ev_def["schemaLimit"])
+    out.append((
+        "evolve.schemaLimit",
+        False if sl_err else 0 <= sl <= 10,
+        f"非法值：{sl_err}" if sl_err else f"{sl}（0 关检索，上限 10）",
+    ))
+    sms, sms_err = _as_float(ev.get("schemaMinScore"))
+    if sms is None and sms_err is None:
+        sms = float(ev_def["schemaMinScore"])
     out.append((
         "evolve.schemaMinScore",
-        0.0 < sms <= 1.0,
+        False if sms_err else 0.0 < sms <= 1.0,
+        f"非法值：{sms_err}" if sms_err else
         f"{sms}（中文 query 对英文 schema 实测 0.17~0.34，0.25 落在相关/无关空档；"
         "过高会静默滤空，过低会放进无关归纳）",
     ))
@@ -608,15 +698,27 @@ def validate(cfg: dict) -> list[tuple[str, bool, str]]:
         "技术型中文记忆被归纳成英文 schema 时配 zh）",
     ))
     _auto = ev.get("auto") or {}
-    _auto_enabled = bool(_auto.get("enabled", ev_def.get("auto", {}).get("enabled", True)))
-    _auto_min = int(_auto.get("minNewFacts") or ev_def.get("auto", {}).get("minNewFacts") or 8)
-    _auto_cd = float(_auto.get("cooldownHours") or ev_def.get("auto", {}).get("cooldownHours") or 24)
-    out.append((
-        "evolve.auto",
-        _auto_min >= 1 and _auto_cd > 0,
-        f"enabled={_auto_enabled}（仅 ultra 生效）, minNewFacts={_auto_min}, "
-        f"cooldownHours={_auto_cd:g}——add 后自动沉淀 L6，失败按 2^n 退避（上限 7 天）",
-    ))
+    _auto_def = ev_def.get("auto", {})
+    _auto_enabled = bool(_auto.get("enabled", _auto_def.get("enabled", True)))
+    _auto_min, _auto_min_err = _as_int(_auto.get("minNewFacts"))
+    if _auto_min is None and _auto_min_err is None:
+        _auto_min = int(_auto_def.get("minNewFacts") or 8)
+    _auto_cd, _auto_cd_err = _as_float(_auto.get("cooldownHours"))
+    if _auto_cd is None and _auto_cd_err is None:
+        _auto_cd = float(_auto_def.get("cooldownHours") or 24)
+    if _auto_min_err or _auto_cd_err:
+        out.append((
+            "evolve.auto",
+            False,
+            f"非法值：{_auto_min_err or _auto_cd_err}（minNewFacts/cooldownHours 必须是数字）",
+        ))
+    else:
+        out.append((
+            "evolve.auto",
+            _auto_min >= 1 and _auto_cd > 0,
+            f"enabled={_auto_enabled}（仅 ultra 生效）, minNewFacts={_auto_min}, "
+            f"cooldownHours={_auto_cd:g}——add 后自动沉淀 L6，失败按 2^n 退避（上限 7 天）",
+        ))
     # 注意：这条恒为 True。pro/lite 下 L6 不可用是**预期状态**不是配置错误，
     # 标红会让用户以为配坏了。想用 L6 的人看到提示就知道该切 ultra。
     if mode != "ultra":

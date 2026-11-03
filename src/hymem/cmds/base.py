@@ -19,7 +19,7 @@ from pathlib import Path
 from hymem.core import netprobe
 from hymem.core import store
 from hymem.core import vdb_endpoint
-from hymem.mcp.server import _in_range, _item_ts, _parse_time as _parse_when
+from hymem.core.timefilter import _in_range, _item_ts, _parse_time as _parse_when
 
 from hymem.core.errors import EXIT_INTERNAL, EXIT_OK, EXIT_RUNTIME, EXIT_USAGE  # noqa: F401
 from hymem.core.errors import classify_error, error_detail  # noqa: F401
@@ -469,6 +469,16 @@ def sweep_derived_nodes(client: object, root_id: str) -> tuple[list[str], str]:
     return _f(client, root_id)
 
 
+def delete_memory_with_cascade(client: object, memory_id: str) -> dict:
+    from hymem.core.clientops import delete_memory_with_cascade as _f
+    return _f(client, memory_id)
+
+
+def update_memory(client: object, memory_id: str, content: str):
+    from hymem.core.clientops import update_memory as _f
+    return _f(client, memory_id, content)
+
+
 def add_sync_with_retry(client: object, text: str, *, attempts: int = 4, **kw):
     from hymem.core.clientops import add_sync_with_retry as _f
     return _f(client, text, attempts=attempts, **kw)
@@ -514,7 +524,7 @@ def _parse_memory_at(v):
     return _f(v)
 
 
-def _snapshot_ids(client, ident: dict, cap: int = 2000) -> set:
+def _snapshot_ids(client, ident: dict, cap: int = 2000) -> tuple[set[str], bool]:
     from hymem.core.searchops import _snapshot_ids as _f
     return _f(client, ident, cap)
 
@@ -616,103 +626,29 @@ def _split_lines(text: str) -> list[str]:
 
 
 def _bind_tags_to_new(client, ident: dict, before: set[str], returned: list[str],
-                      tags: list[str]) -> tuple[list[str], set[str]]:
-    """把用户标签绑到「本次真正新建的可检索节点」上，返回 (绑定的 id, 新快照)。
-
-    为什么不直接用 add 返回的 ids（0.9.9 / PRD F7）：抽取没产出节点时，
-    add 只回 l1_raw（status=shadow）的 id，标签就挂在一个永远搜不到的影子
-    节点上——用户看到的现象是「标签丢了」，而且 list/search --tag 都返回空。
-    改用「写入前后 list_memories 差分」，拿到的是向量库里真实存在的节点。
-
-    差分对 reconcile 也成立：把内容合并进老节点时 fresh 为空，退回
-    `_new_ids_only` 的老逻辑（至少挂一个，别让标签彻底没有去处）。
-    """
-    after = _snapshot_ids(client, ident)
-    fresh = sorted(after - before)
-    target = fresh or _new_ids_only(returned, before)
-    _bind_tags(target, tags, "user")
-    return target, after
+                      tags: list[str], *, before_complete: bool = True) -> tuple[list[str], str]:
+    from hymem.core.searchops import _bind_tags_to_new as _f
+    return _f(client, ident, before, returned, tags, before_complete=before_complete)
 
 
 def _remember_auto(items: list[dict]) -> None:
-    """把检索/列表顺带看到的 LLM 标签缓存进本地索引，供 tags 统计与过滤复用。"""
-    if os.getenv("HY_MEM_TAG_AUTOSYNC") == "0":
-        return
-    pairs = [(str(it.get("memory_id")), it.get("tags") or []) for it in items if isinstance(it, dict)]
-    pairs = [(mid, tags) for mid, tags in pairs if mid and mid != "None" and tags]
-    if not pairs:
-        return
-    try:
-        conn = store.connect()
-        try:
-            for mid, tags in pairs:
-                store.bind_tags(conn, [mid], [str(t) for t in tags], "auto")
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001
-        pass  # 只读路径不能因为标签缓存失败而整体报错
+    from hymem.core.searchops import _remember_auto as _f
+    return _f(items)
 
 
 def _effective_tags(items: list[dict]) -> dict[str, set[str]]:
-    mids = [str(it.get("memory_id")) for it in items if isinstance(it, dict) and it.get("memory_id")]
-    local: dict[str, list[str]] = {}
-    if mids:
-        try:
-            conn = store.connect()
-            try:
-                local = store.tags_for(conn, mids)
-            finally:
-                conn.close()
-        except Exception:  # noqa: BLE001
-            local = {}
-    out: dict[str, set[str]] = {}
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        mid = str(it.get("memory_id") or "")
-        s = {str(t).lower() for t in (it.get("tags") or [])}
-        s |= {str(t).lower() for t in local.get(mid, [])}
-        out[mid] = s
-    return out
+    from hymem.core.searchops import _effective_tags as _f
+    return _f(items)
 
 
 def _filter_by_tags(items: list[dict], tags: list[str] | None, tag_mode: str = "all") -> list[dict]:
-    """标签过滤。SDK 的 search() 没有 tag 参数，只能在召回结果上后过滤，
-    因此调用方必须先 over-fetch（多取 N 倍），否则过滤后可能剩不下东西。"""
-    if not tags:
-        return items
-    want = {t.strip().lower() for t in tags if t and t.strip()}
-    if not want:
-        return items
-    eff = _effective_tags(items)
-    out = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        have = eff.get(str(it.get("memory_id") or ""), set())
-        hit = want <= have if tag_mode == "all" else bool(want & have)
-        if hit:
-            it["_tags"] = sorted(have)
-            out.append(it)
-    return out
+    from hymem.core.searchops import _filter_by_tags as _f
+    return _f(items, tags, tag_mode)
 
 
 def _pending_jobs() -> int:
-    """队列里还有多少条没落库。
-
-    用途：解释了「刚写完却查不到」这种最常见困惑 —— 写是异步的，任务还在
-    队列里等着 worker 消费，库自然没有它。查队列本身失败时返回 0，绝不
-    因为一句提示而把检索搞挂。
-    """
-    try:
-        conn = store.connect()
-        try:
-            stats = store.queue_stats(conn) or {}
-            return int(stats.get("pending") or 0) + int(stats.get("running") or 0)
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001
-        return 0
+    from hymem.core.searchops import _pending_jobs as _f
+    return _f()
 
 
 def config_defaults_user() -> str:

@@ -129,8 +129,64 @@ def make_sandbox(mode: str, base_cfg: dict) -> Path:
     return sb
 
 
+def _p15_l6_offline_checks() -> None:
+    """P1-5 离线证据（不依赖真实模型/网络）：
+
+    1. 同一 query 第二次 L6 检索不再产生额外 embed（query 向量短缓存）。
+    2. 空结果的 `_l6_schema_stats` 第二次不再全量 `get_all_nodes(limit=1000)`
+       （短 TTL 缓存）——改前「空结果 = 最慢路径」。
+    语义不变：仍然报 `empty:N`（有 schema 但被阈值滤空）。
+    """
+    import types
+
+    from hymem.backends.hymemory import searchops as so
+
+    class _Graph:
+        _available = True
+
+        def __init__(self) -> None:
+            self.node_calls = 0
+
+        async def get_all_nodes(self, **kw):
+            self.node_calls += 1
+            return [types.SimpleNamespace(embedding=[0.1, 0.2])]
+
+        async def vector_search(self, **kw):
+            return []  # 空结果：走 stats 解释路径
+
+    class _Emb:
+        def __init__(self) -> None:
+            self.embed_calls = 0
+
+        async def embed(self, text):
+            self.embed_calls += 1
+            return [[0.3, 0.4]]
+
+    class _Client:
+        _mode = "ultra"
+
+        def __init__(self) -> None:
+            self._graph_store = _Graph()
+            self._embed_service = _Emb()
+
+    print("\n== P1-5 离线：L6 embed / schema 统计复用 ==")
+    so._reset_l6_caches()
+    c = _Client()
+    so.fetch_l6_schemas(c, "同一个 query", user_id="u1", limit=3, min_score=0.25)
+    e1 = c._embed_service.embed_calls
+    n1 = c._graph_store.node_calls
+    check("P1-5 首次 L6 只 embed 一次", e1 == 1, f"embeds={e1}")
+    _, state2 = so.fetch_l6_schemas(c, "同一个 query", user_id="u1", limit=3, min_score=0.25)
+    check("P1-5 同一 query 第二次检索不再产生额外 embed",
+          c._embed_service.embed_calls == e1, f"first={e1} total={c._embed_service.embed_calls}")
+    check("P1-5 空结果统计第二次不再全量拉取",
+          c._graph_store.node_calls == n1, f"first={n1} total={c._graph_store.node_calls}")
+    check("P1-5 语义不变：仍报 empty:N", str(state2).startswith("empty:"), state2)
+
+
 def main() -> int:
     exe = sys.argv[1] if len(sys.argv) > 1 else None
+    _p15_l6_offline_checks()
     if not _secrets.have_all():
         print(f"跳过 test_evolve：缺少真实密钥（{_secrets.describe()}）")
         print("  本测试会真实调用嵌入/抽取模型跑一次 evolve，请先配置环境变量。")

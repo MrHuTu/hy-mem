@@ -53,7 +53,6 @@
 
 from __future__ import annotations
 
-import getpass
 import os
 import shutil
 import sys

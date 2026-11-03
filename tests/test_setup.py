@@ -163,6 +163,42 @@ def main() -> int:
     check("清空成功且目录保留", ok and dst.exists(), msg)
     check("清空后为空", storage_ops.dir_usage(str(dst))[1] == 0)
 
+    # P0-3：部分文件复制失败必须判失败并列出失败文件；备份失败必须阻断清空
+    print("\nP0-3 迁移/清空失败必须阻断")
+    src2 = TMP / "data_partial"
+    dst2 = TMP / "moved_partial"
+    (src2 / "sub").mkdir(parents=True, exist_ok=True)
+    (src2 / "sub" / "a.bin").write_bytes(b"a" * 1024)
+    (src2 / "sub" / "b.bin").write_bytes(b"b" * 1024)
+    _real_copy2 = storage_ops.shutil.copy2
+
+    def _flaky_copy2(s, d, *a, **k):
+        if Path(d).name == "b.bin":
+            raise PermissionError("locked by another process")
+        return _real_copy2(s, d, *a, **k)
+
+    storage_ops.shutil.copy2 = _flaky_copy2
+    try:
+        ok, msg = storage_ops.migrate(str(src2), str(dst2))
+    finally:
+        storage_ops.shutil.copy2 = _real_copy2
+    check("部分文件复制失败时迁移判失败", not ok, msg)
+    check("失败信息列出失败文件", "b.bin" in msg, msg)
+    check("已复制文件仍落盘（便于排查后重试）", (dst2 / "sub" / "a.bin").exists())
+
+    src3 = TMP / "data_wipe_blocked"
+    src3.mkdir(parents=True, exist_ok=True)
+    keep = src3 / "keep.bin"
+    keep.write_bytes(b"keep")
+    _real_backup = storage_ops.backup
+    storage_ops.backup = lambda p: (False, "模拟备份失败")
+    try:
+        ok, msg = storage_ops.wipe(str(src3))
+    finally:
+        storage_ops.backup = _real_backup
+    check("备份失败时清空判失败", not ok, msg)
+    check("备份失败时不清数据", keep.exists(), msg)
+
     # ---- 6. 路径归一化 ----
     print("\n路径归一化")
     p = storage_ops.normalize_path('"~/hy-mem/data/"')
@@ -748,6 +784,120 @@ def main() -> int:
           cfgmod.load_raw()["llm"]["model"] != "written-model",
           cfgmod.load_raw()["llm"]["model"])
     setup_wizard.probe_llm = _saved_probe
+
+    # ---- S. P1-6 配置边界健壮性（非法值 / 注册表不可用 / 损坏文件） ----
+    print("\nP1-6 配置边界健壮性")
+    _base_cfg = json.loads(json.dumps(cfgmod.load()))
+
+    # S1 非法值必须变成 FAIL 行，而不是抛 traceback
+    _bad_cfg = json.loads(json.dumps(_base_cfg))
+    _bad_cfg["embedding"]["dims"] = "abc"
+    _bad_cfg["evolve"]["maxTokens"] = "abc"
+    _bad_cfg["evolve"]["schemaLimit"] = "abc"
+    _bad_cfg["evolve"]["schemaMinScore"] = "abc"
+    _bad_cfg["evolve"]["auto"]["minNewFacts"] = "abc"
+    _bad_cfg["evolve"]["auto"]["cooldownHours"] = "abc"
+    try:
+        _chk = {n: (p, d) for n, p, d in cfgmod.validate(_bad_cfg)}
+        check("非法 embedding.dims → FAIL 行", _chk["embedding.dims"][0] is False, _chk["embedding.dims"][1])
+        check("非法 evolve.maxTokens → FAIL 行", _chk["evolve.maxTokens"][0] is False, _chk["evolve.maxTokens"][1])
+        check("非法 evolve.schemaLimit → FAIL 行", _chk["evolve.schemaLimit"][0] is False, _chk["evolve.schemaLimit"][1])
+        check("非法 evolve.schemaMinScore → FAIL 行", _chk["evolve.schemaMinScore"][0] is False, _chk["evolve.schemaMinScore"][1])
+        check("非法 evolve.auto → FAIL 行", _chk["evolve.auto"][0] is False, _chk["evolve.auto"][1])
+        check("validate 非法值不抛 traceback", True)
+    except Exception as e:  # noqa: BLE001
+        check("validate 非法值不抛 traceback", False, f"{type(e).__name__}: {e}")
+
+    # S2 null 同样是非法值：必须出 FAIL 行
+    _null_cfg = json.loads(json.dumps(_base_cfg))
+    _null_cfg["embedding"]["dims"] = None
+    try:
+        _chk_null = {n: (p, d) for n, p, d in cfgmod.validate(_null_cfg)}
+        check("embedding.dims=null → FAIL 行而非异常",
+              _chk_null["embedding.dims"][0] is False, _chk_null["embedding.dims"][1])
+    except Exception as e:  # noqa: BLE001
+        check("embedding.dims=null → FAIL 行而非异常", False, f"{type(e).__name__}: {e}")
+
+    # S3 registry 不可用不能吞成 True
+    _reg_mod = sys.modules.get("hymem.ports.registry", "missing")
+    sys.modules["hymem.ports.registry"] = None  # 模拟 import 失败
+    try:
+        _chk_reg = {n: (p, d) for n, p, d in cfgmod.validate(_base_cfg)}
+        check("registry import 失败 → backend.memory FAIL",
+              _chk_reg["backend.memory"][0] is False, _chk_reg["backend.memory"][1])
+        check("registry 失败原因写进说明", "注册表" in _chk_reg["backend.memory"][1], _chk_reg["backend.memory"][1])
+    except Exception as e:  # noqa: BLE001
+        check("registry import 失败不抛异常", False, f"{type(e).__name__}: {e}")
+    finally:
+        if _reg_mod == "missing":
+            sys.modules.pop("hymem.ports.registry", None)
+        else:
+            sys.modules["hymem.ports.registry"] = _reg_mod
+
+    # S4 坏 JSON 不能静默返回 {} 后被 config set 用默认值整体覆盖
+    _saved_cfg_env = os.environ.get("HY_MEM_CONFIG")
+    _bad_dir = TMP / "badcfg"
+    _bad_dir.mkdir(parents=True, exist_ok=True)
+    _bad_file = _bad_dir / "config.json"
+    _original = '{"mode": "pro", "llm": {"apiKey": "SECRET-123"}'
+    _bad_file.write_text(_original, encoding="utf-8")
+    os.environ["HY_MEM_CONFIG"] = str(_bad_file)
+    try:
+        _loaded = cfgmod.load_raw()
+        _err = cfgmod.load_error()
+        _backups = sorted(_bad_dir.glob("config.json.bad-*"))
+        check("坏 JSON：load_raw 不返回半截/空配置", _loaded == {}, repr(_loaded))
+        check("坏 JSON：原始内容备份为 .bad-<ts>",
+              bool(_backups) and _backups[0].read_text(encoding="utf-8") == _original,
+              f"backups={[p.name for p in _backups]}")
+        check("坏 JSON：load_error 带原因与备份路径",
+              bool(_err and _err.get("reason") and _err.get("backup") and Path(_err["backup"]).exists()),
+              repr(_err))
+    finally:
+        if _saved_cfg_env is None:
+            os.environ.pop("HY_MEM_CONFIG", None)
+        else:
+            os.environ["HY_MEM_CONFIG"] = _saved_cfg_env
+
+    # S5 BOM 是编码问题，不是损坏：应能正常读出
+    _bom_file = TMP / "bomcfg" / "config.json"
+    _bom_file.parent.mkdir(parents=True, exist_ok=True)
+    _bom_file.write_bytes(b"\xef\xbb\xbf" + json.dumps({"mode": "lite"}).encode("utf-8"))
+    os.environ["HY_MEM_CONFIG"] = str(_bom_file)
+    try:
+        check("带 BOM 的配置能正常读出", cfgmod.load_raw() == {"mode": "lite"}, repr(cfgmod.load_raw()))
+    finally:
+        if _saved_cfg_env is None:
+            os.environ.pop("HY_MEM_CONFIG", None)
+        else:
+            os.environ["HY_MEM_CONFIG"] = _saved_cfg_env
+
+    # S6 无法备份时必须拒绝覆盖（否则坏文件真的会丢）
+    _refuse_file = TMP / "refusecfg" / "config.json"
+    _refuse_file.parent.mkdir(parents=True, exist_ok=True)
+    _refuse_file.write_text("{bad json", encoding="utf-8")
+    os.environ["HY_MEM_CONFIG"] = str(_refuse_file)
+    _real_quarantine = getattr(cfgmod, "_quarantine", None)
+    if _real_quarantine is None:
+        check("无法备份时 config set 拒绝覆盖", False, "缺少 _quarantine")
+    else:
+        cfgmod._quarantine = lambda p: None  # 模拟备份失败（权限/只读卷）
+        try:
+            from types import SimpleNamespace
+
+            from hymem.cmds import config as cfg_cmds  # noqa: E402
+            rc = cfg_cmds.cmd_config(
+                SimpleNamespace(action="set", pairs=["lang=en"], json=True, yes=False)
+            )
+            check("无法备份时 config set 拒绝覆盖", rc != 0, f"rc={rc}")
+            check("拒绝覆盖后坏文件原样保留",
+                  _refuse_file.read_text(encoding="utf-8") == "{bad json")
+        finally:
+            cfgmod._quarantine = _real_quarantine
+            if _saved_cfg_env is None:
+                os.environ.pop("HY_MEM_CONFIG", None)
+            else:
+                os.environ["HY_MEM_CONFIG"] = _saved_cfg_env
 
     bad = results.count(False)
     print(f"\n{'全部通过' if not bad else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")

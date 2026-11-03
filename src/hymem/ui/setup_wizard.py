@@ -1097,7 +1097,6 @@ def _run_settings_menu(cfg: dict, old_cfg: dict) -> int:
         cfg = _apply_step(cfg, key, value)
         try:
             _commit(before, cfg)
-            old_cfg = dict(cfg)
         except tui.Aborted:
             print()
             tui.warn("已取消，此项未改动。")

@@ -10,7 +10,7 @@
   * 缺密钥时**明确报错并给出配置命令**，绝不静默跳过——静默跳过会让「全绿」
     变成假象（本次之所以要这个模块，就是吃过「测试过了但过的是假的」的亏）。
 
-两个变量名沿用 SDK 自己的约定（`cli/config.py` 与 hy-memory 都认这两个），
+两个变量名沿用 SDK 自己的约定（`src/hymem/cmds/config.py` 与 hy-memory 都认这两个），
 不另造新概念：
 
     MEMORY_EMBEDDER_API_KEY   向量模型（embedding）密钥
@@ -46,7 +46,7 @@ EMBED_KEY_ENV = "MEMORY_EMBEDDER_API_KEY"
 # 「走环境变量」，把 REDACTED 认作「用户真填了这个值」，后者会拿去建连接。
 REDACTED = ""
 
-# 从聊天窗口/文档粘密钥最容易带进来的不可见字符（与 cli/config.py 同口径）
+# 从聊天窗口/文档粘密钥最容易带进来的不可见字符（与 src/hymem/cmds/config.py 同口径）
 _INVISIBLE = {
     "\ufeff": "BOM", "\u200b": "零宽空格", "\u200c": "零宽连接符",
     "\u200d": "零宽连接符", "\u00a0": "不换行空格",

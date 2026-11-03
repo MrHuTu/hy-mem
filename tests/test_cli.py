@@ -407,6 +407,179 @@ def main() -> int:
     purged, note = sweep_derived_nodes(bc, "root")
     check("R1 内部不可达时降级且带 note", purged == [] and "可能残留" in note, f"{purged}|{note[:40]}")
 
+    # ── P0-2 MCP 删除/更新对齐 CLI（离线假 SDK，沙箱 store）───────────────
+    print("\nP0-2 MCP 删除/更新：校验 success + 级联清扫")
+    _p02 = Path(tempfile.mkdtemp(prefix="hymem-p02-"))
+    _p02_env = {"MEMORY_DATA_DIR": str(_p02 / "data")}
+    _saved_p02 = {k: os.environ.get(k) for k in _p02_env}
+    os.environ.update(_p02_env)
+    try:
+        from hymem.mcp import server as mcp_server  # noqa: E402
+
+        class _P02Col:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def get(self, ids=None, where=None, include=None):
+                key = (where or {}).get("source_raw_memory_id", {}).get("$eq")
+                hit = [i for i, r in self.rows.items() if key and r.get("source_raw_memory_id") == key]
+                return {"ids": hit, "metadatas": []}
+
+        class _P02Client:
+            def __init__(self, mode="ok"):
+                self.mode = mode
+                self.deleted = []
+                self.rows = {
+                    "root": {"source_raw_memory_id": ""},
+                    "ghost1": {"source_raw_memory_id": "root"},
+                    "ghost2": {"source_raw_memory_id": "root"},
+                }
+                self._vector_store = type("VS", (), {"_collection": _P02Col(self.rows)})()
+
+            def delete(self, nid):
+                self.deleted.append(nid)
+                if self.mode == "fail-root" and nid == "root":
+                    return {"success": False, "deleted_count": 0}
+                return {"success": True, "deleted_count": 1}
+
+            def get(self, mid):
+                return {"memory_id": mid, "content": "old"}
+
+            def update(self, mid, content):
+                if self.mode == "fail-update":
+                    return {"success": False, "error_message": "update boom"}
+                return {"success": True, "memory_id": mid, "content": content}
+
+        _old_client = mcp_server._CLIENT
+        c = _P02Client()
+        mcp_server._CLIENT = c
+        try:
+            out = json.loads(mcp_server._tool_delete_memory({"memory_id": "root", "confirm": True}))
+            check("P0-2 MCP 删除成功返回 deleted", out.get("deleted") == "root", str(out)[:100])
+            check("P0-2 MCP 删除级联清扫派生节点",
+                  sorted(out.get("swept") or []) == ["ghost1", "ghost2"], str(out)[:100])
+            check("P0-2 MCP 删除确实删了派生节点",
+                  sorted(c.deleted) == ["ghost1", "ghost2", "root"], str(c.deleted))
+        finally:
+            mcp_server._CLIENT = _old_client
+
+        c = _P02Client("fail-root")
+        mcp_server._CLIENT = c
+        try:
+            raised = False
+            try:
+                mcp_server._tool_delete_memory({"memory_id": "root", "confirm": True})
+            except Exception:  # noqa: BLE001
+                raised = True
+            check("P0-2 MCP 删除失败以工具错误返回（不报成功）", raised)
+        finally:
+            mcp_server._CLIENT = _old_client
+
+        c = _P02Client()
+        mcp_server._CLIENT = c
+        try:
+            out = json.loads(mcp_server._tool_update_memory(
+                {"memory_id": "root", "content": "new", "confirm": True}))
+            check("P0-2 MCP 更新成功仍返回 updated", out.get("updated") == "root" and out.get("result"),
+                  str(out)[:100])
+        finally:
+            mcp_server._CLIENT = _old_client
+
+        c = _P02Client("fail-update")
+        mcp_server._CLIENT = c
+        try:
+            raised = False
+            try:
+                mcp_server._tool_update_memory({"memory_id": "root", "content": "new", "confirm": True})
+            except Exception:  # noqa: BLE001
+                raised = True
+            check("P0-2 MCP 更新失败以工具错误返回（不报成功）", raised)
+        finally:
+            mcp_server._CLIENT = _old_client
+    finally:
+        for k, v in _saved_p02.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import shutil as _shutil
+
+        _shutil.rmtree(_p02, ignore_errors=True)
+
+    # ── P1-1 MCP 同步 add：正确解包 vdb 快照，失败/不完整不打标签 ──────
+    print("\nP1-1 MCP 同步 add 标签快照")
+    _p11 = Path(tempfile.mkdtemp(prefix="hymem-p11-"))
+    _p11_env = {"MEMORY_DATA_DIR": str(_p11 / "data")}
+    _saved_p11 = {k: os.environ.get(k) for k in _p11_env}
+    os.environ.update(_p11_env)
+    try:
+        from hymem.mcp import server as mcp_server  # noqa: E402
+        from hymem.core import store as _store, two_phase
+
+        class _P11Client:
+            def __init__(self, memories):
+                self.memories = memories
+                self.fail = False
+
+            def list_memories(self, limit=200, offset=0, **kw):
+                if self.fail:
+                    raise RuntimeError("list failed")
+                # 真 SDK 按 limit/offset 分页；不返回空页就永远不知道到底
+                return {"vdb": {"memories": list(self.memories)[offset:offset + limit]}}
+
+        def _commit_with(old, new):
+            def _commit(client, text, ar, **kw):
+                client.memories = [{"memory_id": old}, {"memory_id": new}]
+                return {"success": True, "memory_id": "l1", "memory_ids": [old, new]}
+            return _commit
+
+        real = (two_phase.extract_phase, two_phase.prepare_commit, two_phase.commit_extracted_with_retry)
+        _old_client = mcp_server._CLIENT
+        try:
+            c = _P11Client([{"memory_id": "old1"}])
+            mcp_server._CLIENT = c
+            two_phase.extract_phase = lambda *a, **k: {"ok": True}
+            two_phase.prepare_commit = lambda *a, **k: {}
+            two_phase.commit_extracted_with_retry = _commit_with("old1", "new1")
+            out1 = json.loads(mcp_server._tool_add_memory(
+                {"text": "x", "tags": ["t1"], "async": False}))
+            conn = _store.connect()
+            try:
+                got1 = _store.tags_for(conn, ["old1", "new1"])
+            finally:
+                conn.close()
+            check("P1-1 vdb 解包后只给新节点打标签",
+                  got1.get("new1") == ["t1"] and not got1.get("old1"), str(got1))
+            check("P1-1 同步 add 输出契约未变",
+                  out1.get("mode") == "sync" and out1.get("memory_ids") == ["old1", "new1"], str(out1))
+
+            c2 = _P11Client([{"memory_id": "old2"}])
+            c2.fail = True
+            mcp_server._CLIENT = c2
+            two_phase.commit_extracted_with_retry = _commit_with("old2", "new2")
+            out2 = json.loads(mcp_server._tool_add_memory(
+                {"text": "x", "tags": ["t2"], "async": False}))
+            conn = _store.connect()
+            try:
+                got2 = _store.tags_for(conn, ["old2", "new2"])
+            finally:
+                conn.close()
+            check("P1-1 快照失败时跳过标签绑定",
+                  not got2.get("new2") and not got2.get("old2"), str(got2))
+            check("P1-1 快照失败时输出 note 说明", "未绑定" in (out2.get("note") or ""), str(out2))
+        finally:
+            two_phase.extract_phase, two_phase.prepare_commit, two_phase.commit_extracted_with_retry = real
+            mcp_server._CLIENT = _old_client
+    finally:
+        for k, v in _saved_p11.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import shutil as _shutil
+
+        _shutil.rmtree(_p11, ignore_errors=True)
+
     # ── R3 fail-fast：抢不到写锁立即 E_LOCK，不干等 180s ────────────────
     print("\nR3 sync add 抢锁 fail-fast")
     sandbox2 = Path(tempfile.mkdtemp(prefix="hymem-lock-"))
@@ -534,6 +707,194 @@ def main() -> int:
     check("G2 vendor 快照含 graph-degrade 补丁标记",
           _vendor_client.exists() and _marker in _vendor_client.read_text(encoding="utf-8"),
           str(_vendor_client))
+
+    # ---- P1-6 config validate：有 FAIL 必须非零退出，--json 契约不变 ----
+    print("\nconfig validate 退出码（P1-6）")
+    _val_dir = Path(tempfile.mkdtemp(prefix="hymem-val-"))
+    _val_cfg = _val_dir / "config.json"
+    _val_cfg.write_text(
+        json.dumps({
+            "mode": "pro",
+            "embedding": {"provider": "openai", "baseUrl": "https://example.invalid/v1",
+                          "model": "m", "apiKey": "", "dims": "abc"},
+            "llm": {"baseUrl": "https://example.invalid/v1", "model": "m", "apiKey": ""},
+            "storage": {"dataDir": str(_val_dir / "data")},
+        }),
+        encoding="utf-8",
+    )
+    _val_env = {
+        "HY_MEM_CONFIG": str(_val_cfg),
+        "HY_MEM_HOME": str(_val_dir),
+        "MEMORY_EMBEDDER_API_KEY": "sk-test-cli-placeholder",
+        "MEMORY_LLM_API_KEY": "sk-test-cli-placeholder",
+    }
+    p = run(["--json", "config", "validate"], env_extra=_val_env)
+    ok, obj = one_json_object(p.stdout)
+    checks = {c.get("name"): c.get("pass") for c in (obj or {}).get("checks", [])} if ok and isinstance(obj, dict) else {}
+    check("有 FAIL 时 exit 非零", p.returncode != 0, f"exit={p.returncode}")
+    check("--json 输出仍是单一 JSON 对象", ok and isinstance(obj, dict), p.stdout.strip()[:100])
+    check("embedding.dims 标为 FAIL", checks.get("embedding.dims") is False, str(checks.get("embedding.dims")))
+    check("非法值不打印 traceback", "Traceback" not in (p.stdout + p.stderr), p.stderr.strip()[:100])
+
+    # 正常配置仍应 exit 0（不能把正常流程一起改坏）
+    _val_ok = _val_dir / "ok.json"
+    _val_ok.write_text(
+        json.dumps({
+            "mode": "lite",
+            "embedding": {"provider": "openai", "baseUrl": "https://example.invalid/v1",
+                          "model": "m", "apiKey": "sk-test-cli-placeholder", "dims": 1024},
+            "storage": {"dataDir": str(_val_dir / "data")},
+        }),
+        encoding="utf-8",
+    )
+    p = run(["--json", "config", "validate"],
+            env_extra={**_val_env, "HY_MEM_CONFIG": str(_val_ok)})
+    ok, obj = one_json_object(p.stdout)
+    check("配置通过时 exit 0", p.returncode == 0 and ok and obj.get("ok") is True,
+          f"exit={p.returncode} {p.stdout.strip()[:80]}")
+    import shutil as _shutil
+
+    _shutil.rmtree(_val_dir, ignore_errors=True)
+
+    # ---- P1-7 检索共享：唯一实现守护 + CLI/MCP 输出契约快照 ----
+    print("\nP1-7 CLI/MCP 检索共享")
+    _read_py = _src_root / "cmds" / "read.py"
+    _srv_py = _src_root / "mcp" / "server.py"
+    _read_src = _read_py.read_text(encoding="utf-8")
+    _srv_src = _srv_py.read_text(encoding="utf-8")
+    check("P1-7 read.py 走共享 searchcore", "searchcore(" in _read_src)
+    check("P1-7 server.py 走共享 searchcore", "searchcore(" in _srv_src)
+    check("P1-7 read.py 不再直接调用 client.search", ".search(" not in _read_src)
+    check("P1-7 server.py 不再直接调用 client.search", ".search(" not in _srv_src)
+    _dup_hits = []
+    for _f in _src_root.rglob("*.py"):
+        _rel = _f.relative_to(_src_root).as_posix()
+        _t = _f.read_text(encoding="utf-8")
+        if "want <= have" in _t or 'for bucket in ("normal", "proactive", "schema")' in _t:
+            _dup_hits.append(_rel)
+    check("P1-7 标签过滤/拍平实现唯一（仅 backends）",
+          len(_dup_hits) == 1 and _dup_hits[0].startswith("backends/hymemory/searchops.py"),
+          str(_dup_hits))
+
+    _p17_dir = Path(tempfile.mkdtemp(prefix="hymem-p17-"))
+    (_p17_dir / "data").mkdir()
+    _p17_env = {k: os.environ.get(k) for k in ("MEMORY_DATA_DIR", "HY_MEM_DATA_DIR")}
+    os.environ["MEMORY_DATA_DIR"] = str(_p17_dir / "data")
+    try:
+        import contextlib as _ctx
+        import io as _io
+
+        class _P17Client:
+            _mode = "pro"
+
+            def __init__(self) -> None:
+                self.closed = False
+                self.calls: list = []
+
+            def search(self, query=None, **kw):
+                self.calls.append((query, kw))
+                return {"memories": {"normal": [
+                    {"memory_id": "m1", "content": "hello", "score": 0.9,
+                     "tags": ["auto1"], "_tags": ["manual1"]}]}, "elapsed_ms": 1.0}
+
+            def list_memories(self, **kw):
+                return {"vdb": {"memories": []}}
+
+            def close(self):
+                self.closed = True
+
+        from hymem.cmds import read as _readmod
+        from hymem.cmds.parser import build_parser as _build_parser
+
+        _real_make, _real_ready = _readmod.make_client, _readmod.require_ready
+        _fake_cli = _P17Client()
+        try:
+            _readmod.make_client = lambda mode: _fake_cli
+            _readmod.require_ready = lambda *a, **k: None
+            _cli_args = _build_parser().parse_args(
+                ["--json", "-u", "u1", "search", "hello", "-n", "3"])
+            _cli_buf = _io.StringIO()
+            with _ctx.redirect_stdout(_cli_buf):
+                _cli_rc = _readmod.cmd_search(_cli_args)
+            _cli_obj = json.loads(_cli_buf.getvalue().strip() or "{}")
+        finally:
+            _readmod.make_client, _readmod.require_ready = _real_make, _real_ready
+        for _k in ("count", "min_score", "elapsed_ms", "tags_filter", "results",
+                   "schemas", "schema_available"):
+            check(f"CLI search 契约字段 {_k}", _k in _cli_obj, str(sorted(_cli_obj)))
+        _cli_first = (_cli_obj.get("results") or [{}])[0]
+        check("CLI search 结果条目未被投影改写",
+              _cli_first.get("memory_id") == "m1" and _cli_first.get("tags") == ["auto1"],
+              str(_cli_first)[:120])
+        check("CLI search rc=0", _cli_rc == 0, str(_cli_rc))
+
+        from hymem.mcp import server as _mcpmod
+
+        _old_client = _mcpmod._CLIENT
+        _fake_mcp = _P17Client()
+        _mcpmod._CLIENT = _fake_mcp
+        try:
+            _mcp_obj = json.loads(_mcpmod._tool_search_memory({"query": "hello", "limit": 3}))
+        finally:
+            _mcpmod._CLIENT = _old_client
+        for _k in ("query", "count", "hits", "offset", "schemas", "schema_available"):
+            check(f"MCP search 契约字段 {_k}", _k in _mcp_obj, str(sorted(_mcp_obj)))
+        _mcp_first = (_mcp_obj.get("hits") or [{}])[0]
+        check("MCP hit 字段未删改",
+              {"memory_id", "content", "score", "when"} <= set(_mcp_first), str(_mcp_first)[:120])
+    finally:
+        for _k, _v in _p17_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+        import shutil as _shutil2
+
+        _shutil2.rmtree(_p17_dir, ignore_errors=True)
+
+    # ---- P2 静默路径收口：serve 配置失败 / 非法 HY_MEM_MIN_SCORE ----
+    print("\n静默路径：serve 端口回退 / 非法 HY_MEM_MIN_SCORE")
+    _sil_dir = Path(tempfile.mkdtemp(prefix="hymem-silent-"))
+    _sil_cfg = _sil_dir / "config.json"
+    _sil_cfg.write_text(json.dumps({"mode": "pro", "servePort": "abc"}), encoding="utf-8")
+    _sil_env = {k: os.environ.get(k) for k in
+                ("HY_MEM_CONFIG", "HY_MEM_ENV_FILE", "HY_MEM_MIN_SCORE")}
+    try:
+        os.environ["HY_MEM_CONFIG"] = str(_sil_cfg)
+        os.environ["HY_MEM_ENV_FILE"] = str(_sil_dir / "no-such.env")
+        from hymem.cmds import queue as _qmod
+
+        _port_fn = getattr(_qmod, "_wanted_serve_port", None)
+        _err_buf = _io.StringIO()
+        with _ctx.redirect_stderr(_err_buf):
+            _fallback_port = _port_fn() if callable(_port_fn) else None
+        check("P2 serve 配置失败仍回退随机端口（不阻断起库）", _fallback_port == 0,
+              f"port={_fallback_port}")
+        check("P2 serve 配置失败往 stderr 报原因",
+              "配置" in _err_buf.getvalue() and "随机端口" in _err_buf.getvalue(),
+              _err_buf.getvalue()[:140])
+
+        os.environ["HY_MEM_CONFIG"] = str(_sil_dir / "missing.json")
+        os.environ["HY_MEM_MIN_SCORE"] = "abc"
+        from hymem.core import config as _cfgmod
+
+        _err2 = _io.StringIO()
+        with _ctx.redirect_stderr(_err2):
+            _loaded = _cfgmod.load()
+        check("P2 非法 HY_MEM_MIN_SCORE 告警（不再完全无声）",
+              "HY_MEM_MIN_SCORE" in _err2.getvalue(), _err2.getvalue()[:140])
+        check("P2 非法 HY_MEM_MIN_SCORE 被忽略（回退默认 0.35）",
+              (_loaded.get("search") or {}).get("minScore") == 0.35,
+              str((_loaded.get("search") or {}).get("minScore")))
+    finally:
+        for _k, _v in _sil_env.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+        import shutil as _shutil3
+
+        _shutil3.rmtree(_sil_dir, ignore_errors=True)
 
     bad = results.count(False)
     print(f"\n{'全部通过' if bad == 0 else f'{bad} 项失败'}（{len(results) - bad}/{len(results)}）")

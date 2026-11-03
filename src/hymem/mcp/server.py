@@ -16,12 +16,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import time
-from datetime import datetime
 
 from hymem.core import errors  # CLI/MCP 共用的错误分类与格式化
+from hymem.core.timefilter import ParamError, _in_range, _item_ts, _parse_time  # noqa: F401
 from hymem.core.version import VERSION
 
 SERVER_NAME = "hy-mem"
@@ -35,79 +34,6 @@ PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
 METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
-
-
-class ParamError(ValueError):
-    """调用方参数不对（缺参/空参/类型不符）。
-
-    单独建类而不是裸 raise ValueError：参数错和运行时错的建议完全不同——
-    参数错只需直说哪里错了，不该套上「先跑 doctor」这类运行时建议误导宿主。
-    继承 ValueError 保持向后兼容。
-    """
-
-
-# --------------------------------------------------------------------------
-# 时间参数 —— since/until 支持相对值与 ISO 日期两种形态
-# --------------------------------------------------------------------------
-_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
-
-
-def _parse_time(v) -> float | None:
-    """since/until 参数 → unix 秒。
-
-    两种形态都收：相对值（30m/12h/7d/30d/1y——LLM 问「近一周」最顺手）和
-    ISO 日期（2026-01-01 / 2026-01-01T09:30:00）。空/缺省 = None = 不过滤。
-    """
-    if v is None:
-        return None
-    s = str(v).strip()
-    if not s:
-        return None
-    m = re.fullmatch(r"(\d+)\s*([smhdwy])", s, re.IGNORECASE)
-    if m:
-        return time.time() - int(m.group(1)) * _UNIT_SECONDS[m.group(2).lower()]
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(s, fmt).timestamp()
-        except ValueError:
-            continue
-    raise ParamError(f"时间格式不认识：{s!r}（支持 30m/12h/7d/1y 相对值，或 2026-01-01 这类日期）")
-
-
-def _item_ts(m: dict) -> float | None:
-    """条目 → unix 秒。优先 memory_at（补录的「记忆发生时间」，add --memory-at
-    写入，语义上时间过滤就该按它）；没有补录才退回 gmt_created（实测 list/get
-    行是字符串 unix 秒）；其余候选是防御性兼容。"""
-    for k in ("memory_at", "gmt_created", "created_at", "createdTime", "when", "updated_at"):
-        v = m.get(k)
-        if v is None:
-            continue
-        if isinstance(v, (int, float)):
-            ts = float(v)
-            return ts / 1000.0 if ts > 1e12 else ts  # 毫秒时间戳兜底
-        s = str(v).strip()
-        try:
-            ts = float(s)
-            return ts / 1000.0 if ts > 1e12 else ts
-        except ValueError:
-            pass
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-            try:
-                return datetime.strptime(s[:19], fmt).timestamp()
-            except ValueError:
-                continue
-    return None
-
-
-def _in_range(ts: float | None, since: float | None, until: float | None) -> bool:
-    """无时间戳的条目放行（宁可多给不错杀），有时间戳才按窗过滤。"""
-    if ts is None:
-        return True
-    if since is not None and ts < since:
-        return False
-    if until is not None and ts > until:
-        return False
-    return True
 
 
 # --------------------------------------------------------------------------
@@ -379,19 +305,12 @@ def _tool_add_memory(args: dict) -> str:
         raise ParamError(str(e))
     client = _client()
     if not use_async:
-        from hymem.core.searchops import _ids_of, _new_ids_only, _bind_tags
+        from hymem.core.searchops import _bind_tags_to_new, _ids_of, _snapshot_ids
         from hymem.core import store
 
-        before = set()
-        if tags:
-            try:
-                before = {
-                    m.get("memory_id")
-                    for m in client.list_memories(limit=200, **_identity()) or []
-                    if isinstance(m, dict) and m.get("memory_id")
-                }
-            except Exception:  # noqa: BLE001
-                before = set()
+        before, before_complete = (
+            _snapshot_ids(client, _identity()) if tags else (set(), True)
+        )
         add_kw = (
             {"metadata": metadata, "memory_at": memory_at, "request_id": request_id}
         )
@@ -484,11 +403,16 @@ def _tool_add_memory(args: dict) -> str:
                 ensure_ascii=False,
             )
         ids = _ids_of(last)
+        tagged: list[str] = []
+        tag_note = ""
         if tags:
-            _bind_tags(_new_ids_only(ids, before), tags, "user")
-        return json.dumps(
-            {"mode": "sync", "memory_ids": ids, "tags": tags}, ensure_ascii=False
-        )
+            tagged, tag_note = _bind_tags_to_new(
+                client, _identity(), before, ids, tags, before_complete=before_complete,
+            )
+        out: dict = {"mode": "sync", "memory_ids": ids, "tags": tags}
+        if tag_note:
+            out["note"] = tag_note
+        return json.dumps(out, ensure_ascii=False)
     # 异步：入队 + 无人消费时自动拉起临时 worker（与 CLI add --async 同一套）
     from hymem.core import store
 
@@ -668,13 +592,6 @@ def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
             min_score = float(min_score)
         except (TypeError, ValueError):
             raise ParamError("min_score 必须是数字（0~1）")
-    kw = {"limit": limit, "user_ids": [_identity()["user_id"]]}
-    if min_score is not None:
-        kw["min_score"] = min_score
-    if inc:
-        kw["include_sources"] = inc
-    if exc:
-        kw["exclude_sources"] = exc
     # S4：diff 块按次开。MCP 是长驻进程——env 必须用后即焚（finally 还原），
     # 否则一次 chain_block=true 会污染后续所有检索（多烧 token 且结果变样）。
     chain_block = args.get("chain_block") is True
@@ -688,9 +605,23 @@ def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
     try:
         # client 必须在开关设好之后构造：CodingConfig 在 client 初始化时读 env，
         # 先造 client 再设 env 等于开关没生效。
+        from hymem.core.searchops import scenecore
+
         client = _client()
-        r = client.search(
-            query, scene=scene, workspace_id=ws, branch=branch, **kw
+        uid = _identity()["user_id"]
+        r = scenecore(
+            client,
+            query,
+            scene=scene,
+            workspace_id=ws,
+            branch=branch,
+            limit=limit,
+            user_ids=[uid],
+            min_score=min_score,
+            include_sources=inc,
+            exclude_sources=exc,
+            chain_block=chain_block,
+            chain_user_id=uid,
         )
     except Exception as e:  # noqa: BLE001
         return json.dumps(
@@ -712,13 +643,6 @@ def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
                 os.environ.pop("MEMORY_CODING_CHAIN_BLOCK_ENABLED", None)
             else:
                 os.environ["MEMORY_CODING_CHAIN_BLOCK_ENABLED"] = _prev_cb
-    if chain_block:
-        # SDK 带 workspace_id 时会把链全滤掉（上游 _in_scope 拿仓名比文件相对路径），
-        # 用同一份链库兜底补块；无 workspace 时 SDK 自己就出了块，这里空转。
-        from hymem.core.searchops import fill_chain_block
-
-        r = fill_chain_block(client, r, query,
-                             user_id=_identity()["user_id"], workspace_id=ws)
     facts = r.get("facts") or []
     experiences = r.get("experiences") or []
     out = {
@@ -785,7 +709,7 @@ def _tool_search_memory(args: dict) -> str:
     offset = max(0, int(args.get("offset") or 0))
     since = _parse_time(args.get("since"))
     until = _parse_time(args.get("until"))
-    from hymem.core.searchops import _flatten_search
+    from hymem.core.searchops import searchcore
 
     client = _client()
     # search 的身份参数是复数形参（user_ids），与 CLI identity_lists 同口径；
@@ -794,36 +718,55 @@ def _tool_search_memory(args: dict) -> str:
     # 翻页 = 多取前 offset 条再切片（SDK search 按 score 排序，无原生 offset）；
     # 拉取上限 200 防深翻页拖慢——语义检索翻到 200 名开外本来就没有意义
     fetch = min(offset + limit, 200)
-    kw = {"created_after": since} if since is not None else {}  # SDK 原生时间下限
-    if inc:
-        kw["include_sources"] = inc
-    if exc:
-        kw["exclude_sources"] = exc
-    # L6 只走正路（与 CLI 同口径）：SDK 的两路一起关，正路由 hy-mem 自己跑。
-    # 反路不看 query 只按「哪些 schema 引用了命中的 fact」取，且注入时 score 被
-    # RRF 融合分覆盖（0.01~0.03），宿主既过滤不了也解释不了。
-    r = client.search(
+
+    # L6 行为模式：独立字段，绝不混进 hits——混进去会在命中不足时补位冒充检索
+    # 结果，宿主会把一条无关归纳当事实用。仅 ultra 有；pro 下明说「没有这条路」。
+    want_schema = args.get("schema") is not False
+    schema_min = 0.0
+    schema_limit = 0
+    if want_schema:
+        from hymem.core import config as _cfgmod
+
+        _ev = _cfgmod.load().get("evolve") or {}
+        # R4：调用方可临时降阈值排障（不改配置）；缺省走 config.evolve.schemaMinScore
+        _sms = args.get("schema_min_score")
+        schema_min = float(_sms) if _sms is not None else float(_ev.get("schemaMinScore") or 0.25)
+        schema_limit = max(0, min(int(args.get("schema_limit") or _ev.get("schemaLimit") or 3), 10))
+
+    # 召回/拍平/时间过滤/空结果探针/L6/队列积压全部走共享实现（与 CLI 同一份）。
+    res = searchcore(
+        client,
         query or None,
-        **({"queries": queries} if queries else {}),
+        queries=queries or None,
         search_mode=search_mode,
         rerank=True if rerank is None else rerank,
-        limit=fetch, min_score=min_score, schema_limit=0,
-        user_ids=[u], **kw)
-    items = _flatten_search(r)
-    if not items:
+        fetch_limit=fetch,
+        offset=offset,
+        limit=limit,
+        min_score=min_score,
+        since=since,
+        until=until,
+        ident={"user_ids": [u]},
+        include_sources=inc or None,
+        exclude_sources=exc or None,
+        schema=want_schema,
+        schema_query=query,
+        schema_limit=schema_limit,
+        schema_min=schema_min,
+        schema_user_id=u,
+        remember_auto=False,
+        probe_empty=True,
+        pending_always=True,
+    )
+    if res["probe_error"]:
         # SDK 吞掉嵌入端异常静默返回空列表（见 cmd_search 同款防护）——
         # 空手时补一次真实探测，端点挂了把真实原因当错误报出去，
         # 别让宿主把「密钥失效」误读成「没有相关记忆」。探测通过（why 空）
         # 则是窗口内真没命中，照常返回空 hits。
-        from hymem.core.searchops import _embedding_unhealthy
-
-        why = _embedding_unhealthy()
-        if why:
-            raise RuntimeError(f"检索失败：嵌入端点不可用（{why}）—— 这不代表没有相关记忆")
-    if since is not None or until is not None:
-        items = [x for x in items if _in_range(_item_ts(x), since, until)]
-    page = items[offset : offset + limit]
-    has_more = len(items) > offset + limit
+        raise RuntimeError(
+            f"检索失败：嵌入端点不可用（{res['probe_error']}）—— 这不代表没有相关记忆"
+        )
+    page = res["items"]
     out = [
         {
             "memory_id": it.get("memory_id"),
@@ -834,63 +777,31 @@ def _tool_search_memory(args: dict) -> str:
         for it in page
     ]
     resp = {"query": query, "count": len(out), "hits": out, "offset": offset}
-    # L6 行为模式：独立字段，绝不混进 hits——混进去会在命中不足时补位冒充检索
-    # 结果，宿主会把一条无关归纳当事实用。仅 ultra 有；pro 下明说「没有这条路」。
-    want_schema = args.get("schema") is not False
-    schemas: list[dict] = []
-    schema_state = "off"
-    schema_min = 0.0
-    if want_schema:
-        from hymem.core import config as _cfgmod
-
-        from hymem.core.searchops import fetch_l6_schemas, schema_state_meta
-
-        _ev = _cfgmod.load().get("evolve") or {}
-        # R4：调用方可临时降阈值排障（不改配置）；缺省走 config.evolve.schemaMinScore
-        _sms = args.get("schema_min_score")
-        schema_min = float(_sms) if _sms is not None else float(_ev.get("schemaMinScore") or 0.25)
-        schemas, schema_state = fetch_l6_schemas(
-            client,
-            query,
-            user_id=u,
-            limit=max(0, min(int(args.get("schema_limit") or _ev.get("schemaLimit") or 3), 10)),
-            min_score=schema_min,
-        )
     resp["schemas"] = [
         {"content": s.get("content"), "score": s.get("score"), "layer": "l6_schema"}
-        for s in schemas
+        for s in res["schemas"]
     ]
     if want_schema:
         from hymem.core.searchops import schema_state_meta
 
-        resp["schema_available"], _note = schema_state_meta(schema_state, schema_min)
+        resp["schema_available"], _note = schema_state_meta(res["schema_state"], schema_min)
         if _note:
             resp["schema_note"] = _note
     else:
         resp["schema_available"] = False
-    if has_more:
+    if res["has_more"]:
         resp["has_more"] = True
         resp["next_offset"] = offset + limit
     # 2026-10-29 实测缝隙：add 异步返回后立刻 search，返回旧结果/空结果且无任何
     # 队列提示——智能体会把「还在落库」误读成「没有相关记忆」或拿旧内容冒充。
     # 这里把队列未完成数带上：有积压时明说「此刻检索不到是正常的」。
-    try:
-        from hymem.core import store as _store
-
-        _conn = _store.connect()
-        try:
-            _stats = _store.queue_stats(_conn)
-        finally:
-            _conn.close()
-        _busy = int(_stats.get("pending") or 0) + int(_stats.get("running") or 0)
-        if _busy > 0:
-            resp["pending_writes"] = _busy
-            resp["pending_note"] = (
-                f"另有 {_busy} 条写入还在队列落库中，此刻检索不到它们是正常的；"
-                "确认进度用 queue_status"
-            )
-    except Exception:  # noqa: BLE001
-        pass  # 队列库读不到不拦检索结果本身
+    _busy = int(res["pending"] or 0)
+    if _busy > 0:
+        resp["pending_writes"] = _busy
+        resp["pending_note"] = (
+            f"另有 {_busy} 条写入还在队列落库中，此刻检索不到它们是正常的；"
+            "确认进度用 queue_status"
+        )
     return json.dumps(resp, ensure_ascii=False)
 
 
@@ -903,13 +814,16 @@ def _tool_list_memories(args: dict) -> str:
     since = _parse_time(args.get("since"))
     until = _parse_time(args.get("until"))
     client = _client()
-    # SDK 返回 dict（{"vdb": {"memories": [...]}}），与 CLI cmd_list 同解析；
-    # 直接当列表迭代会拿到 key 字符串、被 isinstance 过滤成恒 0 条
+    # SDK 返回 dict（{"vdb": {"memories": [...]}}），与 CLI cmd_list 同解析
+    # （vdb_memories，见 core.searchops）；直接当列表迭代会拿到 key 字符串、
+    # 被 isinstance 过滤成恒 0 条
+    from hymem.core.searchops import vdb_memories
+
     u = _identity()["user_id"]
     if since is None and until is None:
         # 无时间过滤：SDK 原生 offset 分页，多取 1 条判 has_more，精确且省
         r = client.list_memories(limit=limit + 1, offset=offset, order=order, user_id=u) or {}
-        rows = [m for m in ((r.get("vdb") or {}).get("memories") or []) if isinstance(m, dict)]
+        rows = vdb_memories(r)
         has_more = len(rows) > limit
         rows = rows[:limit]
     else:
@@ -917,7 +831,7 @@ def _tool_list_memories(args: dict) -> str:
         # HY_MEM_LIST_CAP），按时间过滤后本地切片——翻页按「过滤后的列表」算
         cap = int(os.getenv("HY_MEM_LIST_CAP") or 500)
         r = client.list_memories(limit=cap, offset=0, order=order, user_id=u) or {}
-        rows = [m for m in ((r.get("vdb") or {}).get("memories") or []) if isinstance(m, dict)]
+        rows = vdb_memories(r)
         rows = [m for m in rows if _in_range(_item_ts(m), since, until)]
         has_more = len(rows) > offset + limit
         rows = rows[offset : offset + limit]
@@ -970,12 +884,32 @@ def _tool_delete_memory(args: dict) -> str:
         raise ParamError("memory_id 不能为空：请传入 list 或 search 返回的 memory_id")
     if args.get("confirm") is not True:
         raise ParamError("删除是破坏性操作：必须显式传 confirm=true")
-    from hymem.core import store
+    from hymem.core.clientops import delete_memory_with_cascade
 
     client = _client()
-    with store.WriteLock():
-        r = client.delete(mid)
-    return json.dumps({"deleted": mid, "result": r}, ensure_ascii=False, default=str)
+    r = delete_memory_with_cascade(client, mid)
+    # 与 CLI 同口径：success=False 不许报成功（上游 vdb_deleted 恒 True 不可信）。
+    # partial/error_code 区分「部分存储没删净」与「本来就没这条」。
+    if not r.get("success"):
+        if r.get("partial") or r.get("error_code"):
+            raise RuntimeError(
+                "删除未完成（部分存储未删净）："
+                f"error_code={r.get('error_code')}, deleted_count={r.get('deleted_count', 0)}"
+            )
+        raise RuntimeError(
+            f"未找到 {mid}（deleted_count={r.get('deleted_count', 0)}）；"
+            "可先 list_memories / search_memory 定位"
+        )
+    return json.dumps(
+        {
+            "deleted": mid,
+            "swept": r.get("derived_purged") or [],
+            "cascade_note": r.get("cascade_note") or None,
+            "result": r,
+        },
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def _tool_update_memory(args: dict) -> str:
@@ -988,13 +922,14 @@ def _tool_update_memory(args: dict) -> str:
         raise ParamError("content 不能为空：请提供修改后的记忆正文")
     if args.get("confirm") is not True:
         raise ParamError("更新会改变检索结果：必须显式传 confirm=true")
-    from hymem.core import store
+    from hymem.core.clientops import update_memory
 
     client = _client()
-    if client.get(mid) is None:
+    r = update_memory(client, mid, content)
+    if r is None:
         return json.dumps({"found": False, "memory_id": mid}, ensure_ascii=False)
-    with store.WriteLock():
-        r = client.update(mid, content)
+    if isinstance(r, dict) and r.get("success") is False:
+        raise RuntimeError(f"更新失败：{r.get('error_message') or r.get('error') or 'unknown'}")
     return json.dumps(
         {"updated": mid, "note": "旧版本保留在演化链（get_recent_history/history 可查）", "result": r},
         ensure_ascii=False,

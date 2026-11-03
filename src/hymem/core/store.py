@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     max_attempts INTEGER NOT NULL DEFAULT 3,
     mode        TEXT,
     error       TEXT,
+    shadow_only INTEGER NOT NULL DEFAULT 0,
     memory_ids  TEXT,
     created_at  REAL    NOT NULL,
     started_at  REAL,
@@ -78,6 +79,11 @@ CREATE TABLE IF NOT EXISTS worker_reg (
 );
 """
 
+# 本地库 schema 版本（写在 PRAGMA user_version）。改了 SCHEMA 或 _migrate 就必须 +1，
+# 否则老库永远不会补新表/新列。连接时只有版本落后才建表+迁移；PRAGMA
+# synchronous / busy_timeout 是连接级设置，每次连接仍需执行（不受版本短路影响）。
+SCHEMA_VERSION = 1
+
 
 def _migrate(conn) -> None:
     """旧库幂等迁移。CREATE TABLE IF NOT EXISTS 不会给已有表补列，这里补。
@@ -90,6 +96,16 @@ def _migrate(conn) -> None:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "not_before" not in cols:
             conn.execute("ALTER TABLE jobs ADD COLUMN not_before REAL")
+        if "shadow_only" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN shadow_only INTEGER NOT NULL DEFAULT 0")
+            # 旧行只有 error 文本可判：迁移时一次性回填，之后一律读显式列。
+            conn.execute(
+                "UPDATE jobs SET shadow_only=1 WHERE status='done' AND error LIKE 'shadow_only%'"
+            )
+        # 部分索引：只索引真正命中的行，queue_stats / requeue_shadow 都走它。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_shadow ON jobs(shadow_only) WHERE shadow_only=1"
+        )
     except sqlite3.OperationalError as e:
         if "duplicate column" not in str(e).lower():
             raise
@@ -105,11 +121,21 @@ def connect() -> sqlite3.Connection:
         conn = sqlite3.connect(str(db_path()), timeout=30.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
+            # 「已初始化」短路：版本号到位后不再每次连接重跑建表 + WAL PRAGMA
+            # （executescript 是热路径上最大的一块无谓开销）。
+            # 多进程首次并发建表仍安全：版本号只在完整迁移成功后写入，后到者
+            # 读到旧版本会再跑一遍 IF NOT EXISTS / duplicate-column 幂等路径。
+            fresh = conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION
+            if fresh:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.executescript(SCHEMA)
+            # 迁移始终执行：代价只是几条 PRAGMA table_info，却能兜住「版本号与
+            # 实际表结构不一致」的边角（库被外部工具降级/复制残缺时仍能自愈）。
+            _migrate(conn)
+            if fresh:
+                conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA busy_timeout=30000")
-            conn.executescript(SCHEMA)
-            _migrate(conn)
             return conn
         except sqlite3.OperationalError as e:
             conn.close()
@@ -205,7 +231,7 @@ class WriteLock:
                     )
                 return self
             if not warned and time.time() > deadline - self.timeout + 2:
-                print(f"hy-mem: 等待写锁（另一进程正在写入）…", file=sys.stderr)
+                print("hy-mem: 等待写锁（另一进程正在写入）…", file=sys.stderr)
                 warned = True
             time.sleep(0.15)
 
@@ -271,7 +297,7 @@ def claim_next(conn, worker_id: str, kinds: tuple[str, ...] = ("add", "finalize"
 
 
 def claim_next_batch(conn, worker_id: str, limit: int, kinds: tuple[str, ...] = ("add",),
-                     compat_check=None) -> list:
+                     compat_check=None, stats: dict | None = None) -> list:
     """批量领取同一 (user_id, agent_id) 的待处理 add 任务（S1 · 2026-10-30 batch-commit）。
 
     与 claim_next 同款原子性：逐条 UPDATE ... WHERE status='pending' 抢占，
@@ -282,10 +308,18 @@ def claim_next_batch(conn, worker_id: str, limit: int, kinds: tuple[str, ...] = 
       - compat_check(row) 由调用方注入批次约束（S3 注入：显式
         memory_at / metadata / request_id / lite mode 不入批）；
         返回 False 的 job 不领、留在 pending（单条路径照常消费）
+      - stats（P1-4）：调用方刚查到的 queue_stats，用来给批大小封顶；
+        pending 为 0 时直接空返回，省掉一轮 SELECT。只是提示值，
+        实际仍逐条原子抢占，不会因为提示过期而多领/错领。
     返回 list[row]（长度 1..limit，首条恒被领取）；队列无 pending add
     时返回 []。事务性：每条独立原子抢占，批内不存在半领状态——
     逐条循环而不是单条 SQL IN，保证任何两条 job 不会被两个 worker 领走。
     """
+    if stats is not None:
+        pending = int(stats.get("pending") or 0)
+        if pending <= 0:
+            return []
+        limit = min(limit, pending)
     rows: list = []
     first_ident: tuple[str, str] | None = None
     while len(rows) < max(1, limit):
@@ -326,16 +360,20 @@ def claim_next_batch(conn, worker_id: str, limit: int, kinds: tuple[str, ...] = 
 def mark_done(conn, job_id: int, memory_ids: list[str], extra: dict | None = None) -> None:
     """任务成功落账。extra 里的 note 写进 error 列当告警留痕。
 
-    为什么把 note 塞进 error 列（0.9.10 / PRD F9）：jobs 表没有独立备注列，
-    迁移一个新列不划算，而 error 在 done 行上本来就是空的。留痕的价值是
+    error 在 done 行上本来就是空的，直接写 note 给人看成本最低；留痕的价值是
     「写进去了但检索不到」不再静默——`queue --status done` 能看见
-    shadow_only，也能用 `retry --shadow` 一键重做。
+    shadow_only 文案，也能用 `retry --shadow` 一键重做。
+
+    P1-4（2026-11-03）：shadow_only 是否命中落显式列（带部分索引），
+    error 只承担人读文案；统计/重投不再靠 LIKE 扫全表。
     """
     note = (extra or {}).get("note")
+    shadow = 1 if str(note or "").startswith("shadow_only") else 0
     conn.execute(
-        "UPDATE jobs SET status='done', finished_at=?, memory_ids=?, error=? WHERE id=?",
+        "UPDATE jobs SET status='done', finished_at=?, memory_ids=?, error=?, shadow_only=? "
+        "WHERE id=?",
         (time.time(), json.dumps(memory_ids, ensure_ascii=False),
-         (str(note)[:500] if note else None), job_id),
+         (str(note)[:500] if note else None), shadow, job_id),
     )
 
 
@@ -346,8 +384,8 @@ def requeue_shadow(conn) -> int:
     搜不到。重投会再跑一次抽取，让用户可以一键补救，而不是手工 re-add。
     """
     cur = conn.execute(
-        "UPDATE jobs SET status='pending', attempts=0, error=NULL, started_at=NULL, "
-        "worker=NULL, not_before=NULL WHERE status='done' AND error LIKE 'shadow_only%'"
+        "UPDATE jobs SET status='pending', attempts=0, error=NULL, shadow_only=0, "
+        "started_at=NULL, worker=NULL, not_before=NULL WHERE status='done' AND shadow_only=1"
     )
     return cur.rowcount
 
@@ -395,8 +433,9 @@ def queue_stats(conn) -> dict:
     delayed = conn.execute(
         "SELECT COUNT(*) n FROM jobs WHERE status='pending' AND not_before > ?", (time.time(),)
     ).fetchone()
+    # 显式列 + 部分索引（P1-4）：不再用 error LIKE 扫 done 行。
     shadow = conn.execute(
-        "SELECT COUNT(*) n FROM jobs WHERE status='done' AND error LIKE 'shadow_only%'"
+        "SELECT COUNT(*) n FROM jobs WHERE status='done' AND shadow_only=1"
     ).fetchone()
     return {
         "total": sum(stats.values()),
@@ -408,6 +447,24 @@ def queue_stats(conn) -> dict:
         "shadow_only": int(shadow["n"] or 0),
         "oldest_pending_age_s": round(time.time() - oldest["t"], 1) if oldest and oldest["t"] else None,
     }
+
+
+# 完成态记录保留天数（P1-4）。0/负数 = 不清理；dead（失败）永久保留——
+# 死信是排障证据，不参与按天清理。清理只从既有维护入口 stats --vacuum 触发。
+DONE_RETENTION_DAYS = 30
+
+
+def purge_finished_jobs(conn, keep_days: float | None = None) -> int:
+    """按天清理 done 记录，返回删除行数。dead/pending/running 一律不动。"""
+    days = DONE_RETENTION_DAYS if keep_days is None else float(keep_days)
+    if days <= 0:
+        return 0
+    cutoff = time.time() - days * 86400
+    cur = conn.execute(
+        "DELETE FROM jobs WHERE status='done' AND COALESCE(finished_at, created_at) < ?",
+        (cutoff,),
+    )
+    return int(cur.rowcount or 0)
 
 
 # --------------------------------------------------------------------------
@@ -579,28 +636,44 @@ def get_jobs(conn, ids: list[int]) -> list[dict]:
 # --------------------------------------------------------------------------
 def bind_tags(conn, memory_ids: list[str], tags: list[str], source: str = "user") -> int:
     now = time.time()
-    n = 0
+    rows = []
     for mid in memory_ids:
         for t in tags:
             t = (t or "").strip()
             if not t:
                 continue
-            cur = conn.execute(
-                "INSERT OR IGNORE INTO tags (memory_id, tag, source, created_at) VALUES (?,?,?,?)",
-                (mid, t, source, now),
-            )
-            n += cur.rowcount
-    return n
+            rows.append((mid, t, source, now))
+    if not rows:
+        return 0
+    # executemany 一次提交（旧实现是逐条 execute，大批量时每条一个隐式事务）。
+    # 连接是 isolation_level=None（自动提交），光靠 executemany 不会合并事务，
+    # 所以用 SAVEPOINT 把整批括起来（可嵌套，不与调用方的隐式/显式事务冲突）。
+    # 失败时照旧 RELEASE，保留已插入的行——不改变原有「部分写入」的语义。
+    # rowcount 在 executemany 下不可靠，用 total_changes 差值数「真正插入」的行数
+    # （INSERT OR IGNORE 忽略掉的重复行不计入）。
+    before = conn.total_changes
+    conn.execute("SAVEPOINT bind_tags")
+    try:
+        conn.executemany(
+            "INSERT OR IGNORE INTO tags (memory_id, tag, source, created_at) VALUES (?,?,?,?)",
+            rows,
+        )
+    finally:
+        conn.execute("RELEASE bind_tags")
+    return conn.total_changes - before
 
 
-def tags_for(conn, memory_ids: list[str]) -> dict[str, list[str]]:
-    """批量取本地标签，避免 N+1 查询。"""
+def tags_for(conn, memory_ids: list[str], source: str | None = None) -> dict[str, list[str]]:
+    """批量取本地标签，避免 N+1 查询。source=None 取全部来源（同名 tag 去重）。"""
     if not memory_ids:
         return {}
     marks = ",".join("?" * len(memory_ids))
-    rows = conn.execute(
-        f"SELECT memory_id, tag, source FROM tags WHERE memory_id IN ({marks})", list(memory_ids)
-    ).fetchall()
+    sql = f"SELECT memory_id, tag, source FROM tags WHERE memory_id IN ({marks})"
+    args: list = list(memory_ids)
+    if source:
+        sql += " AND source=?"
+        args.append(source)
+    rows = conn.execute(sql, args).fetchall()
     out: dict[str, list[str]] = {}
     for r in rows:
         out.setdefault(r["memory_id"], [])
@@ -639,7 +712,13 @@ def prune(conn, alive_ids: set[str] | None = None) -> int:
         return 0
     rows = conn.execute("SELECT DISTINCT memory_id FROM tags").fetchall()
     dead = [r["memory_id"] for r in rows if r["memory_id"] not in alive_ids]
+    if not dead:
+        return 0
+    # 批量 DELETE（旧实现逐行一次语句，死标签多时是一条一条往返）。
+    # 500 一批：远离 SQLite 的参数上限，也不至于让单条语句过长。
     n = 0
-    for mid in dead:
-        n += conn.execute("DELETE FROM tags WHERE memory_id=?", (mid,)).rowcount
+    for i in range(0, len(dead), 500):
+        chunk = dead[i:i + 500]
+        marks = ",".join("?" * len(chunk))
+        n += conn.execute(f"DELETE FROM tags WHERE memory_id IN ({marks})", chunk).rowcount
     return n

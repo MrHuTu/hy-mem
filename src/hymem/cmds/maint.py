@@ -5,17 +5,14 @@ S2 拆分（docs/specs/2026-11-02-cli-split-ports/）：本模块从 hymem/cli.p
 """
 from __future__ import annotations
 
-import sys
-
 from hymem.cmds.base import (  # noqa: F401
     EXIT_OK, EXIT_RUNTIME, EXIT_USAGE, Path, asyncio,
-    c, config_defaults_user, data_dir, embedding_provider, emit,
+    config_defaults_user, data_dir, embedding_provider, emit,
     fail, identity, json, make_client, netprobe,
     ok, os, require_ready, store, sys,
     time,
 )
 from hymem.backends.hymemory.clientops import sdk_info
-from hymem.cmds import base as _base  # 全局状态经 _base 读写
 
 
 def cmd_doctor(args) -> int:
@@ -255,7 +252,6 @@ def cmd_doctor(args) -> int:
     except Exception as e:  # noqa: BLE001
         check("write_lock", False, f"{type(e).__name__}: {e}", fatal=False)
 
-    hl = [c for c in report["checks"] if c["pass"]]
     human = "\n".join(
         f"  [{'PASS' if c['pass'] else 'FAIL'}] {c['name']}: {c['detail']}"
         for c in report["checks"]
@@ -626,9 +622,11 @@ def _stats_health(args) -> int:
     if args.vacuum:
         conn = store.connect()
         try:
-            conn.execute("DELETE FROM jobs WHERE status='done'")
+            # P1-4：只清超过保留期的 done；dead（失败）永久保留，留给排障。
+            purged = store.purge_finished_jobs(conn)
             conn.execute("VACUUM")
             payload["vacuumed"] = True
+            payload["purged_jobs"] = purged
         finally:
             conn.close()
 
@@ -861,5 +859,4 @@ def cmd_graph_build(args) -> int:
                     hint="这是真模型批量操作（逐条抽关系），确认 LLM 端点与密钥可用")
     finally:
         client.close()
-    n = (r.get("triples") or r.get("edges") or r.get("count") or "?") if isinstance(r, dict) else "?"
     return ok(r, args.json, f"关系图构建完成（user={uid}，产出门面见 JSON；实体库={'已重建' if args.entities else '未动'}）")

@@ -8,12 +8,14 @@ S3-1（2026-10-29）：本模块从入口 cli.py 平移而来（纯搬家，逻�
 from __future__ import annotations
 
 import os
-import re
 import subprocess  # 2026-10-29 修：S3-1 平移时漏带，_spawn_detached_worker 的 Popen 路径才触发
+import time
+import weakref
+from collections import OrderedDict
 from datetime import datetime
 
-from hymem.core import config as cfgmod
 from hymem.core import store
+from hymem.core import timefilter
 
 
 def _parse_memory_at(v) -> "datetime | None":
@@ -33,8 +35,28 @@ def _parse_memory_at(v) -> "datetime | None":
     raise ValueError(
         f"--memory-at 时间格式不认识：{s!r}（支持 2026-10-27、2026-10-27 14:30:00 这类写法）"
     )
-def _snapshot_ids(client, ident: dict, cap: int = 2000) -> set[str]:
-    """取写入前已存在的节点 id 集合，用于从 memory_ids 里剔除被 reconcile 合并到的老节点。
+
+
+def vdb_memories(resp) -> list[dict]:
+    """解析 `list_memories` 的返回包装：`{"vdb": {"memories": [...]}}`。
+
+    CLI `cmd_list` 与 MCP `list_memories` 都吃这个结构：直接当列表迭代会拿到
+    key 字符串（"vdb"），再被 isinstance 过滤成恒 0 条——这个坑吃过一次就够了。
+    """
+    if not isinstance(resp, dict):
+        return []
+    vdb = resp.get("vdb")
+    if isinstance(vdb, dict):
+        return [m for m in (vdb.get("memories") or []) if isinstance(m, dict)]
+    return [m for m in (resp.get("memories") or []) if isinstance(m, dict)]
+
+
+def _snapshot_ids(client, ident: dict, cap: int = 2000) -> tuple[set[str], bool]:
+    """取节点 id 快照，返回 (ids, complete)。
+
+    complete=False 表示**无法确定快照是否覆盖了全部节点**：分页触到 cap 上限，
+    或读取中途抛错。调用方严禁在 complete=False 时打标签——那会把标签污染到
+    老节点，属于不可逆的数据错误。
 
     实测：一次 add 的 memory_ids 并不等于"新建节点"，而是"本次影响到的节点"。
     写一句 CI 流水线的事实，会连带返回 8 个被合并/更新的旧节点 id。
@@ -42,27 +64,46 @@ def _snapshot_ids(client, ident: dict, cap: int = 2000) -> set[str]:
     """
     ids: set[str] = set()
     offset = 0
+    total: int | None = None
     # 只按 user 取全量快照：reconcile 会跨 session 合并节点，
     # 若同时按 session/agent 过滤，已知集合会偏小，导致把老节点误判为新节点。
     kwargs: dict = {}
     if (ident or {}).get("user_id"):
         kwargs["user_id"] = ident["user_id"]
     try:
-        while offset < cap:
+        while True:
+            if offset >= cap:
+                # 到上限还没读到空页：后面可能还有节点，快照不完整。
+                return ids, False
             r = client.list_memories(limit=200, offset=offset, **kwargs)
-            batch = (r.get("vdb") or {}).get("memories") or []
+            if not isinstance(r, dict) or "vdb" not in r:
+                return ids, False
+            vdb = r.get("vdb") or {}
+            batch = vdb.get("memories") or []
+            if not isinstance(batch, list):
+                return ids, False
+            if total is None:
+                t = vdb.get("total")
+                if isinstance(t, int) and t >= 0:
+                    total = t  # 真 SDK 会带 total；缺失时退化为「探到空页」
             if not batch:
+                # 空页 = 到底；但 total 说还有 → 数据不一致，不能算完整
+                if total is not None and offset < total:
+                    return ids, False
                 break
             for it in batch:
-                mid = it.get("memory_id")
+                mid = it.get("memory_id") if isinstance(it, dict) else None
                 if mid:
                     ids.add(str(mid))
             offset += len(batch)
-            if len(batch) < 200:
-                break
+            if total is not None:
+                if offset >= total:
+                    break
+            # 无 total 的兼容路径：短页未必是末页，继续读到空页才判定完整
     except Exception:  # noqa: BLE001
-        pass
-    return ids
+        # 不静默清空：保留已读到的部分供诊断，但明确告知不完整。
+        return ids, False
+    return ids, True
 
 
 def _ids_of(result: dict) -> list[str]:
@@ -79,36 +120,6 @@ def _ids_of(result: dict) -> list[str]:
     return ids
 
 
-def _snapshot_ids(client, ident: dict, cap: int = 2000) -> set[str]:
-    """取写入前已存在的节点 id 集合，用于从 memory_ids 里剔除被 reconcile 合并到的老节点。
-
-    实测：一次 add 的 memory_ids 并不等于"新建节点"，而是"本次影响到的节点"。
-    写一句 CI 流水线的事实，会连带返回 8 个被合并/更新的旧节点 id。
-    直接全部打标签 = 把标签污染到无关记忆上，所以必须做前后差分。
-    """
-    ids: set[str] = set()
-    offset = 0
-    # 只按 user 取全量快照：reconcile 会跨 session 合并节点，
-    # 若同时按 session/agent 过滤，已知集合会偏小，导致把老节点误判为新节点。
-    kwargs: dict = {}
-    if (ident or {}).get("user_id"):
-        kwargs["user_id"] = ident["user_id"]
-    try:
-        while offset < cap:
-            r = client.list_memories(limit=200, offset=offset, **kwargs)
-            batch = (r.get("vdb") or {}).get("memories") or []
-            if not batch:
-                break
-            for it in batch:
-                mid = it.get("memory_id")
-                if mid:
-                    ids.add(str(mid))
-            offset += len(batch)
-            if len(batch) < 200:
-                break
-    except Exception:  # noqa: BLE001
-        pass
-    return ids
 def _new_ids_only(returned: list[str], before: set[str] | None) -> list[str]:
     if not returned:
         return []
@@ -118,6 +129,8 @@ def _new_ids_only(returned: list[str], before: set[str] | None) -> list[str]:
     # 全都被识别为老节点时（内容被 reconcile 判为"已存在"），退回第一个，
     # 避免标签无处可挂；这比把标签铺到 N 个老节点上安全。
     return fresh or returned[:1]
+
+
 def _flatten_search(resp: dict) -> list:
     """search 返回 {memories:{schema:[],proactive:[],normal:[]}}，拍平后按 score 降序。"""
     mem = resp.get("memories") or {}
@@ -135,6 +148,83 @@ def _flatten_search(resp: dict) -> list:
         items = [x for x in mem if isinstance(x, dict)]
     items.sort(key=lambda x: x.get("score") or 0, reverse=True)
     return items
+
+
+# P1-5：L6 通道的两处放大
+#   1. query 向量：`client.search` 内部已经 embed 过一次，这里再 embed 一次。
+#      不碰 SDK 私有（query_embedding 只能传入「原始 query」的向量，会绕过 SDK
+#      的 retrieval 改写，属于语义漂移），改为在**本层**按 query 缓存向量：
+#      同一进程内同一 query 的第二次 L6 检索不再产生额外 embed。
+#   2. `_l6_schema_stats` 空结果时 `get_all_nodes(limit=1000)` 全量拉取：
+#      改为短 TTL 缓存，避免「空结果 = 最慢路径」在 MCP 长驻进程里反复放大。
+# 缓存只影响「省一次调用」，不参与打分/排序，命中与否都不改变检索结果。
+_L6_STATS_TTL = 10.0   # 秒；schema 统计变化不频繁，短 TTL 足够挡住连续检索
+_L6_VEC_TTL = 300.0    # 秒；query→向量只与模型/文本有关，可以缓存更久
+_L6_VEC_MAX = 64       # 单进程最多缓存多少个 query 向量（防长驻进程无界增长）
+_L6_STATS_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_L6_VEC_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _reset_l6_caches() -> None:
+    """清空 L6 缓存（测试用；也便于排障时手工失效）。"""
+    _L6_STATS_CACHE.clear()
+    _L6_VEC_CACHE.clear()
+
+
+def _l6_vec_get(es, query: str):
+    try:
+        bucket = _L6_VEC_CACHE.get(es)
+    except TypeError:  # provider 对象不可弱引用
+        return None
+    hit = (bucket or {}).get(query)
+    if not hit:
+        return None
+    ts, vec = hit
+    if time.monotonic() - ts > _L6_VEC_TTL:
+        bucket.pop(query, None)
+        return None
+    return vec
+
+
+def _l6_vec_put(es, query: str, vec) -> None:
+    try:
+        bucket = _L6_VEC_CACHE.get(es)
+        if bucket is None:
+            bucket = OrderedDict()
+            _L6_VEC_CACHE[es] = bucket
+    except TypeError:
+        return
+    bucket[query] = (time.monotonic(), vec)
+    bucket.move_to_end(query)
+    while len(bucket) > _L6_VEC_MAX:
+        bucket.popitem(last=False)
+
+
+def _l6_stats_get(gs, user_id: str):
+    try:
+        bucket = _L6_STATS_CACHE.get(gs)
+    except TypeError:
+        return None
+    hit = (bucket or {}).get(user_id)
+    if not hit:
+        return None
+    ts, total, with_emb = hit
+    if time.monotonic() - ts > _L6_STATS_TTL:
+        return None
+    return total, with_emb
+
+
+def _l6_stats_put(gs, user_id: str, total: int, with_emb: int) -> None:
+    if total < 0:  # 查询失败（-1,-1）不能缓存，否则会把故障固化一个 TTL
+        return
+    try:
+        bucket = _L6_STATS_CACHE.get(gs)
+        if bucket is None:
+            bucket = {}
+            _L6_STATS_CACHE[gs] = bucket
+    except TypeError:
+        return
+    bucket[user_id] = (time.monotonic(), total, with_emb)
 
 
 def fetch_l6_schemas(
@@ -176,13 +266,16 @@ def fetch_l6_schemas(
     async def _run():
         from hy_memory.models.memory import MemoryLayer
 
-        qe = await es.embed(query)
-        # embed 的返回形态在不同 provider 下不一致：可能是 (vec, meta)、
-        # [[vec]] 或 vec 本身，逐层剥到一维 float 列表为止。
-        if isinstance(qe, tuple):
-            qe = qe[0]
-        if qe and isinstance(qe[0], (list, tuple)):
-            qe = qe[0]
+        qe = _l6_vec_get(es, query)
+        if qe is None:
+            qe = await es.embed(query)
+            # embed 的返回形态在不同 provider 下不一致：可能是 (vec, meta)、
+            # [[vec]] 或 vec 本身，逐层剥到一维 float 列表为止。
+            if isinstance(qe, tuple):
+                qe = qe[0]
+            if qe and isinstance(qe[0], (list, tuple)):
+                qe = qe[0]
+            _l6_vec_put(es, query, qe)
         return await gs.vector_search(
             query_embedding=qe,
             isolation_key="",
@@ -243,6 +336,9 @@ def _l6_schema_stats(client, user_id: str = "default") -> tuple[int, int]:
         gs = getattr(client, "_graph_store", None)
         if gs is None:
             return -1, -1
+        cached = _l6_stats_get(gs, user_id)
+        if cached is not None:
+            return cached
         iso = MemoryNode.build_isolation_key(user_id, "default_agent")
         rows = asyncio.run(
             gs.get_all_nodes(
@@ -254,6 +350,7 @@ def _l6_schema_stats(client, user_id: str = "default") -> tuple[int, int]:
         ) or []
         total = len(rows)
         with_emb = sum(1 for r in rows if getattr(r, "embedding", None))
+        _l6_stats_put(gs, user_id, total, with_emb)
         return total, with_emb
     except Exception:  # noqa: BLE001
         return -1, -1
@@ -374,8 +471,11 @@ def _bind_tags(ids: list[str], tags: list[str], source: str = "user") -> int:
 
 
 def _bind_tags_to_new(client, ident: dict, before: set[str], returned: list[str],
-                      tags: list[str]) -> tuple[list[str], set[str]]:
-    """把用户标签绑到「本次真正新建的可检索节点」上，返回 (绑定的 id, 新快照)。
+                      tags: list[str], *, before_complete: bool = True) -> tuple[list[str], str]:
+    """把用户标签绑到「本次真正新建的可检索节点」上，返回 (绑定的 id, note)。
+
+    note 非空 = 跳过绑定，调用方必须透传原因。快照不完整（分页超上限/读取失败）
+    时绝不打标签：不确定新老节点就下标签 = 数据污染。
 
     为什么不直接用 add 返回的 ids（0.9.9 / PRD F7）：抽取没产出节点时，
     add 只回 l1_raw（status=shadow）的 id，标签就挂在一个永远搜不到的影子
@@ -385,11 +485,17 @@ def _bind_tags_to_new(client, ident: dict, before: set[str], returned: list[str]
     差分对 reconcile 也成立：把内容合并进老节点时 fresh 为空，退回
     `_new_ids_only` 的老逻辑（至少挂一个，别让标签彻底没有去处）。
     """
-    after = _snapshot_ids(client, ident)
+    if not tags:
+        return [], ""
+    if not before_complete:
+        return [], "标签未绑定：写入前快照不完整（分页超上限或读取失败），无法判定新节点"
+    after, after_complete = _snapshot_ids(client, ident)
+    if not after_complete:
+        return [], "标签未绑定：写入后快照不完整（分页超上限或读取失败），无法判定新节点"
     fresh = sorted(after - before)
     target = fresh or _new_ids_only(returned, before)
     _bind_tags(target, tags, "user")
-    return target, after
+    return target, ""
 
 
 def _remember_auto(items: list[dict]) -> None:
@@ -403,8 +509,16 @@ def _remember_auto(items: list[dict]) -> None:
     try:
         conn = store.connect()
         try:
+            # 读路径上的目的一致：把 LLM 标签补进本地索引供统计/过滤复用。
+            # 每轮检索都无条件重写一遍意味着「读一次写一次」——先把已有的
+            # auto 标签取回来比对，只有确实新增的才落盘。
+            mids = [mid for mid, _ in pairs]
+            have = store.tags_for(conn, mids, source="auto")
             for mid, tags in pairs:
-                store.bind_tags(conn, [mid], [str(t) for t in tags], "auto")
+                want = {str(t).strip() for t in tags if str(t).strip()}
+                missing = want - set(have.get(mid) or [])
+                if missing:
+                    store.bind_tags(conn, [mid], sorted(missing), "auto")
         finally:
             conn.close()
     except Exception:  # noqa: BLE001
@@ -453,6 +567,152 @@ def _filter_by_tags(items: list[dict], tags: list[str] | None, tag_mode: str = "
             it["_tags"] = sorted(have)
             out.append(it)
     return out
+
+
+def searchcore(
+    client,
+    query: str | None,
+    *,
+    queries: list[str] | None = None,
+    search_mode: str = "default",
+    rerank: bool = True,
+    fetch_limit: int = 10,
+    offset: int = 0,
+    limit: int = 10,
+    min_score: float | None = None,
+    since: float | None = None,
+    until: float | None = None,
+    ident: dict | None = None,
+    include_sources: list[str] | None = None,
+    exclude_sources: list[str] | None = None,
+    tags: list[str] | None = None,
+    tag_mode: str = "all",
+    schema: bool = True,
+    schema_query: str | None = None,
+    schema_limit: int = 3,
+    schema_min: float = 0.25,
+    schema_user_id: str = "default",
+    remember_auto: bool = False,
+    probe_empty: bool = True,
+    pending_always: bool = False,
+) -> dict:
+    """检索的**唯一实现**（CLI `cmd_search` 与 MCP `search_memory` 共用）。
+
+    调用方只负责参数解析与输出投影；召回、拍平、时间/标签过滤、空结果嵌入探针、
+    L6 schema、队列积压提示都在这里，避免两边各写一份再慢慢漂移。
+
+    开关只表达「调用方本来就有/本来就没有的能力」，不是在 MCP 里补功能：
+      * `remember_auto`：CLI 的 tags 自动缓存（列表/检索顺手写入），MCP 不开；
+      * `tags` / `tag_mode`：标签后过滤（SDK 无 tag 查询条件，必须 over-fetch）；
+      * `pending_always`：MCP 无论有没有命中都要带队列提示，CLI 只在空手时带；
+      * `probe_empty`：空结果时探测嵌入端点是否真的挂了。
+
+    返回统一 dict（调用方只做投影，不再二次过滤）：
+      items / filtered_total / has_more / elapsed_ms / min_score /
+      schemas / schema_state / probe_error / pending
+    """
+    kw: dict = {
+        "search_mode": search_mode,
+        "rerank": rerank,
+        "limit": int(fetch_limit),
+        "min_score": min_score,
+        # L6 只走正路（与历史口径一致）：SDK 的正路+反路一起关掉，
+        # 正路由 fetch_l6_schemas 单独跑，阈值/条数/排序全在我们手里。
+        "schema_limit": 0,
+    }
+    if since is not None:
+        kw["created_after"] = since
+    if include_sources:
+        kw["include_sources"] = list(include_sources)
+    if exclude_sources:
+        kw["exclude_sources"] = list(exclude_sources)
+    if queries:
+        kw["queries"] = list(queries)
+    if ident:
+        kw.update(ident)
+
+    resp = client.search(query, **kw)
+    items = _flatten_search(resp)
+    probe_error = ""
+    if not items and not tags and probe_empty:
+        probe_error = _embedding_unhealthy()
+    if remember_auto:
+        _remember_auto(items)
+    if since is not None or until is not None:
+        items = [x for x in items if timefilter._in_range(timefilter._item_ts(x), since, until)]
+    if tags:
+        items = _filter_by_tags(items, tags, tag_mode)
+
+    filtered_total = len(items)
+    page = items[offset: offset + int(limit)]
+    has_more = filtered_total > offset + int(limit)
+
+    schemas: list[dict] = []
+    schema_state = "off"
+    if schema:
+        schemas, schema_state = fetch_l6_schemas(
+            client,
+            schema_query if schema_query is not None else (query or ""),
+            user_id=schema_user_id,
+            limit=schema_limit,
+            min_score=schema_min,
+        )
+
+    pending = 0
+    if pending_always or not page:
+        pending = _pending_jobs()
+
+    return {
+        "items": page,
+        "filtered_total": filtered_total,
+        "has_more": has_more,
+        "elapsed_ms": resp.get("elapsed_ms"),
+        "min_score": min_score,
+        "schemas": schemas,
+        "schema_state": schema_state,
+        "probe_error": probe_error,
+        "pending": pending,
+    }
+
+
+def scenecore(
+    client,
+    query: str,
+    *,
+    scene: str,
+    workspace_id: str | None = None,
+    branch: str | None = None,
+    limit: int = 5,
+    user_ids: list[str] | None = None,
+    min_score: float | None = None,
+    include_sources: list[str] | None = None,
+    exclude_sources: list[str] | None = None,
+    source_filter: str | None = None,
+    chain_block: bool = False,
+    chain_user_id: str = "default",
+) -> dict:
+    """场景检索（facts/experiences 双路）的唯一 SDK 调用点。
+
+    双路的返回结构与 chat 单路不同，投影留给调用方；这里只统一参数拼装与
+    chain_block 兜底，避免 CLI/MCP 各拼一份参数再漂移。
+    """
+    kw: dict = {"limit": limit, "user_ids": list(user_ids or [])}
+    if min_score is not None:
+        kw["min_score"] = min_score
+    if include_sources:
+        kw["include_sources"] = list(include_sources)
+    if exclude_sources:
+        kw["exclude_sources"] = list(exclude_sources)
+    if source_filter:
+        kw["include_sources"] = [source_filter]
+    r = client.search(query, scene=scene, workspace_id=workspace_id, branch=branch, **kw)
+    if chain_block:
+        # SDK 在带 workspace_id 时会把链全滤掉（上游 _in_scope 拿仓名比文件相对
+        # 路径），这里用同一份链库兜底补块；无 workspace 时 SDK 自己就出了块。
+        r = fill_chain_block(
+            client, r, query, user_id=chain_user_id, workspace_id=workspace_id
+        )
+    return r
 
 
 def _worker_cap() -> int:

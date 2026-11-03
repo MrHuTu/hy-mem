@@ -5,10 +5,12 @@ from hymem.backends.hymemory.clientops import (  # noqa: F401
     _vector_collection,
     add_sync_with_retry,
     build_embedding_service,
+    delete_memory_with_cascade,
     embedding_provider,
     find_derived_nodes,
     is_transient_db_error,
     sdk_info,
     make_client,
     sweep_derived_nodes,
+    update_memory,
 )
