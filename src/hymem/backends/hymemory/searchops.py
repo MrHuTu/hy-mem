@@ -490,6 +490,13 @@ def _bind_tags_to_new(client, ident: dict, before: set[str], returned: list[str]
 
     差分对 reconcile 也成立：把内容合并进老节点时 fresh 为空，退回
     `_new_ids_only` 的老逻辑（至少挂一个，别让标签彻底没有去处）。
+
+    并发归属（0.9.9 竞态修复）：多 lane / 多进程写同一 user 时，after 快照会
+    混进**别人**刚写的节点——只做全局 after−before 差分，会把本次标签绑到
+    对方节点上（数据不坏，但两边的 `--tag` 都筛不准）。所以差分必须与本条
+    add **自己返回的 ids**（`returned`，即本次真正影响到/新建的节点）取交集：
+    归属来自写入结果本身，不再依赖全局先后顺序。交集为空（内容被 reconcile
+    并进老节点）时仍退回 `_new_ids_only`，行为与单 lane 完全一致。
     """
     if not tags:
         return [], ""
@@ -498,7 +505,11 @@ def _bind_tags_to_new(client, ident: dict, before: set[str], returned: list[str]
     after, after_complete = _snapshot_ids(client, ident)
     if not after_complete:
         return [], "标签未绑定：写入后快照不完整（分页超上限或读取失败），无法判定新节点"
-    fresh = sorted(after - before)
+    owned = {str(i) for i in returned if i}
+    if not owned:
+        # 没有任何归属信息：after−before 可能是别人写的节点，打了就是错绑。
+        return [], "标签未绑定：本次写入未返回节点 id，无法判定新节点归属"
+    fresh = sorted((after - before) & owned)
     target = fresh or _new_ids_only(returned, before)
     _bind_tags(target, tags, "user")
     return target, ""
