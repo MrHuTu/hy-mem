@@ -424,6 +424,195 @@ def main() -> int:
         queue_cmd.require_ready = real_require
     check("一轮消费+收工只读 3 次 stats（旧实现 4 次）", calls["n"] == 3, f"calls={calls['n']}")
 
+    # ---- 10. 重投与 add 的拉起/回执对称（0.9.9 HY_MEM_AUTO_WORKER）----
+    print("\n自动拉起（retry / retry --shadow 与 add 同判定）")
+
+    import argparse
+    import contextlib
+    import io
+    import threading
+
+    from hymem.core import install_ops, procs
+
+    def _retry(*, json_mode: bool = True, **kw) -> tuple[int, dict, str]:
+        """跑 cmd_retry，用打桩的 ok() 收 (payload, human)，避开 stdout 抢写。"""
+        ns = argparse.Namespace(job_id="", all_dead=False, shadow=False, json=json_mode)
+        for k, v in kw.items():
+            setattr(ns, k, v)
+        captured: list[tuple[dict, str]] = []
+        real_ok = queue_cmd.ok
+        queue_cmd.ok = lambda obj, as_json, human=None: (captured.append((obj, human or "")), 0)[1]
+        try:
+            rc = queue_cmd.cmd_retry(ns)
+        finally:
+            queue_cmd.ok = real_ok
+        payload, human = captured[-1] if captured else ({}, "")
+        return rc, payload, human
+
+    def _shadow_job(jid: int) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO jobs (id, kind, status, attempts, max_attempts, payload,"
+            " memory_ids, error, created_at, shadow_only)"
+            " VALUES (?, 'add', 'done', 1, 3, ?, '[]', ?, 0, 1)",
+            (jid, json.dumps({"text": f"影子任务{jid}"}), "shadow_only: 抽取未产出可检索节点"),
+        )
+
+    def _done_job(jid: int) -> None:
+        conn.execute(
+            "INSERT OR REPLACE INTO jobs (id, kind, status, attempts, max_attempts, payload,"
+            " created_at) VALUES (?, 'add', 'done', 1, 3, ?, 0)",
+            (jid, json.dumps({"text": f"正常任务{jid}", "identity": {"user_id": "u1"}})),
+        )
+
+    real_spawn = procs._spawn_detached_worker
+    spawn_calls: list[int] = []
+
+    def fake_spawn(*_a, **_kw):
+        spawn_calls.append(1)
+        return True
+
+    # 10-1 无活跃消费者 + 有待重投 → 拉起，回执字段对称（live 在 spawn 前取样）
+    conn.execute("DELETE FROM worker_reg")
+    conn.execute("DELETE FROM jobs")
+    _shadow_job(9101)
+    spawn_calls.clear()
+    procs._spawn_detached_worker = fake_spawn
+    try:
+        rc, pay, _ = _retry(shadow=True)
+    finally:
+        procs._spawn_detached_worker = real_spawn
+    st = pay.get("queue") or {}
+    check("retry --shadow 无人消费时拉起 worker，回执 worker_* 对称",
+          rc == 0 and len(spawn_calls) == 1 and pay.get("worker_spawned") is True
+          and pay.get("worker_live") is False,
+          f"rc={rc} spawned={pay.get('worker_spawned')} live={pay.get('worker_live')}")
+    check("retry --shadow 回执含 requeued/pending",
+          pay.get("requeued") == 1 and st.get("pending") == 1, f"payload={pay}")
+
+    # 10-1b 人类可读输出补一句「谁在消费」
+    _shadow_job(9101)
+    spawn_calls.clear()
+    procs._spawn_detached_worker = fake_spawn
+    try:
+        rc_h, _p, human_h = _retry(shadow=True)
+    finally:
+        procs._spawn_detached_worker = real_spawn
+    check("retry 人类输出提示「已在后台拉起消费者」",
+          rc_h == 0 and "已在后台拉起消费者" in human_h, human_h[:160])
+
+    # 10-2 已有活跃 worker → 不重复拉起
+    conn.execute("DELETE FROM worker_reg")
+    _shadow_job(9102)
+    store.heartbeat(conn, "host:live")
+    spawn_calls.clear()
+    procs._spawn_detached_worker = fake_spawn
+    try:
+        rc2, pay2, _ = _retry(shadow=True)
+    finally:
+        procs._spawn_detached_worker = real_spawn
+    check("已有活跃 worker 时不重复拉起（live=true）",
+          rc2 == 0 and not spawn_calls and pay2.get("worker_spawned") is False
+          and pay2.get("worker_live") is True,
+          f"spawned={pay2.get('worker_spawned')} live={pay2.get('worker_live')}")
+
+    # 10-3 HY_MEM_AUTO_WORKER=0：retry 与 add 共用 helper，都不拉起
+    os.environ["HY_MEM_AUTO_WORKER"] = "0"
+    try:
+        conn.execute("DELETE FROM worker_reg")
+        conn.execute("DELETE FROM jobs")  # 隔离：10-1/10-2 的 pending 会污染 pending 计数断言
+        _shadow_job(9103)
+        rc3, pay3, _ = _retry(shadow=True)  # 真实 _spawn_detached_worker，被开关挡住
+        helper_spawned, helper_live = procs.ensure_worker_for_pending(conn)
+        disabled = procs.auto_worker_disabled()
+    finally:
+        os.environ.pop("HY_MEM_AUTO_WORKER", None)
+    st3 = pay3.get("queue") or {}
+    check("HY_MEM_AUTO_WORKER=0：retry 不拉起且回执 false",
+          rc3 == 0 and pay3.get("worker_spawned") is False and pay3.get("worker_live") is False
+          and st3.get("pending") == 1, f"payload={pay3}")
+    check("HY_MEM_AUTO_WORKER=0：add 同 helper 也不拉起", disabled is True
+          and helper_spawned is False and helper_live is False,
+          f"disabled={disabled} spawned={helper_spawned}")
+
+    # 10-4 非法值按开启并告警（不能因为拼错把后台消费关掉）
+    os.environ["HY_MEM_AUTO_WORKER"] = "maybe"
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            not_disabled = procs.auto_worker_disabled()
+    finally:
+        os.environ.pop("HY_MEM_AUTO_WORKER", None)
+    check("HY_MEM_AUTO_WORKER 非法值按开启并告警",
+          not_disabled is False and "不是合法的开关值" in err.getvalue(), err.getvalue().strip())
+
+    # 10-5 pending=0 时不瞎拉
+    conn.execute("DELETE FROM jobs")
+    conn.execute("DELETE FROM worker_reg")
+    spawn_calls.clear()
+    procs._spawn_detached_worker = fake_spawn
+    try:
+        rc5, pay5, _ = _retry(shadow=True)
+        h_spawned, h_live = procs.ensure_worker_for_pending(conn)
+    finally:
+        procs._spawn_detached_worker = real_spawn
+    check("pending=0 时 retry/helper 都不拉起",
+          rc5 == 0 and pay5.get("requeued") == 0 and not spawn_calls
+          and pay5.get("worker_spawned") is False and h_spawned is False,
+          f"requeued={pay5.get('requeued')} calls={len(spawn_calls)}")
+
+    # 10-6 并发两个重投：走真实闸门（claim_worker_slot / _spawn_intent），只拉起一个。
+    # 线程里直接执行 cmd_retry 的重投 SQL + ensure_worker_for_pending（避开全局 ok/stdout
+    # 抢写）；只把 Popen 打桩计数，闸门与 WriteLock 全是真的。
+    conn.execute("DELETE FROM jobs")
+    conn.execute("DELETE FROM worker_reg")
+    _done_job(9111)
+    _done_job(9112)
+    conn.execute("DELETE FROM worker_reg")
+    real_target = install_ops.target_command
+    install_ops.target_command = lambda: [sys.executable]
+    real_popen = procs.subprocess.Popen
+    popen_calls: list[list[str]] = []
+    procs.subprocess.Popen = lambda argv, **_kw: popen_calls.append(argv)
+    barrier = threading.Barrier(2)
+    spawned_results: list[bool] = []
+
+    def _race_requeue(jid: int) -> None:
+        barrier.wait(timeout=10)
+        c = store.connect()
+        try:
+            cur = c.execute(
+                "UPDATE jobs SET status='pending', attempts=0, error=NULL, started_at=NULL,"
+                " worker=NULL, not_before=NULL WHERE id=? AND status IN ('dead','done')",
+                (jid,),
+            )
+            n = cur.rowcount
+            st = store.queue_stats(c)
+            if n > 0:
+                spawned_results.append(procs.ensure_worker_for_pending(c, stats=st)[0])
+        finally:
+            c.close()
+
+    try:
+        ths = [threading.Thread(target=_race_requeue, args=(jid,)) for jid in (9111, 9112)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join(30)
+        alive = [t.is_alive() for t in ths]
+    finally:
+        procs.subprocess.Popen = real_popen
+        install_ops.target_command = real_target
+        conn.execute("DELETE FROM worker_reg")
+    check("并发两个重投只拉起一个（claim_worker_slot 占位生效）",
+          not any(alive) and len(spawned_results) == 2
+          and sum(spawned_results) == 1 and len(popen_calls) == 1,
+          f"spawned={spawned_results} popen={len(popen_calls)}")
+    check("人类提示语三态（拉起 / 在跑 / 关闭）",
+          procs.worker_note(True, False, 1) == "；已在后台拉起消费者"
+          and procs.worker_note(False, True, 1) == "；已有消费者在跑"
+          and procs.worker_note(True, False, 0) == "",
+          "note 文案一致")
+
     conn.close()
     n_pass = sum(results)
     print(f"\n{'全部通过' if n_pass == len(results) else '存在失败'}（{n_pass}/{len(results)}）")

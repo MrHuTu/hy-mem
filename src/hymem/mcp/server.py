@@ -2,8 +2,8 @@
 
 为什么：智能体经 SKILL.md 约定调 CLI 是「文本约定」，经 MCP 是「原生工具」——
 宿主自动发现、结构化参数、无需猜命令。stdio 传输由宿主按会话拉起本进程，
-随会话退出，不常驻；常驻消费由 add --async 的自动拉起 worker 负责（见
-hy_mem_cli._spawn_detached_worker）。
+随会话退出，不常驻；消费由「无人消费则拉起」的 detached worker 负责（见
+core.procs.ensure_worker_for_pending，add 与 retry 共用同一判定）。
 
 协议：JSON-RPC 2.0，换行分隔（MCP stdio 规范）。只实现必需面：
 initialize / notifications/initialized / ping / tools/list / tools/call。
@@ -342,7 +342,7 @@ def _add_productivity(args: dict, scene: str, ws: str | None, branch: str | None
 
 def _tool_add_memory(args: dict) -> str:
     """写入记忆。默认走异步队列（毫秒返回，worker 自动拉起落库）。"""
-    from hymem.core.procs import _spawn_detached_worker
+    from hymem.core.procs import ensure_worker_for_pending
     from hymem.core.searchops import _parse_memory_at
 
     scene, ws, branch = _parse_scene_scope(args)
@@ -506,13 +506,9 @@ def _tool_add_memory(args: dict) -> str:
     conn = store.connect()
     try:
         stats = store.queue_stats(conn)
-        hb = store.worker_age(conn)
+        spawned, live = ensure_worker_for_pending(conn, stats=stats)
     finally:
         conn.close()
-    live = hb is not None and hb < 15.0
-    spawned = False
-    if stats["pending"] > 0 and not live:
-        spawned = _spawn_detached_worker()
     return json.dumps(
         {
             "mode": "async",

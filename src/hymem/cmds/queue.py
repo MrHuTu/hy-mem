@@ -12,6 +12,7 @@ from hymem.cmds.base import (  # noqa: F401
     prepare_commit, require_ready, socket, store, sys,
     time, vdb_endpoint,
 )
+from hymem.core.procs import ensure_worker_for_pending, worker_note
 
 
 def _wanted_serve_port() -> int:
@@ -754,15 +755,25 @@ def cmd_queue(args) -> int:
 
 
 def cmd_retry(args) -> int:
-    """把死信/失败任务放回待处理，重置重试计数。"""
+    """把死信/失败任务放回待处理，重置重试计数。
+
+    重投后与 add 用同一套「无人消费则拉起」判定：retry 过去只改状态，没有
+    任何人消费，任务就静静躺在 pending 里（`retry --shadow` 踩过这个坑）。
+    回执带 worker_spawned / worker_live，人类输出补一句谁在消费。
+    """
     conn = store.connect()
     try:
+        spawned, live = False, False
         if getattr(args, "shadow", False):
             n = store.requeue_shadow(conn)
             stats = store.queue_stats(conn)
+            if n > 0:
+                spawned, live = ensure_worker_for_pending(conn, stats=stats)
             return ok(
-                {"ok": True, "requeued": n, "queue": stats}, args.json,
-                f"已重投 {n} 个「只落影子节点」的任务，待处理 {stats['pending']} 个",
+                {"ok": True, "requeued": n, "queue": stats,
+                 "worker_spawned": spawned, "worker_live": live}, args.json,
+                f"已重投 {n} 个「只落影子节点」的任务，待处理 {stats['pending']} 个"
+                + worker_note(spawned, live, stats["pending"]),
             )
         if args.job_id == "dead" or args.all_dead:
             cur = conn.execute(
@@ -784,9 +795,16 @@ def cmd_retry(args) -> int:
             if n == 0:
                 return fail(f"job {jid} 不存在或状态不允许重投（只有 dead/done 可重投）", EXIT_USAGE)
         stats = store.queue_stats(conn)
+        if n > 0:
+            spawned, live = ensure_worker_for_pending(conn, stats=stats)
     finally:
         conn.close()
-    return ok({"ok": True, "requeued": n, "queue": stats}, args.json, f"已重投 {n} 个任务，待处理 {stats['pending']} 个")
+    return ok(
+        {"ok": True, "requeued": n, "queue": stats,
+         "worker_spawned": spawned, "worker_live": live}, args.json,
+        f"已重投 {n} 个任务，待处理 {stats['pending']} 个"
+        + worker_note(spawned, live, stats["pending"]),
+    )
 
 
 def cmd_drain(args) -> int:

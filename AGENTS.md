@@ -305,6 +305,7 @@ UnicodeEncodeError: 'utf-8' codec can't encode character '\udcaa' in position 17
 | `HY_MEM_USER_ID` | 默认身份，优先级高于 config |
 | `HY_MEM_CONFIG` / `HY_MEM_HOME` / `HY_MEM_DATA_DIR` | 覆盖配置路径 / 安装根 / 数据目录 |
 | `HY_MEM_MIN_SCORE` / `HY_MEM_ASYNC` / `HY_MEM_NO_PROBE` | 阈值 / add 默认异步 / 空结果自证探测开关 |
+| `HY_MEM_AUTO_WORKER=0` | 统一关闭「无人消费则拉起」（add 与 retry/retry --shadow 都生效，默认开启；非法值按开启并告警） |
 | `HY_MEM_TUI=0` / `HY_MEM_MOUSE=1` | 退回编号菜单 / 开鼠标上报（默认关，开着会抢走终端拖选与右键复制） |
 | `HF_ENDPOINT` | 模型下载入口，**默认 `https://hf-mirror.com`**（国内镜像；fastembed 默认拉 huggingface.co 会卡 40s 再降级） |
 | `MEMORY_LOCAL_EMBED_CACHE` | 本地 ONNX 模型缓存目录，默认跟 `MEMORY_DATA_DIR/models` 走（换包不重下 92MB） |

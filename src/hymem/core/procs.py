@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from hymem.core import store
@@ -36,6 +37,53 @@ def _worker_cap() -> int:
         return 3
 
 
+def auto_worker_disabled() -> bool:
+    """HY_MEM_AUTO_WORKER=0 统一关闭「无人消费则拉起」（add / retry 都生效）。
+
+    默认开启。只有明确写成关闭类取值才关；非法值按**开启**并告警——一个
+    拼错的开关不该把后台消费整个关掉，让队列悄悄积压。
+    """
+    raw = (os.getenv("HY_MEM_AUTO_WORKER") or "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return True
+    if raw not in {"", "1", "true", "yes", "on"}:
+        print(
+            f"hy-mem: HY_MEM_AUTO_WORKER={raw!r} 不是合法的开关值（0/1），按开启处理",
+            file=sys.stderr,
+        )
+    return False
+
+
+def ensure_worker_for_pending(conn, stats: dict | None = None) -> tuple[bool, bool]:
+    """无人消费且有积压时拉起 detached worker；返回 (spawned, live)。
+
+    与 add 同一套判定（0.9.9 起 add / retry 共用）：`live` 在拉起**之前**
+    取样，保留既有回执语义——刚拉起时 spawned=True / live=False（worker 首次
+    心跳约 2s 后才落库），调用方别把它读成失败。pending=0 或已有心跳时不拉。
+    开关 HY_MEM_AUTO_WORKER=0 在 `_spawn_detached_worker` 里统一生效。
+    """
+    if stats is None:
+        stats = store.queue_stats(conn)
+    hb = store.worker_age(conn)
+    live = hb is not None and hb < 15.0
+    if stats["pending"] <= 0 or live:
+        return False, live
+    return _spawn_detached_worker(), live
+
+
+def worker_note(spawned: bool, live: bool, pending: int) -> str:
+    """人类可读的一句「这次有没有人负责消费」，接在命令正文后面。"""
+    if pending <= 0:
+        return ""
+    if spawned:
+        return "；已在后台拉起消费者"
+    if live:
+        return "；已有消费者在跑"
+    if auto_worker_disabled():
+        return "；HY_MEM_AUTO_WORKER=0，未自动拉起（需要时手动 hy-mem worker --once）"
+    return "；未自动拉起（可能已有进程正在拉或启动失败，需要时手动 hy-mem worker --once）"
+
+
 def _spawn_detached_worker(idle_exit: float = 90.0,
                            extra_args: list[str] | None = None) -> bool:
     """拉起一个脱管的后台消费 supervisor（空闲自退出），成功返回 True。
@@ -47,7 +95,13 @@ def _spawn_detached_worker(idle_exit: float = 90.0,
     N 个消费线程（--lanes，默认 HY_MEM_MAX_WORKERS=3）。进程数恒 1 是
     有意的——见 _worker_cap 的语义说明。WriteLock 与 SQLite 抢占兜底，
     即使拉重了也无害（闸门 cap=1 + 心跳判活）。
+
+    HY_MEM_AUTO_WORKER=0 时直接返回 False（不占闸门、不起进程）：开关在最低
+    层生效，所有调用方（MCP add / CLI add --async / retry）语义一致。
     """
+    if auto_worker_disabled():
+        return False
+
     from hymem.core import install_ops
 
     # 上限闸门（WriteLock 内占位，串行化风暴竞态）：detached supervisor 恒 1 个。
