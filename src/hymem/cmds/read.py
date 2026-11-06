@@ -378,6 +378,14 @@ def cmd_list(args) -> int:
         _ident = identity(args)
         _no_ident_hint = None
         if not _ident:
+            if want_tags:
+                # 没有用户时 SDK 恒返回 0 条，带上标签过滤就变成「假 0 命中」，
+                # 必须显式报错，不能静默返回 count=0。
+                return fail(
+                    "标签过滤需要指定用户：请加 -u <用户> 后重试",
+                    hint="不带用户时 SDK 拒绝全库列举（恒返回 0 条），标签过滤无从生效",
+                    err_code="E_USER_REQUIRED",
+                )
             # SDK 的 list_by_user 无 user 过滤会直接拒绝（返回 0 条而非报错），
             # 不提示的话用户会以为库里真没数据
             _no_ident_hint = "未指定 -u/--user：SDK 拒绝无用户的全库列举，恒返回 0 条；请带 -u <用户> 重试"

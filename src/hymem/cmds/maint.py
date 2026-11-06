@@ -449,28 +449,58 @@ def _dir_size(p: Path) -> int:
 
 def _scan_all_memories(client, ident: dict, cap: int = 5000, page: int = 100) -> list[dict]:
     """分页扫全量抽取层记忆。cap 是防御上限，避免库异常大时把 CLI 拖死。"""
+    from hymem.core.searchops import vdb_memories
+
     items: list[dict] = []
+    seen: set[str] = set()
     offset = 0
     while offset < cap:
         r = client.list_memories(limit=page, offset=offset, **ident)
-        batch = (r.get("vdb") or {}).get("memories") or []
+        batch = vdb_memories(r)
         if not batch:
             break
-        items.extend([b for b in batch if isinstance(b, dict)])
+        for b in batch:
+            if not isinstance(b, dict):
+                continue
+            mid = str(b.get("id") or b.get("memory_id") or "")
+            # 分页期间若库有增删，offset 会错位导致同一条被扫到两次
+            if mid and mid in seen:
+                continue
+            if mid:
+                seen.add(mid)
+            items.append(b)
         offset += len(batch)
         if len(batch) < page:
             break
     return items
 
 
-_LAT_A = -10.9
+def _observed_write_latency_s() -> tuple[float | None, int]:
+    """最近成功任务的实际耗时中位数（秒）。
 
+    原来的 `-10.9 + 1.95 * 条数` 是 2026-10-29 一次性基准拟合出的曲线，
+    库结构/模型一换就失真（实测 361.6s vs 真实 3.5~9.2s）。改为直接读
+    jobs 表的 started_at/finished_at，随真实运行自校准，无样本时返回 None。
+    """
+    import statistics
 
-_LAT_B = 1.95
-
-
-def _estimate_write_latency(n: int) -> float:
-    return max(2.5, _LAT_A + _LAT_B * max(n, 1))
+    try:
+        conn = store.connect()
+        try:
+            rows = conn.execute(
+                "SELECT started_at, finished_at FROM jobs "
+                "WHERE status='done' AND started_at IS NOT NULL "
+                "AND finished_at IS NOT NULL AND finished_at > started_at "
+                "ORDER BY id DESC LIMIT 30"
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001  读不到观测值就退回保守默认值
+        return None, 0
+    durations = sorted(float(f) - float(s) for s, f in rows if s is not None and f is not None)
+    if not durations:
+        return None, 0
+    return float(statistics.median(durations)), len(durations)
 
 
 def _health_thresholds() -> dict:
@@ -568,8 +598,10 @@ def _stats_health(args) -> int:
         }
     )
 
-    # ---- 写入延迟预期 ----
-    est = _estimate_write_latency(n)
+    # ---- 写入延迟预期（真实观测，不再用条数线性外推）----
+    observed_s, lat_samples = _observed_write_latency_s()
+    est = observed_s if observed_s is not None else 5.0
+    lat_source = "observed_jobs" if observed_s is not None else "default_no_samples"
     if est >= th["lat_crit"]:
         lat_level = "CRIT"
     elif est >= th["lat_warn"]:
@@ -579,11 +611,23 @@ def _stats_health(args) -> int:
     checks.append(
         {
             "name": "单条写入预期",
-            "value": f"{est:.0f}s",
+            "value": f"{est:.1f}s",
             "level": lat_level,
-            "detail": f"pro 模式同步 add；上限 {th['lat_crit']:.0f}s，超过必须改用 --async",
+            "detail": (
+                f"取最近 {lat_samples} 条成功任务实际耗时中位数；上限 {th['lat_crit']:.0f}s，"
+                "超过必须改用 --async"
+                if observed_s is not None
+                else f"暂无成功任务样本，按保守默认 {est:.1f}s；上限 {th['lat_crit']:.0f}s"
+            ),
         }
     )
+
+    # shadow 口径：任务回执（历史）与现存节点（可检索性）分开报，避免
+    # 「删完影子节点后 shadow 计数仍是 3」这种口径混淆。
+    shadow_nodes = [
+        it for it in items
+        if str(it.get("layer") or "") == "l1_raw" or str(it.get("status") or "") == "shadow"
+    ]
 
     # ---- 队列 ----
     conn = store.connect()
@@ -593,6 +637,7 @@ def _stats_health(args) -> int:
         stale = sum(1 for _ in conn.execute("SELECT 1 FROM jobs WHERE status='done'").fetchall())
     finally:
         conn.close()
+    shadow_job_count = int(qs.get("shadow_only") or 0)
     q_level = "CRIT" if qs["dead"] else ("WARN" if qs["pending"] > 50 or qs["running"] else "OK")
     checks.append(
         {
@@ -602,6 +647,11 @@ def _stats_health(args) -> int:
             "detail": f"已完成 {qs['done']} 条" + (f"，最老待处理 {qs['oldest_pending_age_s']:.0f}s" if qs["oldest_pending_age_s"] else ""),
         }
     )
+    if shadow_job_count or shadow_nodes:
+        notes.append(
+            f"shadow：现存节点 {len(shadow_nodes)} 条，历史任务回执 {shadow_job_count} 条"
+            f"（后者是写入口当时的判定，删除节点后会被自动销账）"
+        )
 
     # ---- 建议 ----
     if n >= th["count_warn"]:
@@ -637,13 +687,25 @@ def _stats_health(args) -> int:
         notes.append("各项指标正常，无需干预。")
 
     worst = "CRIT" if any(c["level"] == "CRIT" for c in checks) else ("WARN" if any(c["level"] == "WARN" for c in checks) else "OK")
+    fact_layers = ("l2_fact", "l3_skill", "l4_identity", "l5_constraint")
+    fact_count = sum(v for k, v in layer_count.items() if k in fact_layers)
     payload = {
         "ok": True,
         "verdict": worst,
         "memory_count": n,
+        "fact_count": fact_count,
+        "count_note": (
+            "memory_count 为最新抽取节点总数（含 l7_intention 等非事实层与派生链节点）；"
+            "fact_count 才是可检索事实条数。更新会在演化链上新开节点，故删 N 条时总数未必同比下降。"
+            if n else "空库"
+        ),
         "layers": layer_count,
+        "shadow_nodes": len(shadow_nodes),
+        "shadow_only_jobs": shadow_job_count,
         "size_mb": round(size_mb, 2),
         "estimated_write_latency_s": round(est, 1),
+        "latency_source": lat_source,
+        "latency_samples": lat_samples,
         "queue": qs,
         "top_tags": [{"tag": t["tag"], "n": t["n"]} for t in inv[:15]],
         "checks": checks,

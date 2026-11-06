@@ -56,7 +56,7 @@ from hymem.cmds.read import (  # noqa: F401
     cmd_profile, cmd_search,
 )
 from hymem.cmds.maint import (  # noqa: F401
-    _LAT_A, _LAT_B, _dir_size, _estimate_write_latency, _health_thresholds,
+    _dir_size, _health_thresholds, _observed_write_latency_s,
     _scan_all_memories, _stats_health, _status_icon, cmd_backup, cmd_doctor,
     cmd_evolve, cmd_evolve_status, cmd_graph_build, cmd_log, cmd_restore,
     cmd_stats, cmd_vdb_drop, cmd_vdb_plan, cmd_vdb_reembed,
@@ -95,8 +95,6 @@ __all__ = [
     "_GLOBAL_VALUED",
     "_JSON",
     "_LAST_FAIL",
-    "_LAT_A",
-    "_LAT_B",
     "_LaneState",
     "_Palette",
     "_Parser",
@@ -113,7 +111,6 @@ __all__ = [
     "_dir_size",
     "_effective_tags",
     "_embedding_unhealthy",
-    "_estimate_write_latency",
     "_execute_batch",
     "_execute_job",
     "_filter_by_tags",
@@ -124,6 +121,7 @@ __all__ = [
     "_in_range",
     "_item_ts",
     "_new_ids_only",
+    "_observed_write_latency_s",
     "_parse_memory_at",
     "_parse_when",
     "_pending_jobs",

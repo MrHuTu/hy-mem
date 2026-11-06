@@ -246,6 +246,8 @@ def cmd_add(args) -> int:
         raw_ids: list[str] = []
         tag_note = ""
         tagged_once = False
+        merged_parts = 0
+        part_warnings: list[str] = []
 
         def _bind_all_once() -> None:
             """多段 add 只做一次 after 快照：before 复用，避免每段全量扫描。"""
@@ -325,13 +327,33 @@ def cmd_add(args) -> int:
             rid = last.get("memory_id")
             if rid:
                 raw_ids.append(str(rid))
+            if last.get("merged_existing"):
+                merged_parts += 1
+            if last.get("warning"):
+                part_warnings.append(str(last["warning"]))
             ids = _ids_of(last)
             all_ids.extend(ids)
         _bind_all_once()
+        shadow_only = bool(parts) and not all_ids
+        shadow_warning = (
+            "抽取未产出可检索节点：本次仅落 L1 原文影子（检索不到），"
+            "可用 hy-mem retry --shadow 重做"
+        )
         if len(parts) > 1:
             payload = {"ok": True, "count": len(all_ids), "memory_ids": all_ids,
                        "tagged_ids": tagged, "tags": tags,
                        "raw_memory_ids": raw_ids}
+            if shadow_only:
+                payload["shadow_only"] = True
+                payload["warning"] = shadow_warning
+            if merged_parts:
+                # P2：分片写入时同样要把「并入既有条目」如实回执，不能只报 count
+                payload["merged_existing"] = True
+                payload["merged_parts"] = merged_parts
+            _notes = ([shadow_warning] if shadow_only else []) + part_warnings
+            _notes = list(dict.fromkeys(_notes))
+            if _notes:
+                payload["warning"] = "；".join(_notes)
             if tag_note:
                 payload["tag_note"] = tag_note
             if split_meta:
@@ -341,6 +363,9 @@ def cmd_add(args) -> int:
             return ok(payload, args.json, f"已写入 {len(all_ids)} 条：{', '.join(i[:8] for i in all_ids)}")
         payload = dict(last)
         payload["memory_ids"] = all_ids
+        if shadow_only:
+            payload["shadow_only"] = True
+            payload.setdefault("warning", shadow_warning)
         # memory_id 一律指向**可检索节点**（0.9.10 / PRD F8）。SDK 的
         # result.memory_id 在抽取路径上是 l1_raw（status=shadow），拿它去
         # get/delete 只会看到影子内容；可检索/可删除的是 memory_ids[0]。
@@ -416,16 +441,30 @@ def cmd_delete(args) -> int:
 
 
 def cmd_update(args) -> int:
-    """改一条记忆的内容。走 SDK 演化链：旧版本进 SHADOW 保留，不丢历史。"""
+    """改一条记忆的内容/标签。内容走 SDK 演化链：旧版本进 SHADOW 保留，不丢历史。"""
     rc = require_ready("更新记忆")
     if rc is not None:
         return rc
-    content = _read_text(getattr(args, "content", None))
-    if not content:
-        return fail("没有新内容（位置参数或 stdin）", EXIT_USAGE)
+    raw_tags = getattr(args, "tag", None)
+    clear_tags = getattr(args, "clear_tags", False)
+    # 只改标签时不要读 stdin（否则交互式调用会卡在等输入）
+    if getattr(args, "content", None) is None and (raw_tags or clear_tags):
+        content = ""
+    else:
+        content = _read_text(getattr(args, "content", None))
+    tags: list[str] | None = None
+    if clear_tags:
+        tags = []
+    elif raw_tags:
+        tags = [t.strip() for t in raw_tags if (t or "").strip()]
+    if not content and tags is None:
+        return fail(
+            "没有新内容或新标签（位置参数 / stdin / --tag / --clear-tags）",
+            EXIT_USAGE,
+        )
     client = make_client(args.mode)
     try:
-        r = update_memory(client, args.memory_id, content)
+        r = update_memory(client, args.memory_id, content or None, tags)
         if r is None:
             return fail(f"未找到 {args.memory_id}（可先 hy-mem list 拿 id）")
         if isinstance(r, dict) and r.get("success") is False:
@@ -433,10 +472,12 @@ def cmd_update(args) -> int:
                 f"更新失败：{r.get('error_message') or r.get('error') or 'unknown'}",
                 extra={"error_code": r.get("error_code"), "partial": bool(r.get("partial"))},
             )
-        return ok(
-            r, args.json,
-            f"已更新 {args.memory_id}（旧版本保留在演化链，hy-mem history {args.memory_id[:8]} 可查）",
-        )
+        human = f"已更新 {args.memory_id}"
+        if content:
+            human += "（旧版本保留在演化链，hy-mem history " + args.memory_id[:8] + " 可查）"
+        if tags is not None:
+            human += f"；用户标签已替换为 {','.join(tags) or '（空）'}"
+        return ok(r, args.json, human)
     finally:
         client.close()
 

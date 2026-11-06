@@ -110,14 +110,13 @@ def _ids_of(result: dict) -> list[str]:
     """pro 模式下 memory_id 是 l1_raw 事件 id，memory_ids 才是抽取后的最终节点 id。
 
     标签必须绑最终节点，否则在 search/list 里永远对不上。
+    写入结果显式带 memory_ids 但为空时（抽取无产出 / reconcile 无操作），
+    不能回退到 L1 根：那是一条检索不到的 SHADOW 影子，绑上去等于标签静默丢失。
     """
-    ids = result.get("memory_ids") or []
-    ids = [str(i) for i in ids if i]
-    if not ids:
-        mid = result.get("memory_id") or result.get("id")
-        if mid:
-            ids = [str(mid)]
-    return ids
+    if "memory_ids" in result:
+        return [str(i) for i in (result.get("memory_ids") or []) if i]
+    mid = result.get("memory_id") or result.get("id")
+    return [str(mid)] if mid else []
 
 
 def _new_ids_only(returned: list[str], before: set[str] | None) -> list[str]:
@@ -715,6 +714,36 @@ def searchcore(
         resp = _chat_pinned_search(client, eff_query, kw, queries)
     items = _flatten_search(resp)
     raw_candidates = len(items)
+    tag_rounds = 1
+
+    def _apply_time_filter(rows: list[dict]) -> list[dict]:
+        if since is None and until is None:
+            return rows
+        return [x for x in rows if timefilter._in_range(timefilter._item_ts(x), since, until)]
+
+    # 标签是 SDK 之外的后过滤：命中条目可能排在 top-k 之外，必须循环补取候选，
+    # 否则 search --tag 会在明明有命中时返回 0（A9：empty_reason=tag_filtered）。
+    if tags:
+        need = int(offset) + int(limit)
+        cap = max(int(fetch_limit), min(200, max(int(fetch_limit) * 5, need * 3)))
+        cur_fetch = int(kw.get("limit") or fetch_limit)
+        while (
+            len(_filter_by_tags(_apply_time_filter(items), tags, tag_mode)) < need
+            and raw_candidates >= cur_fetch
+            and cur_fetch < cap
+        ):
+            nxt = min(cap, max(cur_fetch * 3, cur_fetch + int(fetch_limit)))
+            kw["limit"] = nxt
+            resp = client.search(eff_query, **kw)
+            if _routed_productivity(resp):
+                resp = _chat_pinned_search(client, eff_query, kw, queries)
+            items = _flatten_search(resp)
+            raw_candidates = len(items)
+            cur_fetch = nxt
+            tag_rounds += 1
+            if raw_candidates < nxt:
+                break
+
     probe_error = ""
     if not items and not tags and probe_empty:
         probe_error = _embedding_unhealthy()
@@ -722,7 +751,7 @@ def searchcore(
         _remember_auto(items)
     after_time_filter = raw_candidates
     if since is not None or until is not None:
-        items = [x for x in items if timefilter._in_range(timefilter._item_ts(x), since, until)]
+        items = _apply_time_filter(items)
         after_time_filter = len(items)
     if tags:
         items = _filter_by_tags(items, tags, tag_mode)
@@ -784,6 +813,7 @@ def searchcore(
         "raw_candidates": raw_candidates,
         "after_time_filter": after_time_filter,
         "after_tag_filter": after_tag_filter,
+        "tag_fetch_rounds": tag_rounds if tags else 0,
         "library_total": library_total,
         "empty_reason": empty_reason,
         "path": "chat",

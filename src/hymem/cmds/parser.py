@@ -259,9 +259,14 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--dry-run", action="store_true", help="只确认这条记忆存在并打印它，不真删")
     ps.set_defaults(func=cmd_delete)
 
-    ps = sub.add_parser("update", help="改一条记忆的内容（旧版本保留在演化链）")
+    ps = sub.add_parser("update", help="改一条记忆的内容/标签（旧版本保留在演化链）")
     ps.add_argument("memory_id", help="记忆 id（list 命令里能看到）")
     ps.add_argument("content", nargs="?", help="新内容；省略则从 stdin 读")
+    ps.add_argument(
+        "--tag", action="append", default=None,
+        help="整组替换用户标签，可重复：--tag work --tag apollo；传 --clear-tags 清空",
+    )
+    ps.add_argument("--clear-tags", action="store_true", help="清空该记忆的用户标签（auto 标签不动）")
     ps.set_defaults(func=cmd_update)
 
     ps = sub.add_parser("history", help="查一条记忆的变更历史（演化链版本）")

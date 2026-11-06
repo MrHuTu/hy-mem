@@ -50,6 +50,8 @@ hy-mem 的跨进程 WriteLock 此前覆盖整个 client.add（含 LLM 抽取 8~4
 """
 from __future__ import annotations
 
+import os
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -92,6 +94,99 @@ def _writer_of(client: object):
 def _run(client: object, coro):
     """在 SDK 的内部事件循环线程上执行协程（与 client.add 同通道）。"""
     return client._loop_thread.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# reconcile 准入闸门 / 落库结果复核（P1 + P2）
+# ---------------------------------------------------------------------------
+
+# reconcile 候选窗口是「宽进」（约 0.4 起），LLM 会把语义不相关的新事实
+# 误合并进既有条目。低于该相似度的事实直接走 _direct_store（ADD），
+# 只有确实接近既有记忆的事实才交给 reconcile 判合并/演化。
+_RECONCILE_MIN_SIM_DEFAULT = 0.85
+
+
+def _reconcile_min_sim() -> float:
+    raw = (os.getenv("HY_MEM_RECONCILE_MIN_SIM") or "").strip()
+    if not raw:
+        return _RECONCILE_MIN_SIM_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        print(
+            f"[hy-mem] 非法环境变量 HY_MEM_RECONCILE_MIN_SIM={raw!r}，"
+            f"按默认 {_RECONCILE_MIN_SIM_DEFAULT} 处理",
+            file=sys.stderr,
+        )
+        return _RECONCILE_MIN_SIM_DEFAULT
+    return max(0.0, min(1.0, value))
+
+
+def _best_existing_similarity(run, vs, embedding: Any, user_id: str) -> float:
+    """新事实与既有 L2/L4 记忆的最高相似度（0~1）。"""
+    from hy_memory.models.memory import MemoryLayer, MemoryStatus
+
+    hits = run(
+        vs.search(
+            embedding,
+            user_id=user_id,
+            layers=[MemoryLayer.L2_FACT, MemoryLayer.L4_IDENTITY],
+            limit=1,
+            status_filter=[MemoryStatus.ACTIVE],
+            only_latest=True,
+        )
+    )
+    if not hits:
+        return 0.0
+    top = hits[0] or {}
+    try:
+        return float(top.get("score") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _split_facts_for_reconcile(run, vs, texts, metas, precomputed, user_id):
+    """按相似度闸门把事实分成 reconcile 组与直存组。
+
+    返回 (recon_texts, recon_metas, direct_texts, direct_metas, scores)。
+    查询失败时保守地把事实交给 reconcile（不拦截写入）。
+    """
+    gate = _reconcile_min_sim()
+    recon_texts, recon_metas, direct_texts, direct_metas = [], [], [], []
+    scores: dict = {}
+    for text, meta in zip(texts, metas):
+        emb = (precomputed or {}).get(text)
+        if not emb or not user_id:
+            recon_texts.append(text)
+            recon_metas.append(meta)
+            continue
+        try:
+            best = _best_existing_similarity(run, vs, emb, user_id)
+        except Exception:  # noqa: BLE001  闸门查询失败不阻断写入
+            recon_texts.append(text)
+            recon_metas.append(meta)
+            continue
+        scores[text] = best
+        if best < gate:
+            direct_texts.append(text)
+            direct_metas.append(meta)
+        else:
+            recon_texts.append(text)
+            recon_metas.append(meta)
+    return recon_texts, recon_metas, direct_texts, direct_metas, scores
+
+
+def _verify_memory_ids(run, vs, ids: list[str]) -> tuple[list[str], list[str]]:
+    """复核落库 id 真实存在，过滤 reconcile LLM 幻觉出的 id。"""
+    if not ids:
+        return [], []
+    unique = list(dict.fromkeys(ids))
+    try:
+        nodes = run(vs.get_by_ids(unique)) if hasattr(vs, "get_by_ids") else []
+        found = {getattr(n, "node_id", "") for n in (nodes or [])}
+    except Exception:  # noqa: BLE001  复核失败时不误删合法 id
+        return unique, []
+    return [i for i in unique if i in found], [i for i in unique if i not in found]
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +299,17 @@ def prepare_commit(client: object, text: str, agent_result: Any, **kw) -> dict:
             )
         except Exception:  # noqa: BLE001
             precomputed = {}
+    # 单条事实也要有向量：reconcile 准入闸门依赖它判相似度（锁外预算，
+    # 锁内 reconcile 复用同一份向量，不额外增加提交段耗时）。
+    missing = [t for t in new_texts if t not in precomputed]
+    if missing:
+        try:
+            embs = run(writer.embed_service.embed_batch(missing))
+            for one, emb in zip(missing, embs or []):
+                if emb:
+                    precomputed[one] = emb
+        except Exception:  # noqa: BLE001  向量缺失时闸门跳过，回落 reconcile
+            pass
 
     return {
         "wr": wr,
@@ -299,24 +405,99 @@ def commit_extracted(client: object, text: str, agent_result: Any, *, prepared: 
     stored_ids: list = []
     ops_counts: dict = {}
     recon_tokens: dict = {}
+    all_texts = list(new_texts)
+    all_metas = list(new_metas)
+    sim_scores: dict = {}
+    direct_texts: list = []
+    direct_metas: list = []
+    direct_ids: list = []
+    recon_metas: list = []
+    rejected_ids: list = []
+    reconcile_store_ran = False
+    stored_via = "reconcile" if all_texts else "none"
     if new_texts:
         recon = writer_mod._RECONCILE_ENABLED
         if recon:
-            stored_ids, recon_error, ops_counts, recon_tokens = run(
-                writer._reconcile_and_store(
-                    new_memory_texts=new_texts,
-                    new_memories_meta=new_metas,
-                    request=wr,
-                    vector_store=vs,
-                    req_id=request_id,
-                    source_raw_memory_id=memory_id,
-                    precomputed_embeddings=precomputed,
+            # 相似度闸门（P2）：语义不相关的新事实不交给 reconcile 合并，
+            # 直接 ADD，避免被误并入既有条目后正文静默丢失。
+            new_texts, new_metas, direct_texts, direct_metas, sim_scores = (
+                _split_facts_for_reconcile(
+                    run, vs, new_texts, new_metas, precomputed, user_id
                 )
             )
-        else:
-            stored_ids, recon_error, ops_counts, recon_tokens = run(
+        recon_metas = list(new_metas)
+        if new_texts:
+            if recon:
+                reconcile_store_ran = True
+                stored_ids, recon_error, ops_counts, recon_tokens = run(
+                    writer._reconcile_and_store(
+                        new_memory_texts=new_texts,
+                        new_memories_meta=new_metas,
+                        request=wr,
+                        vector_store=vs,
+                        req_id=request_id,
+                        source_raw_memory_id=memory_id,
+                        precomputed_embeddings=precomputed,
+                    )
+                )
+            else:
+                stored_via = "direct"
+                stored_ids, recon_error, ops_counts, recon_tokens = run(
+                    writer._direct_store(
+                        new_memories_meta=new_metas,
+                        request=wr,
+                        vector_store=vs,
+                        req_id=request_id,
+                        source_raw_memory_id=memory_id,
+                        precomputed_embeddings=precomputed,
+                    )
+                )
+            if recon_error is not None:
+                # reconcile 失败：L1 留 ACTIVE（SDK「数据可救」语义），整体判失败
+                raise CommitFailed(
+                    f"RECONCILE_FAILED: {recon_error}; l1_memory_id={memory_id}"
+                )
+        if direct_texts:
+            direct_ids, d_err, d_counts, d_tokens = run(
                 writer._direct_store(
-                    new_memories_meta=new_metas,
+                    new_memories_meta=direct_metas,
+                    request=wr,
+                    vector_store=vs,
+                    req_id=request_id,
+                    source_raw_memory_id=memory_id,
+                    precomputed_embeddings={
+                        t: precomputed[t] for t in direct_texts if t in precomputed
+                    },
+                )
+            )
+            if d_err is not None:
+                raise CommitFailed(
+                    f"DIRECT_STORE_FAILED: {d_err}; l1_memory_id={memory_id}"
+                )
+            stored_ids.extend(direct_ids)
+            if ops_counts:
+                ops_counts["add"] = int(ops_counts.get("add") or 0) + len(direct_ids)
+                ops_counts["total"] = int(ops_counts.get("total") or 0) + len(direct_ids)
+            recon_tokens = {
+                k: int(recon_tokens.get(k) or 0) + int(d_tokens.get(k) or 0)
+                for k in set(recon_tokens) | set(d_tokens)
+            }
+
+        # 全部事实都被闸门拦下时，本次写入实质是直存，回执不能写 reconcile
+        if direct_ids and not reconcile_store_ran:
+            stored_via = "direct"
+
+        # 落库结果复核（P1）：reconcile 偶尔返回库里不存在的 id（LLM 幻觉），
+        # 直接透传会让调用方以为写成功却检索不到。
+        stored_ids, rejected_ids = _verify_memory_ids(run, vs, stored_ids)
+
+        # reconcile 返回空操作（LLM 判定「无需变更」）或全为幻觉 id 时，
+        # 回退直存，避免新增内容只留一条检索不到的 L1 影子。
+        if not stored_ids:
+            fb_ids, fb_err, _, fb_tokens = run(
+                writer._direct_store(
+                    # 直存组已有可检索节点时只回退 reconcile 组，避免重复写一份
+                    new_memories_meta=recon_metas if direct_ids else all_metas,
                     request=wr,
                     vector_store=vs,
                     req_id=request_id,
@@ -324,11 +505,19 @@ def commit_extracted(client: object, text: str, agent_result: Any, *, prepared: 
                     precomputed_embeddings=precomputed,
                 )
             )
-        if recon_error is not None:
-            # reconcile 失败：L1 留 ACTIVE（SDK「数据可救」语义），整体判失败
-            raise CommitFailed(
-                f"RECONCILE_FAILED: {recon_error}; l1_memory_id={memory_id}"
-            )
+            if fb_err is not None:
+                raise CommitFailed(
+                    f"DIRECT_FALLBACK_FAILED: {fb_err}; l1_memory_id={memory_id}"
+                )
+            stored_ids = list(fb_ids)
+            stored_via = "direct_fallback"
+            if ops_counts:
+                ops_counts["add"] = int(ops_counts.get("add") or 0) + len(stored_ids)
+                ops_counts["total"] = int(ops_counts.get("total") or 0) + len(stored_ids)
+            recon_tokens = {
+                k: int(recon_tokens.get(k) or 0) + int(fb_tokens.get(k) or 0)
+                for k in set(recon_tokens) | set(fb_tokens)
+            }
 
     # 5. intentions → L7（best-effort，SDK 同款开关与跳过逻辑）
     if getattr(writer.config.llm, "enable_intention", True):
@@ -377,6 +566,26 @@ def commit_extracted(client: object, text: str, agent_result: Any, *, prepared: 
     except Exception:  # noqa: BLE001
         extract_tok = {"prompt": 0, "completion": 0, "total": 0}
 
+    merged_existing = bool(
+        int(ops_counts.get("update") or 0) + int(ops_counts.get("supersede") or 0)
+    ) and stored_via != "direct_fallback"
+    warning = None
+    if rejected_ids:
+        warning = (
+            "reconcile 返回了库中不存在的 id，已剔除："
+            + ",".join(rejected_ids)
+        )
+    if stored_via == "direct_fallback":
+        warning = (
+            (warning + "；" if warning else "")
+            + "reconcile 未产出可检索节点，已回退直存（direct_fallback）"
+        )
+    if merged_existing:
+        warning = (
+            (warning + "；" if warning else "")
+            + "本次内容并入既有记忆（未新建节点），如需独立条目请先 search 确认"
+        )
+
     return {
         "success": True,
         "scene": "chat",
@@ -389,6 +598,15 @@ def commit_extracted(client: object, text: str, agent_result: Any, *, prepared: 
         "extract_tokens": extract_tok,
         "reconcile_ops": ops_counts,
         "reconcile_tokens": recon_tokens,
+        "stored_via": stored_via,
+        "reconcile_rejected_ids": rejected_ids,
+        "reconcile_gate": {
+            "min_sim": _reconcile_min_sim(),
+            "bypassed": len(direct_ids),
+            "max_sim": round(max(sim_scores.values()), 4) if sim_scores else None,
+        },
+        "merged_existing": merged_existing,
+        "warning": warning,
         "two_phase": True,               # 路径标记，诊断用
     }
 
@@ -495,10 +713,11 @@ def _batch_l1_archive(writer, run, vs, jobs: list[dict]) -> tuple[list[str], lis
 
 def _batch_reconcile(writer, run, vs, jobs: list[dict], all_texts: list[str],
                      all_metas: list[dict], precomputed: dict,
-                     l1_ids: list[str]) -> tuple[list[str], dict, dict]:
+                     l1_ids: list[str]) -> tuple[list[str], dict, dict, dict]:
     """③ 一次判定（空 root；RECONCILE_ENABLED=false 走 _direct_store 同样空 root）。
 
-    返回 (stored_ids, ops_counts, recon_tokens)；reconcile 整体失败抛 CommitFailed。
+    返回 (stored_ids, ops_counts, recon_tokens, recon_meta)；reconcile 整体
+    失败抛 CommitFailed。recon_meta 记录闸门/复核/回退等诊断信息。
     """
     from hy_memory.pipelines import writer as writer_mod
 
@@ -506,25 +725,95 @@ def _batch_reconcile(writer, run, vs, jobs: list[dict], all_texts: list[str],
     recon_error = None
     ops_counts: dict = {}
     recon_tokens: dict = {}   # 先初始化：all_texts 为空（全批无可提取事实）时
+    recon_meta: dict = {
+        "stored_via": "none",
+        "rejected_ids": [],
+        "gate_bypassed": 0,
+        "gate_min_sim": None,
+        "merged_existing": False,
+    }
     if all_texts:              # 不进判定，⑤ 结果段仍要引用——曾致 UnboundLocalError
         base_wr = jobs[0]["prepared"]["wr"]
         req_id = jobs[0]["prepared"]["request_id"]
+        origin_metas = list(all_metas)
+        direct_texts: list[str] = []
+        direct_metas: list[dict] = []
+        direct_ids: list[str] = []
         if writer_mod._RECONCILE_ENABLED:
-            stored_ids, recon_error, ops_counts, recon_tokens = run(
-                writer._reconcile_and_store(
-                    new_memory_texts=all_texts,
-                    new_memories_meta=all_metas,
+            recon_meta["gate_min_sim"] = _reconcile_min_sim()
+            all_texts, all_metas, direct_texts, direct_metas, _scores = (
+                _split_facts_for_reconcile(
+                    run, vs, all_texts, all_metas, precomputed, base_wr.user_id
+                )
+            )
+            recon_meta["gate_bypassed"] = len(direct_texts)
+        recon_metas = list(all_metas)
+        if all_texts:
+            if writer_mod._RECONCILE_ENABLED:
+                recon_meta["stored_via"] = "reconcile"
+                stored_ids, recon_error, ops_counts, recon_tokens = run(
+                    writer._reconcile_and_store(
+                        new_memory_texts=all_texts,
+                        new_memories_meta=all_metas,
+                        request=base_wr,
+                        vector_store=vs,
+                        req_id=req_id,
+                        source_raw_memory_id="",   # 空 root：见 batch_commit docstring ③
+                        precomputed_embeddings=precomputed,
+                    )
+                )
+            else:
+                recon_meta["stored_via"] = "direct"
+                stored_ids, recon_error, ops_counts, recon_tokens = run(
+                    writer._direct_store(
+                        new_memories_meta=all_metas,
+                        request=base_wr,
+                        vector_store=vs,
+                        req_id=req_id,
+                        source_raw_memory_id="",
+                        precomputed_embeddings=precomputed,
+                    )
+                )
+            if recon_error is not None:
+                raise CommitFailed(
+                    f"RECONCILE_FAILED(batch): {recon_error}; "
+                    f"l1_memory_ids={','.join(l1_ids)}"
+                )
+        if direct_texts:
+            d_ids, d_err, d_counts, d_tokens = run(
+                writer._direct_store(
+                    new_memories_meta=direct_metas,
                     request=base_wr,
                     vector_store=vs,
                     req_id=req_id,
-                    source_raw_memory_id="",   # 空 root：见 batch_commit docstring ③
-                    precomputed_embeddings=precomputed,
+                    source_raw_memory_id="",
+                    precomputed_embeddings={
+                        t: precomputed[t] for t in direct_texts if t in precomputed
+                    },
                 )
             )
-        else:
-            stored_ids, recon_error, ops_counts, recon_tokens = run(
+            if d_err is not None:
+                raise CommitFailed(
+                    f"DIRECT_STORE_FAILED(batch): {d_err}; "
+                    f"l1_memory_ids={','.join(l1_ids)}"
+                )
+            stored_ids.extend(d_ids)
+            direct_ids = list(d_ids)
+            if ops_counts:
+                ops_counts["add"] = int(ops_counts.get("add") or 0) + len(d_ids)
+                ops_counts["total"] = int(ops_counts.get("total") or 0) + len(d_ids)
+
+        stored_ids, recon_meta["rejected_ids"] = _verify_memory_ids(
+            run, vs, stored_ids
+        )
+
+        # 与单条路径同一套兜底：reconcile 空操作/幻觉 id 时回退直存，
+        # 保证本批事实至少有一条可检索节点。
+        if not stored_ids:
+            fb_ids, fb_err, _, fb_tokens = run(
                 writer._direct_store(
-                    new_memories_meta=all_metas,
+                    # 直存组已有可检索节点时只回退 reconcile 组，避免重复写一份
+                    new_memories_meta=recon_metas if direct_ids else origin_metas,
                     request=base_wr,
                     vector_store=vs,
                     req_id=req_id,
@@ -532,12 +821,24 @@ def _batch_reconcile(writer, run, vs, jobs: list[dict], all_texts: list[str],
                     precomputed_embeddings=precomputed,
                 )
             )
-        if recon_error is not None:
-            raise CommitFailed(
-                f"RECONCILE_FAILED(batch): {recon_error}; "
-                f"l1_memory_ids={','.join(l1_ids)}"
-            )
-    return stored_ids, ops_counts, recon_tokens
+            if fb_err is not None:
+                raise CommitFailed(
+                    f"DIRECT_FALLBACK_FAILED(batch): {fb_err}; "
+                    f"l1_memory_ids={','.join(l1_ids)}"
+                )
+            stored_ids = list(fb_ids)
+            recon_meta["stored_via"] = "direct_fallback"
+            if ops_counts:
+                ops_counts["add"] = int(ops_counts.get("add") or 0) + len(stored_ids)
+                ops_counts["total"] = int(ops_counts.get("total") or 0) + len(stored_ids)
+            recon_tokens = {
+                k: int(recon_tokens.get(k) or 0) + int(fb_tokens.get(k) or 0)
+                for k in set(recon_tokens) | set(fb_tokens)
+            }
+        recon_meta["merged_existing"] = bool(
+            int(ops_counts.get("update") or 0) + int(ops_counts.get("supersede") or 0)
+        )
+    return stored_ids, ops_counts, recon_tokens, recon_meta
 
 
 def _batch_lineage_fix(run, vs, stored_ids: list[str], job_of_text: dict[str, int],
@@ -609,7 +910,7 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
     l1_ids, l1_nodes = _batch_l1_archive(writer, run, vs, jobs)
 
     # ③ 一次判定（空 root；RECONCILE_ENABLED=false 走 _direct_store 同样空 root）
-    stored_ids, ops_counts, recon_tokens = _batch_reconcile(
+    stored_ids, ops_counts, recon_tokens, recon_meta = _batch_reconcile(
         writer, run, vs, jobs, all_texts, all_metas, precomputed, l1_ids
     )
 
@@ -676,6 +977,14 @@ def batch_commit(client: object, jobs: list[dict]) -> list[dict]:
             "extract_tokens": extract_tok,
             "reconcile_ops": ops_counts if ji == 0 else {},
             "reconcile_tokens": recon_tokens if ji == 0 else {},
+            "stored_via": recon_meta.get("stored_via"),
+            "reconcile_rejected_ids": recon_meta.get("rejected_ids") or []
+            if ji == 0 else [],
+            "reconcile_gate": {
+                "min_sim": recon_meta.get("gate_min_sim"),
+                "bypassed": recon_meta.get("gate_bypassed"),
+            } if ji == 0 else {},
+            "merged_existing": bool(recon_meta.get("merged_existing")) if ji == 0 else False,
             "two_phase": True,
             "batch": {"size": len(jobs), "lineage_note": lineage_note},
         })

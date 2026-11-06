@@ -411,6 +411,8 @@ def _tool_add_memory(args: dict) -> str:
         # 标签等全部写完再绑一次（对齐 CLI 的 _bind_all_once，避免每片全量快照）。
         all_ids: list[str] = []
         tag_note = ""
+        merged_parts = 0
+        last_warning = None
 
         def _partial() -> dict:
             """拆分路径的失败回执：如实带出已写入的分片，不谎报零写入。"""
@@ -503,6 +505,10 @@ def _tool_add_memory(args: dict) -> str:
                     ensure_ascii=False,
                 )
             all_ids.extend(_ids_of(last))
+            if last.get("merged_existing"):
+                merged_parts += 1
+            if last.get("warning"):
+                last_warning = str(last["warning"])
         ids = all_ids
         tagged: list[str] = []
         if tags:
@@ -510,6 +516,18 @@ def _tool_add_memory(args: dict) -> str:
                 client, _identity(), before, ids, tags, before_complete=before_complete,
             )
         out: dict = {"mode": "sync", "memory_ids": ids, "tags": tags}
+        if parts and not ids:
+            # 与 CLI 同口径：抽取没产出可检索节点时如实标记影子，不假装成功
+            out["shadow_only"] = True
+            out["warning"] = (
+                "抽取未产出可检索节点：本次仅落 L1 原文影子（检索不到），"
+                "可用 hy-mem retry --shadow 重做"
+            )
+        if merged_parts:
+            out["merged_existing"] = True
+            out["merged_parts"] = merged_parts
+        if last_warning:
+            out["warning"] = (out.get("warning", "") + "；" if out.get("warning") else "") + last_warning
         if split_meta:
             out["count"] = len(ids)
             out["split"] = split_meta
@@ -1143,8 +1161,9 @@ def _tool_delete_memory(args: dict) -> str:
 
     client = _client()
     r = delete_memory_with_cascade(client, mid)
-    # 与 CLI 同口径：success=False 不许报成功（上游 vdb_deleted 恒 True 不可信）。
-    # partial/error_code 区分「部分存储没删净」与「本来就没这条」。
+    # 与 CLI 同口径：success=False 不许报成功。上游 vdb_deleted 恒 True 不可信，
+    # 所以 clientops 里用「client.get 已查不到」复核后才把图库锁导致的假失败归一为成功，
+    # 并保留 sdk_error_code + graph_unavailable 供排障。
     if not r.get("success"):
         if r.get("partial") or r.get("error_code"):
             raise RuntimeError(
@@ -1168,28 +1187,36 @@ def _tool_delete_memory(args: dict) -> str:
 
 
 def _tool_update_memory(args: dict) -> str:
-    """更新一条记忆的内容。走 SDK 演化链：旧版本进 SHADOW 保留，可追溯。"""
+    """更新一条记忆的正文/标签。正文走 SDK 演化链：旧版本进 SHADOW 保留，可追溯。"""
     mid = str(args.get("memory_id") or "").strip()
     content = str(args.get("content") or "").strip()
+    raw_tags = args.get("tags")
+    tags: list[str] | None = None
+    if args.get("clear_tags") is True:
+        tags = []
+    elif isinstance(raw_tags, list):
+        tags = [str(t).strip() for t in raw_tags if str(t).strip()]
     if not mid:
         raise ParamError("memory_id 不能为空：请传入 list 或 search 返回的 memory_id")
-    if not content:
-        raise ParamError("content 不能为空：请提供修改后的记忆正文")
+    if not content and tags is None:
+        raise ParamError("content 与 tags 至少提供一个：content 改正文，tags 整组替换用户标签")
     if args.get("confirm") is not True:
         raise ParamError("更新会改变检索结果：必须显式传 confirm=true")
     from hymem.core.clientops import update_memory
 
     client = _client()
-    r = update_memory(client, mid, content)
+    r = update_memory(client, mid, content or None, tags)
     if r is None:
         return json.dumps({"found": False, "memory_id": mid}, ensure_ascii=False)
     if isinstance(r, dict) and r.get("success") is False:
         raise RuntimeError(f"更新失败：{r.get('error_message') or r.get('error') or 'unknown'}")
-    return json.dumps(
-        {"updated": mid, "note": "旧版本保留在演化链（get_recent_history/history 可查）", "result": r},
-        ensure_ascii=False,
-        default=str,
-    )
+    out = {"updated": mid, "result": r}
+    if content:
+        out["note"] = "旧版本保留在演化链（get_recent_history/history 可查）"
+    if tags is not None:
+        out["tags"] = tags
+        out["note"] = (out.get("note") or "") + "；用户标签已整组替换"
+    return json.dumps(out, ensure_ascii=False, default=str)
 
 
 def _tool_evolve_status(args: dict) -> str:
@@ -1563,17 +1590,24 @@ TOOLS = [
     {
         "name": "update_memory",
         "description": (
-            "更新一条记忆的正文（整条替换，旧版本保留可追溯）。内容有误/过时、"
+            "更新一条记忆的正文/标签（正文整条替换，旧版本保留可追溯）。内容有误/过时、"
             "用户纠正了某个事实时用；新增信息用 add_memory。必须 confirm=true。"
+            "tags 会整组替换该条的用户标签（clear_tags=true 清空），auto 标签不受影响。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "memory_id": {"type": "string", "description": "要改的记忆 id（list/search 返回的）"},
                 "content": {"type": "string", "description": "修改后的完整正文（整条替换，不是追加）"},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "整组替换用户标签（传空数组等同清空）；不改 auto 标签",
+                },
+                "clear_tags": {"type": "boolean", "description": "清空该条的用户标签"},
                 "confirm": {"type": "boolean", "description": "必须显式传 true"},
             },
-            "required": ["memory_id", "content", "confirm"],
+            "required": ["memory_id", "confirm"],
         },
     },
 ]

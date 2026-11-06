@@ -151,6 +151,15 @@ def sweep_derived_nodes(client: object, root_id: str) -> tuple[list[str], str]:
     return purged, ""
 
 
+def _graph_store_unavailable(client: object) -> bool:
+    """图库是否处于降级（kuzu 被别的进程锁住）。未知时按可用处理。"""
+    gs = getattr(client, "_graph_store", None)
+    if gs is None:
+        return False
+    available = getattr(gs, "_available", None)
+    return available is False
+
+
 def delete_memory_with_cascade(client: object, memory_id: str) -> dict:
     """删除一条记忆并级联清扫派生节点（CLI / MCP 共用）。
 
@@ -162,28 +171,87 @@ def delete_memory_with_cascade(client: object, memory_id: str) -> dict:
 
     with store.WriteLock():
         r = dict(client.delete(memory_id) or {})
+        # SDK 把「图库降级/被锁」当成图侧清理失败，于是整体报 delete_incomplete。
+        # VDB 删除其实已经生效，调用方会误判失败并重复删除。这里复核 VDB 真实
+        # 结果后再定性：图侧只做可用性标注，不作为删除成败的唯一判据。
+        graph_unavailable = _graph_store_unavailable(client)
+        if not r.get("success") and r.get("vdb_deleted") and graph_unavailable:
+            try:
+                gone = client.get(memory_id) is None
+            except Exception:  # noqa: BLE001  复核失败时保留 SDK 原判定
+                gone = False
+            if gone:
+                r["sdk_success"] = False
+                r["success"] = True
+                r["partial"] = False
+                r["deleted_count"] = max(int(r.get("deleted_count") or 0), 1)
+                r["sdk_error_code"] = r.get("error_code")
+                r["error_code"] = None
+                r["error"] = None
+                r["graph_skipped"] = True
+                r["graph_unavailable"] = True
+                r["note"] = (
+                    (r.get("note") or "")
+                    + " 图库被占用（graph_unavailable），已跳过图侧清理；VDB 删除已生效"
+                ).strip()
         purged: list[str] = []
         cascade_note = ""
         if r.get("success"):
             purged, cascade_note = sweep_derived_nodes(client, memory_id)
+            # 影子节点已删除 → 对应 job 的 shadow 回执销账，否则健康检查里
+            # shadow 计数会永远停在历史值，看不出是否已清理。
+            try:
+                conn = store.connect()
+                conn.execute(
+                    "UPDATE jobs SET shadow_only=0 "
+                    "WHERE shadow_only=1 AND memory_ids LIKE ?",
+                    (f"%{memory_id}%",),
+                )
+            except Exception:  # noqa: BLE001  队列库异常不影响删除结果
+                pass
+    if graph_unavailable:
+        r["graph_unavailable"] = True
     r["derived_purged"] = purged
     if cascade_note:
         r["cascade_note"] = cascade_note
     return r
 
 
-def update_memory(client: object, memory_id: str, content: str) -> dict | None:
-    """更新一条记忆的内容；不存在返回 None（调用方给「未找到」）。
+def update_memory(
+    client: object,
+    memory_id: str,
+    content: str | None = None,
+    tags: list[str] | None = None,
+) -> dict | None:
+    """更新一条记忆的正文/标签；不存在返回 None（调用方给「未找到」）。
 
+    content 为空时只改标签。tags 非空时按「整组替换用户来源标签」处理，
+    tags=[] 表示清空用户标签（auto 标签不动）。
     成功与否仍由调用方校验 result["success"]（SDK 可能返回 success=False
     但 HTTP 层没抛异常）；写锁在这里统一持有，CLI / MCP 不再各写一份。
     """
     from hymem.core import store
 
+    if content is None and tags is None:
+        raise ValueError("content 与 tags 至少提供一个")
     if client.get(memory_id) is None:
         return None
     with store.WriteLock():
-        return client.update(memory_id, content)
+        if content is None:
+            r = {"success": True, "memory_id": memory_id, "updated": False}
+        else:
+            r = client.update(memory_id, content)
+        if tags is not None and isinstance(r, dict) and r.get("success") is not False:
+            conn = store.connect()
+            before = len(store.tags_for(conn, [memory_id], source="user").get(memory_id, []))
+            conn.execute(
+                "DELETE FROM tags WHERE memory_id=? AND source='user'", (memory_id,)
+            )
+            store.bind_tags(conn, [memory_id], tags, source="user")
+            r["tags"] = [t.strip() for t in tags if (t or "").strip()]
+            r["tagged"] = len(r["tags"])
+            r["tag_replaced"] = before
+    return r
 
 
 def is_transient_db_error(e: BaseException) -> bool:
