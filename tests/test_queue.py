@@ -497,8 +497,8 @@ def main() -> int:
         rc_h, _p, human_h = _retry(shadow=True)
     finally:
         procs._spawn_detached_worker = real_spawn
-    check("retry 人类输出提示「已在后台拉起消费者」",
-          rc_h == 0 and "已在后台拉起消费者" in human_h, human_h[:160])
+    check("retry 人类输出提示「已发起后台消费者」",
+          rc_h == 0 and "已发起后台消费者" in human_h, human_h[:160])
 
     # 10-2 已有活跃 worker → 不重复拉起
     conn.execute("DELETE FROM worker_reg")
@@ -514,6 +514,26 @@ def main() -> int:
           rc2 == 0 and not spawn_calls and pay2.get("worker_spawned") is False
           and pay2.get("worker_live") is True,
           f"spawned={pay2.get('worker_spawned')} live={pay2.get('worker_live')}")
+
+    # 10-2b 只有拉起占位行（_spawn_intent，pid 为空）不算消费者：
+    # 不得把「已发起进程」当成「已有人落库」，否则回执会谎报 worker_live=true。
+    conn.execute("DELETE FROM jobs")
+    conn.execute("DELETE FROM worker_reg")
+    _shadow_job(9104)
+    conn.execute(
+        "INSERT INTO worker_reg (id, ts, pid) VALUES ('_spawn_intent', ?, NULL)",
+        (time.time(),),
+    )
+    spawn_calls.clear()
+    procs._spawn_detached_worker = fake_spawn
+    try:
+        rc_i, pay_i, _ = _retry(shadow=True)
+        lw, beat = store.live_worker_info(conn)
+    finally:
+        procs._spawn_detached_worker = real_spawn
+    check("_spawn_intent 不算活跃消费者（不得谎报 worker_live）",
+          lw == 0 and pay_i.get("worker_live") is False,
+          f"info={lw},{beat} live={pay_i.get('worker_live')} spawned={pay_i.get('worker_spawned')}")
 
     # 10-3 HY_MEM_AUTO_WORKER=0：retry 与 add 共用 helper，都不拉起
     os.environ["HY_MEM_AUTO_WORKER"] = "0"
@@ -608,10 +628,63 @@ def main() -> int:
           and sum(spawned_results) == 1 and len(popen_calls) == 1,
           f"spawned={spawned_results} popen={len(popen_calls)}")
     check("人类提示语三态（拉起 / 在跑 / 关闭）",
-          procs.worker_note(True, False, 1) == "；已在后台拉起消费者"
+          procs.worker_note(True, False, 1) == "；已发起后台消费者（是否存活用 hy-mem queue 确认）"
           and procs.worker_note(False, True, 1) == "；已有消费者在跑"
           and procs.worker_note(True, False, 0) == "",
           "note 文案一致")
+
+    # 10-7 queue 人类输出必须暴露消费者状态：模型不该靠猜「worker 还在不在」
+    conn.execute("DELETE FROM jobs")
+    conn.execute("DELETE FROM worker_reg")
+    store.enqueue(conn, {"text": "积压任务"})
+    conn.execute(
+        "INSERT INTO worker_reg (id, ts, pid) VALUES ('_spawn_intent', ?, NULL)",
+        (time.time(),),
+    )
+
+    def _queue_human() -> tuple[int, str]:
+        ns_q = argparse.Namespace(json=False, status=None, limit=20, recover=False)
+        cap_q: list[str] = []
+        real_ok_q = queue_cmd.ok
+        queue_cmd.ok = lambda obj, as_json, human=None: (cap_q.append(human or ""), 0)[1]
+        try:
+            rc_q = queue_cmd.cmd_queue(ns_q)
+        finally:
+            queue_cmd.ok = real_ok_q
+        return rc_q, (cap_q[-1] if cap_q else "")
+
+    rc_q, human_q = _queue_human()
+    check("queue 输出显示「消费者：无」（占位行不算消费者）",
+          rc_q == 0 and "消费者：无" in human_q, human_q[:200])
+    check("queue 积压且无消费者时给出可执行处置",
+          "hy-mem worker --once" in human_q and "drain 只等待" in human_q,
+          human_q[:200])
+
+    conn.execute("DELETE FROM worker_reg")
+    store.heartbeat(conn, "host:q-live")
+    _rc_ql, human_ql = _queue_human()
+    check("queue 有真实消费者时显示在跑数量",
+          "消费者：1" in human_ql and "hy-mem worker --once" not in human_ql,
+          human_ql[:200])
+
+    # 10-8 drain 只等待、不消费：无消费者时必须立刻说清楚，别让人空等超时
+    conn.execute("DELETE FROM worker_reg")
+    err_d = io.StringIO()
+    with contextlib.redirect_stderr(err_d):
+        rc_d = queue_cmd.cmd_drain(argparse.Namespace(json=False, timeout=0.3, poll=0.05))
+    check("drain 无消费者时提示「只等待」并给出 worker --once",
+          rc_d != 0 and "drain 只等待" in err_d.getvalue()
+          and "hy-mem worker --once" in err_d.getvalue(),
+          err_d.getvalue()[:200])
+
+    # 10-9 async add 回执不得承诺「落库无需等待」：拉起进程 ≠ 已落库
+    from hymem.cmds import write as write_cmd
+
+    t_spawn = write_cmd._async_add_tail(True, False)
+    t_idle = write_cmd._async_add_tail(False, False)
+    check("async add 拉起回执区分「入队」与「落库」",
+          "落库无需等待" not in t_spawn and "worker --once" in t_spawn, t_spawn)
+    check("async add 未拉起回执给出 --once 处置", "hy-mem worker --once" in t_idle, t_idle)
 
     conn.close()
     n_pass = sum(results)

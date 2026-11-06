@@ -14,6 +14,21 @@ from hymem.cmds.base import (  # noqa: F401
 )
 
 
+def _async_add_tail(spawned: bool, live: bool) -> str:
+    """异步 add 的人类回执尾句（sync=已落库；async=仅入队，区别必须写清）。
+
+    spawned 只代表 CreateProcess 成功，不保证消费进程存活（可能被宿主平台
+    的 job object 连带杀掉）。不能再说「落库无需等待」。
+    """
+    if spawned:
+        return ("已发起后台消费进程（3 线程消费，空闲 90 秒自退出）；"
+                "异步=已入队，不等于已落库。用 hy-mem queue 看待处理是否归零，"
+                "仍 pending 就跑 hy-mem worker --once")
+    if live:
+        return "后台 worker 在跑，稍后自动落库（异步=已入队，确认落库请用 hy-mem queue）"
+    return "消费请跑：hy-mem worker --once"
+
+
 def _cmd_add_scene(args, scene: str) -> int:
     """S1：生产力场景写入（working/coding）。SDK client.add(messages, scene=...) 整段。
 
@@ -161,12 +176,12 @@ def cmd_add(args) -> int:
         conn = store.connect()
         try:
             stats = store.queue_stats(conn)
-            # 无人消费就自动拉起临时 worker：心跳超过阈值或从无心跳且有待处理任务。
-            # 阈值取 poll(1s) 的 15 倍，容掉 worker 卡顿，避免重复拉起。
-            hb_age = store.worker_age(conn)
+            # 无人消费就自动拉起临时 worker：只认真实心跳（pid 非空），
+            # `_spawn_intent` 占位行不代表进程活着。
+            live_count, _beat = store.live_worker_info(conn)
         finally:
             conn.close()
-        worker_live = hb_age is not None and hb_age < 15.0
+        worker_live = live_count > 0
         spawned = False
         if stats["pending"] > 0 and not worker_live:
             spawned = _spawn_detached_worker()
@@ -174,12 +189,7 @@ def cmd_add(args) -> int:
             "ok": True, "queued": len(ids), "job_ids": ids, "tags": tags, "queue": stats,
             "workerLive": worker_live, "workerSpawned": spawned,
         }
-        if spawned:
-            tail = "已自动拉起后台消费进程（3 线程消费，空闲 90 秒自退出），落库无需等待"
-        elif worker_live:
-            tail = "后台 worker 在跑，稍后自动落库"
-        else:
-            tail = "消费请跑：hy-mem worker"
+        tail = _async_add_tail(spawned, worker_live)
         human = f"已入队 {len(ids)} 个任务（job {ids[0]}..{ids[-1]}），待处理 {stats['pending']} 个。{tail}"
         return ok(payload, args.json, human)
 

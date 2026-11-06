@@ -725,16 +725,28 @@ def cmd_queue(args) -> int:
             recovered = store.requeue_stale(conn)
         stats = store.queue_stats(conn)
         jobs = store.list_jobs(conn, args.status, args.limit)
+        live_workers, last_beat = store.live_worker_info(conn)
     finally:
         conn.close()
 
+    worker = {"live": live_workers, "last_beat_age_s": last_beat}
     if args.json:
-        return ok({"ok": True, "stats": stats, "recovered": recovered, "jobs": jobs}, True)
+        return ok({"ok": True, "stats": stats, "worker": worker,
+                   "recovered": recovered, "jobs": jobs}, True)
 
     head = (
         f"待处理 {stats['pending']} | 运行中 {stats['running']} | 完成 {stats['done']} | 死信 {stats['dead']}"
         f" | 总计 {stats['total']}"
     )
+    if live_workers:
+        beat = "" if last_beat is None else f"，最近心跳 {last_beat:g}s 前"
+        head += f"\n消费者：{live_workers} 个在跑{beat}"
+    else:
+        beat = "（5 分钟内无心跳）" if last_beat is None else f"（最近心跳 {last_beat:g}s 前）"
+        head += f"\n消费者：无{beat}"
+        if stats["pending"]:
+            head += ("\n队列有积压但没有消费者在跑：hy-mem worker --once"
+                     "（drain 只等待，不负责消费）")
     if stats.get("shadow_only"):
         head += (f"\n其中 {stats['shadow_only']} 个完成任务只落了影子节点（检索不到）："
                  "hy-mem retry --shadow 可重做")
@@ -811,6 +823,16 @@ def cmd_drain(args) -> int:
     deadline = time.time() + args.timeout
     conn = store.connect()
     try:
+        # drain 只等待队列清空，自己不消费。没有消费者时先说清楚，
+        # 否则调用方会以为「drain 跑完就会落库」，白白等到超时。
+        _live, _beat = store.live_worker_info(conn)
+        _pending = store.queue_stats(conn)["pending"]
+        if _pending > 0 and _live == 0:
+            print(
+                f"hy-mem: 队列有 {_pending} 个待处理但没有消费者在跑；"
+                "drain 只等待、不会消费，请另开 hy-mem worker --once",
+                file=sys.stderr,
+            )
         while True:
             stats = store.queue_stats(conn)
             if stats["pending"] == 0 and stats["running"] == 0:

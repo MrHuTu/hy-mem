@@ -524,8 +524,10 @@ def _tool_add_memory(args: dict) -> str:
             # 耗时承诺按实测口径（2026-10-29：pro + 推理型 LLM 单条 took_s=124.1），
             # 「约 6~9 秒」是 lite/快模型的旧数字，按它去等必扑空
             "note": (
-                "已入队，后台落库：lite 秒级，pro 模式单条实测可达 2 分钟左右。"
-                "要确认落库（而不是猜）就用 queue_status(job_ids=[...], wait_seconds=60)"
+                "async=已入队，不等于已落库：lite 秒级，pro 模式单条实测可达 2 分钟左右。"
+                "worker_spawned 只代表已发起后台进程，不保证它存活（宿主退出可能连带杀掉）。"
+                "要确认落库（而不是猜）就用 queue_status(job_ids=[...], wait_seconds=60)；"
+                "pending 长时间不减说明没有消费者，需在 CLI 跑 hy-mem worker --once"
             ),
         },
         ensure_ascii=False,
@@ -569,8 +571,8 @@ def _tool_queue_status(args: dict) -> str:
         conn = store.connect()
         try:
             stats = store.queue_stats(conn)
-            age = store.worker_age(conn)
-            workers = store.count_live_workers(conn)
+            # 只认真实心跳（pid 非空）：_spawn_intent 占位行不是消费者。
+            workers, last_beat = store.live_worker_info(conn)
             jobs = store.get_jobs(conn, job_ids) if job_ids else store.list_jobs(conn, None, recent)
         finally:
             conn.close()
@@ -583,7 +585,7 @@ def _tool_queue_status(args: dict) -> str:
         time.sleep(min(1.0, max(0.05, deadline - time.time())))
 
     now = time.time()
-    live = age is not None and age < 15.0
+    live = workers > 0
     out_jobs = []
     for j in jobs:
         started, finished = j.get("started_at"), j.get("finished_at")
@@ -628,7 +630,7 @@ def _tool_queue_status(args: dict) -> str:
         "stats": stats,
         "worker": {
             "live": live,
-            "last_beat_s": round(age, 1) if age is not None else None,
+            "last_beat_s": last_beat,
             "workers": workers,
         },
         "jobs": out_jobs,

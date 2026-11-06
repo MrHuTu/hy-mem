@@ -64,8 +64,10 @@ def ensure_worker_for_pending(conn, stats: dict | None = None) -> tuple[bool, bo
     """
     if stats is None:
         stats = store.queue_stats(conn)
-    hb = store.worker_age(conn)
-    live = hb is not None and hb < 15.0
+    # 只认真实心跳（pid 非空）：`_spawn_intent` 占位行只表示「发起过拉起」，
+    # 把它当活消费者会谎报 live=true 并跳过第二次拉起。
+    live_count, _beat = store.live_worker_info(conn)
+    live = live_count > 0
     if stats["pending"] <= 0 or live:
         return False, live
     return _spawn_detached_worker(), live
@@ -76,7 +78,7 @@ def worker_note(spawned: bool, live: bool, pending: int) -> str:
     if pending <= 0:
         return ""
     if spawned:
-        return "；已在后台拉起消费者"
+        return "；已发起后台消费者（是否存活用 hy-mem queue 确认）"
     if live:
         return "；已有消费者在跑"
     if auto_worker_disabled():

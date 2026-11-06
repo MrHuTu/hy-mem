@@ -234,12 +234,12 @@ class WriteLock:
             if time.time() >= deadline:
                 if self.strict:
                     raise TimeoutError(
-                        f"另一进程正在写入记忆库，等待 {self.timeout:.0f}s 后仍未拿到锁。"
+                        f"有其他写入者正在写记忆库，等待 {self.timeout:.0f}s 后仍未拿到锁。"
                         f"（锁文件 {self.path}）可用 HY_MEM_LOCK_TIMEOUT 调大，或先跑 hy-mem queue 看是否有 worker 卡住"
                     )
                 return self
             if not warned and time.time() > deadline - self.timeout + 2:
-                print("hy-mem: 等待写锁（另一进程正在写入）…", file=sys.stderr)
+                print("hy-mem: 等待写锁（有其他写入者，可能是同进程的其他 lane）…", file=sys.stderr)
                 warned = True
             time.sleep(0.15)
 
@@ -514,6 +514,25 @@ def count_live_workers(conn: Conn, fresh: float = 15.0) -> int:
         "SELECT COUNT(*) AS n FROM worker_reg WHERE ts > ?", (time.time() - fresh,)
     ).fetchone()
     return int(row["n"] or 0)
+
+
+def live_worker_info(conn: Conn, fresh: float = 15.0) -> tuple[int, float | None]:
+    """真实消费者状态：(心跳新鲜的 worker 数, 最近心跳距今秒数)。
+
+    与 `worker_age` 的区别：`_spawn_intent` 占位行（pid IS NULL）只表示「有人
+    尝试拉起」，不代表进程真的起来了。把它当活消费者会让回执谎报「已有人落库」，
+    第二次 add 也会因此跳过拉起。这里只统计 pid IS NOT NULL 的行。
+    """
+    now = time.time()
+    row = conn.execute(
+        "SELECT SUM(CASE WHEN ts > ? THEN 1 ELSE 0 END) AS n, MAX(ts) AS ts "
+        "FROM worker_reg WHERE pid IS NOT NULL",
+        (now - fresh,),
+    ).fetchone()
+    if row is None:
+        return 0, None
+    last = row["ts"]
+    return int(row["n"] or 0), (None if not last else round(now - float(last), 1))
 
 
 def worker_leave(conn: Conn, worker_id: str) -> None:
