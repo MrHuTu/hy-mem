@@ -236,6 +236,7 @@ def fetch_l6_schemas(
     user_id: str = "default",
     limit: int = 3,
     min_score: float = 0.4,
+    diag: dict | None = None,
 ) -> tuple[list[dict], str]:
     """L6 正路：把 query 向量化，去 l6_schema 层做语义检索。
 
@@ -252,7 +253,16 @@ def fetch_l6_schemas(
 
     所以：给 SDK 传 schema_limit=0 把两路一起关掉，正路由这里单独跑，
     阈值/条数/排序全在我们手里。反路（证据反查）首版不做（契约 C9）。
+
+    diag（可选）：调用方传入的观测字典，回填 vec_cache=hit/miss/na 与 skipped。
     """
+    if diag is not None:
+        diag.setdefault("vec_cache", "na")
+    if not str(query or "").strip():
+        # 空检索词没有可嵌入语义：显式跳过，别让 provider 报错伪装成「L6 故障」。
+        if diag is not None:
+            diag["skipped"] = "no_query"
+        return [], "no_query"
     if getattr(client, "_mode", "") != "ultra":
         return [], "disabled"
     gs = getattr(client, "_graph_store", None)
@@ -269,6 +279,8 @@ def fetch_l6_schemas(
         from hy_memory.models.memory import MemoryLayer
 
         qe = _l6_vec_get(es, query)
+        if diag is not None:
+            diag["vec_cache"] = "miss" if qe is None else "hit"
         if qe is None:
             qe = await es.embed(query)
             # embed 的返回形态在不同 provider 下不一致：可能是 (vec, meta)、
@@ -367,6 +379,8 @@ def schema_state_meta(state: str, min_score: float) -> tuple[bool, str]:
     """
     if not state or state == "off":
         return state == "", ""
+    if state == "no_query":
+        return False, "没有可用的检索词，已跳过 L6（不影响 chat 检索）"
     if state == "disabled":
         return False, (
             "L6 仅 ultra 模式提供（schema 存在 Kuzu 图库）——切 ultra 并跑过 evolve 才有模式可检索"
@@ -604,8 +618,26 @@ def _chat_pinned_search(client, query: str | None, kw: dict,
     retry_kw = dict(kw)
     retry_kw.pop("queries", None)   # SDK：query 与 queries 互斥，同时传会 ValueError
     retry_kw["scene"] = "chat"
-    target = query or (list(queries)[-1] if queries else "")
+    # queries 与 query 在 SDK 里互斥；只要给了 queries，目标就是最后一条。
+    target = list(queries)[-1] if queries else (query or "")
     return client.search(target, **retry_kw)
+
+
+def _chat_library_total(client, ident: dict | None) -> int | None:
+    """chat 库总条数（仅空结果诊断用；失败返回 None，绝不影响检索）。
+
+    用来区分「库里确实没有」和「有记忆但都低于阈值」——单看 raw_candidates=0
+    这两者无法分辨。limit=1 只取 total，代价很小。
+    """
+    try:
+        uid = next(iter((ident or {}).get("user_ids") or []), None)
+        kw = {"user_id": uid} if uid else {}
+        r = client.list_memories(limit=1, offset=0, **kw)
+        vdb = (r or {}).get("vdb") or {}
+        total = vdb.get("total")
+        return int(total) if isinstance(total, int) and total >= 0 else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def searchcore(
@@ -648,8 +680,16 @@ def searchcore(
 
     返回统一 dict（调用方只做投影，不再二次过滤）：
       items / filtered_total / has_more / elapsed_ms / min_score /
-      schemas / schema_state / probe_error / pending
+      schemas / schema_state / probe_error / pending /
+      target_query / effective_min_score / raw_candidates /
+      after_time_filter / after_tag_filter / library_total / empty_reason /
+      path / l6_cache / l6_skipped
+
+    契约（2026-11-06）：queries 与 query 在 SDK 里互斥，且**只有最后一条**
+    是检索目标（前置项仅用于上下文消解），所以这里必须传 `None if queries`。
     """
+    target_query = list(queries)[-1] if queries else (query or "")
+    eff_query = None if queries else query
     kw: dict = {
         "search_mode": search_mode,
         "rerank": rerank,
@@ -670,38 +710,68 @@ def searchcore(
     if ident:
         kw.update(ident)
 
-    resp = client.search(query, **kw)
+    resp = client.search(eff_query, **kw)
     if _routed_productivity(resp):
-        resp = _chat_pinned_search(client, query, kw, queries)
+        resp = _chat_pinned_search(client, eff_query, kw, queries)
     items = _flatten_search(resp)
+    raw_candidates = len(items)
     probe_error = ""
     if not items and not tags and probe_empty:
         probe_error = _embedding_unhealthy()
     if remember_auto:
         _remember_auto(items)
+    after_time_filter = raw_candidates
     if since is not None or until is not None:
         items = [x for x in items if timefilter._in_range(timefilter._item_ts(x), since, until)]
+        after_time_filter = len(items)
     if tags:
         items = _filter_by_tags(items, tags, tag_mode)
+    after_tag_filter = len(items)
 
-    filtered_total = len(items)
+    filtered_total = after_tag_filter
     page = items[offset: offset + int(limit)]
     has_more = filtered_total > offset + int(limit)
 
     schemas: list[dict] = []
     schema_state = "off"
+    l6_diag: dict = {}
     if schema:
         schemas, schema_state = fetch_l6_schemas(
             client,
-            schema_query if schema_query is not None else (query or ""),
+            schema_query if schema_query is not None else target_query,
             user_id=schema_user_id,
             limit=schema_limit,
             min_score=schema_min,
+            diag=l6_diag,
         )
 
     pending = 0
     if pending_always or not page:
         pending = _pending_jobs()
+
+    library_total = None
+    empty_reason = ""
+    if not page:
+        if filtered_total == 0:
+            if raw_candidates == 0:
+                library_total = _chat_library_total(client, ident)
+                if library_total == 0:
+                    empty_reason = "empty_library"
+                elif library_total is not None:
+                    empty_reason = "below_threshold_or_no_match"
+                else:
+                    empty_reason = "no_candidates"
+            elif after_time_filter == 0:
+                empty_reason = "time_filtered"
+            elif after_tag_filter == 0:
+                empty_reason = "tag_filtered"
+        elif offset >= filtered_total:
+            empty_reason = "offset_past_end"
+
+    try:
+        effective_min_score = 0.3 if min_score is None else float(min_score)
+    except (TypeError, ValueError):
+        effective_min_score = None
 
     return {
         "items": page,
@@ -709,6 +779,16 @@ def searchcore(
         "has_more": has_more,
         "elapsed_ms": resp.get("elapsed_ms"),
         "min_score": min_score,
+        "target_query": target_query,
+        "effective_min_score": effective_min_score,
+        "raw_candidates": raw_candidates,
+        "after_time_filter": after_time_filter,
+        "after_tag_filter": after_tag_filter,
+        "library_total": library_total,
+        "empty_reason": empty_reason,
+        "path": "chat",
+        "l6_cache": l6_diag.get("vec_cache") or "na",
+        "l6_skipped": l6_diag.get("skipped") or "",
         "schemas": schemas,
         "schema_state": schema_state,
         "probe_error": probe_error,

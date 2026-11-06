@@ -135,10 +135,14 @@ def build_parser() -> argparse.ArgumentParser:
     ps = sub.add_parser("add", help="写一条记忆")
     ps.add_argument("text", nargs="?", help="记忆正文；省略则从 stdin 读")
     ps.add_argument("--source", default="cli", help="来源标记")
-    ps.add_argument("--split", action="store_true", help="按行拆成多条独立写入（提升检索粒度）")
+    ps.add_argument("--split", action="store_true",
+                    help="仅兜底：按行拆成多条独立写入（优先自行分条、分多次 add）；"
+                         "单次最多 50 条，超出截断并告警；"
+                         "--scene 下不生效（整段轨迹按一条写入，回执标 split_ignored）")
     ps.add_argument("--tag", action="append", default=None, help="绑定标签，可重复：--tag work --tag apollo")
     ps.add_argument("--scene", choices=["working", "coding"], default=None,
-                    help="生产力场景（coding=编码/调试/SQL；working=文档/研究/操作）。需配 --trace 工具轨迹")
+                    help="生产力场景（coding=编码/调试/SQL；working=文档/研究/操作）。需配 --trace 工具轨迹；"
+                         "此路径按整段轨迹写入，--split 不生效")
     ps.add_argument("--trace", default=None,
                     help="messages JSON 文件路径（含 tool_calls/role=tool 的 OpenAI 数组，- 为 stdin），--scene 时必填")
     ps.add_argument("--workspace", default=None,
@@ -148,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--async",
         dest="async_mode",
         action="store_true",
-        help="只入队立即返回（pro 模式单条 6~9s），由 worker 异步消费",
+        help="只入队立即返回，由 worker 异步消费（pro 单条落库可达约 2 分钟，批量/拆条更久）",
     )
     ps.add_argument("--metadata", default=None, help="附加元数据，JSON 对象：--metadata '{\"project\":\"iisw\"}'")
     ps.add_argument("--memory-at", dest="memory_at", default=None, help="记忆发生时间（补录历史用）：2026-10-27 或 2026-10-27 14:30:00")
@@ -156,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.set_defaults(func=cmd_add)
 
     ps = sub.add_parser("search", help="语义检索")
-    ps.add_argument("query", nargs="?", default=None, help="查询语句；越接近原话命中率越高（或用 --queries 多路）")
+    ps.add_argument("query", nargs="?", default=None, help="查询语句；越接近原话命中率越高（或用 --queries 传上下文变体）")
     ps.add_argument("-n", "--limit", type=int, default=10, help="返回条数")
     ps.add_argument(
         "--min-score",
@@ -169,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--since", default=None, help="只要这段时间之后：30m/12h/7d/30d/1y 或 2026-01-01")
     ps.add_argument("--until", default=None, help="只要这段时间之前，格式同 --since")
     ps.add_argument("--scene", choices=["working", "coding"], default=None,
-                    help="生产力场景检索（facts/experiences 双路返回）；缺省 chat")
+                    help="生产力场景检索（facts/experiences 双路返回）；缺省 chat；不支持 --queries")
     ps.add_argument("--workspace", default=None, help="按仓库/项目过滤（--scene 时可选）")
     ps.add_argument("--branch", default=None, help="分支过滤（需同时传 --workspace）")
     ps.add_argument("--chain-block", action="store_true",
@@ -189,7 +193,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ps.add_argument(
         "--queries", default=None,
-        help="多路并行检索：逗号分隔多个查询（与位置参数 query 二选一，都传报错）",
+        help=(
+            "逗号分隔 ≤5 条查询：只有最后一条是检索目标，前面的仅用于上下文消解"
+            "（SDK 不并行召回/不融合；与位置参数 query 二选一）"
+        ),
     )
     ps.add_argument(
         "--search-mode", choices=["default", "agentic"], default="default",

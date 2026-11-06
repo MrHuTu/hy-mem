@@ -8,10 +8,11 @@ from __future__ import annotations
 from hymem.cmds.base import (  # noqa: F401
     CommitFailed, EXIT_USAGE, ExtractFailed, _add_kwargs, _bind_tags_to_new,
     _decode_stdin, _ids_of, _read_text, _snapshot_ids, _spawn_detached_worker,
-    _split_lines, commit_extracted_with_retry, delete_memory_with_cascade, extract_phase, fail,
+    commit_extracted_with_retry, delete_memory_with_cascade, extract_phase, fail,
     find_derived_nodes, identity, json, make_client, ok, os,
     prepare_commit, require_ready, store, sys, update_memory,
 )
+from hymem.core.split import part_request_id, split_limited, truncation_warning
 
 
 def _async_add_tail(spawned: bool, live: bool) -> str:
@@ -121,10 +122,36 @@ def _cmd_add_scene(args, scene: str) -> int:
     }
     n_fact = len(payload["fact_ids"])
     n_exp = len(payload["experience_ids"])
+    # --split 在 scene 下不生效（整段轨迹一次抽取，拆行会切断 tool 上下文）。
+    # 不静默：与 MCP 回执同口径显式标注。
+    if getattr(args, "split", False):
+        payload["split_ignored"] = "scene"
+        payload["warning"] = (
+            "scene 写入按整条处理（整段工具轨迹一次抽取），未拆分；"
+            "需要按条拆分请去掉 --scene，用 chat 的 text + --split"
+        )
     human = (f"[{scene}] 事实 {n_fact} 条、经验 {n_exp} 条"
              + (f"、diff 链 {payload['chain_rounds']} 轮" if payload.get("chain_rounds") else "")
-             + (f"（workspace={ws}）" if ws else ""))
+             + (f"（workspace={ws}）" if ws else "")
+             + ("（--split 对 scene 不生效，按整条写入）" if payload.get("split_ignored") else ""))
     return ok(payload, args.json, human)
+
+
+def _split_meta(args, parts: list[str], dropped: int,
+                request_id: str | None) -> dict | None:
+    """--split 回执元数据（不传 --split 时返回 None，回执与旧版一致）。
+
+    多片且带 request_id 时，幂等 id 按片派生 `<rid>#<i>`——否则所有分片共用
+    一个 id，SDK 会把第 2 片起当成重复，实际只落第一条。
+    """
+    if not getattr(args, "split", False):
+        return None
+    meta = {"requested": True, "parts": len(parts), "truncated": dropped,
+            "estimated_extractions": len(parts)}
+    if request_id and len(parts) > 1:
+        meta["request_id_derived"] = True
+        meta["request_id_prefix"] = f"{request_id}#"
+    return meta
 
 
 def cmd_add(args) -> int:
@@ -153,24 +180,31 @@ def cmd_add(args) -> int:
         queued_extra = dict(extra)
         if "memory_at" in queued_extra:
             queued_extra["memory_at"] = queued_extra["memory_at"].isoformat()
-        parts = _split_lines(text) if args.split else [text]
+        parts, split_dropped = split_limited(text, bool(args.split))
+        split_meta = _split_meta(args, parts, split_dropped, queued_extra.get("request_id"))
 
         def _enqueue_all(conn):
-            return [
-                store.enqueue(
-                    conn,
-                    {
-                        "text": p,
-                        "source": args.source,
-                        "identity": identity(args),
-                        "tags": tags,
-                        **queued_extra,
-                    },
-                    mode=args.mode,
-                    max_attempts=int(os.getenv("HY_MEM_QUEUE_MAX_ATTEMPTS") or 3),
+            out = []
+            for i, p in enumerate(parts, 1):
+                qe = dict(queued_extra)
+                rid = part_request_id(qe.get("request_id"), i, len(parts))
+                if rid:
+                    qe["request_id"] = rid
+                out.append(
+                    store.enqueue(
+                        conn,
+                        {
+                            "text": p,
+                            "source": args.source,
+                            "identity": identity(args),
+                            "tags": tags,
+                            **qe,
+                        },
+                        mode=args.mode,
+                        max_attempts=int(os.getenv("HY_MEM_QUEUE_MAX_ATTEMPTS") or 3),
+                    )
                 )
-                for p in parts
-            ]
+            return out
 
         ids = store.transient_write(_enqueue_all)
         conn = store.connect()
@@ -190,12 +224,20 @@ def cmd_add(args) -> int:
             "workerLive": worker_live, "workerSpawned": spawned,
         }
         tail = _async_add_tail(spawned, worker_live)
+        if split_meta:
+            payload["split"] = split_meta
+            if split_dropped:
+                payload["warning"] = truncation_warning(len(parts), split_dropped)
+            tail += (f"（原文按行拆成 {len(parts)} 条，预计 {split_meta['estimated_extractions']}"
+                     " 次抽取；pro 单条分钟级，50 条会长时间占用队列）")
         human = f"已入队 {len(ids)} 个任务（job {ids[0]}..{ids[-1]}），待处理 {stats['pending']} 个。{tail}"
         return ok(payload, args.json, human)
 
     client = make_client(args.mode)
     try:
-        parts = _split_lines(text) if args.split else [text]
+        parts, split_dropped = split_limited(text, bool(args.split))
+        split_meta = _split_meta(args, parts, split_dropped,
+                                 (extra.get("request_id") if "request_id" in extra else None))
         ident = identity(args)
         before, before_complete = _snapshot_ids(client, ident) if tags else (set(), True)
         all_ids: list[str] = []
@@ -218,7 +260,12 @@ def cmd_add(args) -> int:
             if note:
                 tag_note = note
 
-        for p in parts:
+        for i, p in enumerate(parts, 1):
+            # 分片幂等 id：多片时 `<rid>#<i>`，单片/未传时原样（不传 request_id 行为不变）
+            part_extra = dict(extra)
+            _rid = part_request_id(part_extra.get("request_id"), i, len(parts))
+            if _rid:
+                part_extra["request_id"] = _rid
             # R4 两段式（2026-10-29）：抽取（LLM 网络调用）在锁外，可多进程并行；
             # WriteLock 只包 SDK 标准提交段（L1 存档 → L2 reconcile → SHADOW），
             # 口径对齐 SDK 内部 _reconcile_user_lock 的串行范围。失败零写入。
@@ -239,7 +286,7 @@ def cmd_add(args) -> int:
                     err_code="E_LOCK",
                 )
             try:
-                agent_result = extract_phase(client, p, source=args.source, **extra, **ident)
+                agent_result = extract_phase(client, p, source=args.source, **part_extra, **ident)
             except ExtractFailed as e:
                 _bind_all_once()
                 mid_note = f"（此前分片已入库 {len(all_ids)} 条）" if all_ids else ""
@@ -250,12 +297,12 @@ def cmd_add(args) -> int:
                     err_code="E_EXTRACT",
                 )
             # R4.7 预计算出锁：L1 向量 + 本批 dedup 在抢锁前算好
-            prepared = prepare_commit(client, p, agent_result, source=args.source, **extra, **ident)
+            prepared = prepare_commit(client, p, agent_result, source=args.source, **part_extra, **ident)
             try:
                 with store.WriteLock(timeout=lock_timeout):
                     last = commit_extracted_with_retry(
                         client, p, agent_result, prepared=prepared,
-                        source=args.source, **extra, **ident,
+                        source=args.source, **part_extra, **ident,
                     )
             except TimeoutError:
                 _bind_all_once()
@@ -287,6 +334,10 @@ def cmd_add(args) -> int:
                        "raw_memory_ids": raw_ids}
             if tag_note:
                 payload["tag_note"] = tag_note
+            if split_meta:
+                payload["split"] = split_meta
+                if split_dropped:
+                    payload["warning"] = truncation_warning(len(parts), split_dropped)
             return ok(payload, args.json, f"已写入 {len(all_ids)} 条：{', '.join(i[:8] for i in all_ids)}")
         payload = dict(last)
         payload["memory_ids"] = all_ids
@@ -303,6 +354,10 @@ def cmd_add(args) -> int:
             payload["tags"] = tags
         if tag_note:
             payload["tag_note"] = tag_note
+        if split_meta:
+            payload["split"] = split_meta
+            if split_dropped:
+                payload["warning"] = truncation_warning(len(parts), split_dropped)
         suffix = f"，标签 {','.join(tags)}" if tags else ""
         if tag_note:
             suffix += f"（{tag_note}）"

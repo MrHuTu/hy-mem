@@ -20,6 +20,7 @@ import sys
 import time
 
 from hymem.core import errors  # CLI/MCP 共用的错误分类与格式化
+from hymem.core.split import part_request_id, split_limited, truncation_warning
 from hymem.core.timefilter import ParamError, _in_range, _item_ts, _parse_time  # noqa: F401
 from hymem.core.version import VERSION
 
@@ -316,6 +317,17 @@ def _add_productivity(args: dict, scene: str, ws: str | None, branch: str | None
             default=str,
         )
     _receipt = _scene_receipt(r, scene)
+    # scene 写入是「整段工具轨迹」同步抽取（CLI add --scene 同款），按行拆会把
+    # 轨迹上下文切断——所以 split 在这里不生效。不静默：回执里显式说明。
+    if args.get("split") is True:
+        _receipt["split_ignored"] = "scene"
+        _prev = str(_receipt.get("warning") or "").strip()
+        _split_note = (
+            "split 对 scene 写入不生效：working/coding 是对整段工具轨迹做一次抽取"
+            "（与 CLI add --scene 同款），按行拆会破坏轨迹上下文。"
+            "需要按条拆分请走 chat 的 text；本次仍按原文整段写入 1 次。"
+        )
+        _receipt["warning"] = f"{_prev} {_split_note}".strip()
     _note = (
         "生产力管线是同步写入（与 chat 的异步队列不同）：返回时已落库，"
         f"可直接用 search_memory(query, scene={_receipt['stored_scene']}) 验证。"
@@ -363,6 +375,9 @@ def _tool_add_memory(args: dict) -> str:
     if metadata is not None and not isinstance(metadata, dict):
         raise ParamError("metadata 必须是对象（object），如 {\"project\": \"iisw\"}")
     request_id = str(args.get("request_id") or "").strip() or None
+    parts, split_meta, split_warning = _split_add_parts(
+        text, args.get("split") is True, request_id
+    )
     try:
         memory_at = _parse_memory_at(args.get("memory_at"))
     except ValueError as e:
@@ -375,10 +390,8 @@ def _tool_add_memory(args: dict) -> str:
         before, before_complete = (
             _snapshot_ids(client, _identity()) if tags else (set(), True)
         )
-        add_kw = (
-            {"metadata": metadata, "memory_at": memory_at, "request_id": request_id}
-        )
-        add_kw = {k: v for k, v in add_kw.items() if v is not None}
+        add_base = {"metadata": metadata, "memory_at": memory_at}
+        add_base = {k: v for k, v in add_base.items() if v is not None}
         # R4 两段式（2026-10-29）：抽取（LLM 网络调用）在锁外，可多进程并行；
         # WriteLock 只包 SDK 标准提交段（L1 存档 → L2 reconcile → SHADOW）。
         # R3 fail-fast：抢不到锁立即返回结构化失败（默认 5s）；
@@ -394,86 +407,114 @@ def _tool_add_memory(args: dict) -> str:
             prepare_commit,
         )
 
-        # R4 锁探测前置：锁被占时不白烧 LLM 抽取，立即 lock_timeout。
-        try:
-            with store.WriteLock(timeout=lock_timeout):
-                pass
-        except TimeoutError:
-            return json.dumps(
-                {
-                    "mode": "sync",
-                    "ok": False,
-                    "error": "lock_timeout",
-                    "lock_timeout": lock_timeout,
-                    "guidance": (
-                        f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）。"
-                        "单条可稍后重试；多条/并发请保持 async=true（默认，入队即返回，3 车道消费）。"
-                        "超时可用环境变量 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整。"
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        try:
-            agent_result = extract_phase(client, text, source="mcp", **add_kw, **_identity())
-        except ExtractFailed as e:
-            return json.dumps(
-                {
-                    "mode": "sync",
-                    "ok": False,
-                    "error": "extract_failed",
-                    "sdk_code": str(e.sdk_code or "UNKNOWN"),
-                    "guidance": (
-                        f"LLM 抽取失败，本条未入库（零写入）：{e.message}。"
-                        "多为 LLM/网络瞬时故障，单条可直接重试；反复失败请检查 LLM 配置。"
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        # R4.7 预计算出锁：L1 向量 + 本批 dedup 在抢锁前算好
-        prepared = prepare_commit(client, text, agent_result, source="mcp", **add_kw, **_identity())
-        try:
-            with store.WriteLock(timeout=lock_timeout):
-                last = commit_extracted_with_retry(
-                    client, text, agent_result, prepared=prepared,
-                    source="mcp", **add_kw, **_identity(),
-                )
-        except TimeoutError:
-            return json.dumps(
-                {
-                    "mode": "sync",
-                    "ok": False,
-                    "error": "lock_timeout",
-                    "lock_timeout": lock_timeout,
-                    "guidance": (
-                        f"另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）。"
-                        "单条可稍后重试；多条/并发请保持 async=true（默认，入队即返回，3 车道消费）。"
-                        "超时可用环境变量 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整。"
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        except CommitFailed as e:
-            return json.dumps(
-                {
-                    "mode": "sync",
-                    "ok": False,
-                    "error": "commit_failed",
-                    "message": str(e),
-                    "guidance": (
-                        "落库提交失败：原始对话已存档（L1），可检索的结论可能缺失；"
-                        "重试本条即可，reconcile 会吸收重复；反复失败跑 hy-mem doctor。"
-                    ),
-                },
-                ensure_ascii=False,
-            )
-        ids = _ids_of(last)
-        tagged: list[str] = []
+        # split：逐条走同一套两段式（与 CLI `add --split` 的 sync 分支同构）。
+        # 标签等全部写完再绑一次（对齐 CLI 的 _bind_all_once，避免每片全量快照）。
+        all_ids: list[str] = []
         tag_note = ""
+
+        def _partial() -> dict:
+            """拆分路径的失败回执：如实带出已写入的分片，不谎报零写入。"""
+            if not split_meta:
+                return {}
+            return {"memory_ids": all_ids,
+                    "split": {**split_meta, "written": len(all_ids)}}
+
+        for i, p in enumerate(parts, 1):
+            add_kw = dict(add_base)
+            _rid = part_request_id(request_id, i, len(parts))
+            if _rid:
+                add_kw["request_id"] = _rid
+            _mid = f"此前分片已入库 {len(all_ids)} 条。" if all_ids else ""
+            # R4 锁探测前置：锁被占时不白烧 LLM 抽取，立即 lock_timeout。
+            try:
+                with store.WriteLock(timeout=lock_timeout):
+                    pass
+            except TimeoutError:
+                return json.dumps(
+                    {
+                        "mode": "sync",
+                        "ok": False,
+                        "error": "lock_timeout",
+                        "lock_timeout": lock_timeout,
+                        "guidance": (
+                            f"{_mid}另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）。"
+                            "单条可稍后重试；多条/并发请保持 async=true（默认，入队即返回，3 车道消费）。"
+                            "超时可用环境变量 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整。"
+                        ),
+                        **_partial(),
+                    },
+                    ensure_ascii=False,
+                )
+            try:
+                agent_result = extract_phase(client, p, source="mcp", **add_kw, **_identity())
+            except ExtractFailed as e:
+                return json.dumps(
+                    {
+                        "mode": "sync",
+                        "ok": False,
+                        "error": "extract_failed",
+                        "sdk_code": str(e.sdk_code or "UNKNOWN"),
+                        "guidance": (
+                            f"{_mid}LLM 抽取失败，本条未入库（零写入）：{e.message}。"
+                            "多为 LLM/网络瞬时故障，单条可直接重试；反复失败请检查 LLM 配置。"
+                        ),
+                        **_partial(),
+                    },
+                    ensure_ascii=False,
+                )
+            # R4.7 预计算出锁：L1 向量 + 本批 dedup 在抢锁前算好
+            prepared = prepare_commit(client, p, agent_result, source="mcp",
+                                      **add_kw, **_identity())
+            try:
+                with store.WriteLock(timeout=lock_timeout):
+                    last = commit_extracted_with_retry(
+                        client, p, agent_result, prepared=prepared,
+                        source="mcp", **add_kw, **_identity(),
+                    )
+            except TimeoutError:
+                return json.dumps(
+                    {
+                        "mode": "sync",
+                        "ok": False,
+                        "error": "lock_timeout",
+                        "lock_timeout": lock_timeout,
+                        "guidance": (
+                            f"{_mid}另一进程正在写入，{lock_timeout:g}s 内未拿到写锁，本条未入库（零写入）。"
+                            "单条可稍后重试；多条/并发请保持 async=true（默认，入队即返回，3 车道消费）。"
+                            "超时可用环境变量 HY_MEM_ADD_LOCK_TIMEOUT（秒）调整。"
+                        ),
+                        **_partial(),
+                    },
+                    ensure_ascii=False,
+                )
+            except CommitFailed as e:
+                return json.dumps(
+                    {
+                        "mode": "sync",
+                        "ok": False,
+                        "error": "commit_failed",
+                        "message": str(e),
+                        "guidance": (
+                            f"{_mid}落库提交失败：原始对话已存档（L1），可检索的结论可能缺失；"
+                            "重试本条即可，reconcile 会吸收重复；反复失败跑 hy-mem doctor。"
+                        ),
+                        **_partial(),
+                    },
+                    ensure_ascii=False,
+                )
+            all_ids.extend(_ids_of(last))
+        ids = all_ids
+        tagged: list[str] = []
         if tags:
             tagged, tag_note = _bind_tags_to_new(
                 client, _identity(), before, ids, tags, before_complete=before_complete,
             )
         out: dict = {"mode": "sync", "memory_ids": ids, "tags": tags}
+        if split_meta:
+            out["count"] = len(ids)
+            out["split"] = split_meta
+            if split_warning:
+                out["warning"] = split_warning
         if tag_note:
             out["note"] = tag_note
         return json.dumps(out, ensure_ascii=False)
@@ -485,22 +526,41 @@ def _tool_add_memory(args: dict) -> str:
         queued_extra["metadata"] = metadata
     if memory_at is not None:
         queued_extra["memory_at"] = memory_at.isoformat()  # 队列 payload 必须 JSON 可序列化
-    if request_id:
-        queued_extra["request_id"] = request_id
+    if request_id and len(parts) > 1:
+        # 分片幂等 id：入队时就派生，worker 消费时各片互不重复，重试仍稳定
+        def _enq(conn):
+            return [
+                store.enqueue(
+                    conn,
+                    {
+                        "text": p,
+                        "source": "mcp",
+                        "identity": _identity(),
+                        "tags": tags,
+                        **{**queued_extra,
+                           "request_id": part_request_id(request_id, i, len(parts))},
+                    },
+                )
+                for i, p in enumerate(parts, 1)
+            ]
+    else:
+        if request_id:
+            queued_extra["request_id"] = request_id
 
-    def _enq(conn):
-        return [
-            store.enqueue(
-                conn,
-                {
-                    "text": text,
-                    "source": "mcp",
-                    "identity": _identity(),
-                    "tags": tags,
-                    **queued_extra,
-                },
-            )
-        ]
+        def _enq(conn):
+            return [
+                store.enqueue(
+                    conn,
+                    {
+                        "text": p,
+                        "source": "mcp",
+                        "identity": _identity(),
+                        "tags": tags,
+                        **queued_extra,
+                    },
+                )
+                for p in parts
+            ]
 
     job_ids = store.transient_write(_enq)
     conn = store.connect()
@@ -509,32 +569,60 @@ def _tool_add_memory(args: dict) -> str:
         spawned, live = ensure_worker_for_pending(conn, stats=stats)
     finally:
         conn.close()
-    return json.dumps(
-        {
-            "mode": "async",
-            "job_ids": job_ids,
-            "pending": stats["pending"],
-            "worker_spawned": spawned,
-            # 已有 worker 在跑（心跳新鲜）时 spawned 必为 False——这同样是
-            # 「落库有人管」，别让调用方把它读成失败
-            "worker_live": live,
-            # 进度怎么查：调度方拿到 job_ids 就能用 queue_status 跟踪，
-            # 不必用「search 空结果」反推落库与否
-            "progress_tool": "queue_status",
-            # 耗时承诺按实测口径（2026-10-29：pro + 推理型 LLM 单条 took_s=124.1），
-            # 「约 6~9 秒」是 lite/快模型的旧数字，按它去等必扑空
-            "note": (
-                "async=已入队，不等于已落库：lite 秒级，pro 模式单条实测可达 2 分钟左右。"
-                "worker_spawned 只代表已发起后台进程，不保证它存活（宿主退出可能连带杀掉）。"
-                "要确认落库（而不是猜）就用 queue_status(job_ids=[...], wait_seconds=60)；"
-                "pending 长时间不减说明没有消费者，需在 CLI 跑 hy-mem worker --once"
-            ),
-        },
-        ensure_ascii=False,
-    )
+    out: dict = {
+        "mode": "async",
+        "job_ids": job_ids,
+        "pending": stats["pending"],
+        "worker_spawned": spawned,
+        # 已有 worker 在跑（心跳新鲜）时 spawned 必为 False——这同样是
+        # 「落库有人管」，别让调用方把它读成失败
+        "worker_live": live,
+        # 进度怎么查：调度方拿到 job_ids 就能用 queue_status 跟踪，
+        # 不必用「search 空结果」反推落库与否
+        "progress_tool": "queue_status",
+        # 耗时承诺按实测口径（2026-10-29：pro + 推理型 LLM 单条 took_s=124.1），
+        # 「约 6~9 秒」是 lite/快模型的旧数字，按它去等必扑空
+        "note": (
+            "async=已入队，不等于已落库：lite 秒级，pro 模式单条实测可达 2 分钟左右。"
+            "worker_spawned 只代表已发起后台进程，不保证它存活（宿主退出可能连带杀掉）。"
+            "要确认落库（而不是猜）就用 queue_status(job_ids=[...], wait_seconds=60)；"
+            "pending 长时间不减说明没有消费者，需在 CLI 跑 hy-mem worker --once"
+        ),
+    }
+    if split_meta:
+        out["count"] = len(job_ids)
+        out["split"] = split_meta
+        if split_warning:
+            out["warning"] = split_warning
+        out["note"] = (
+            f"{out['note']}（原文按行拆成 {len(job_ids)} 个 job，每个 job 独立抽取/落库："
+            f"预计 {split_meta['estimated_extractions']} 次抽取调用；pro 单条分钟级，"
+            "50 条会长时间占用队列）"
+        )
+    return json.dumps(out, ensure_ascii=False)
 
 
 _TERMINAL_JOB = ("done", "dead")
+
+
+def _split_add_parts(text: str, split: bool,
+                     request_id: str | None = None) -> tuple[list[str], dict | None, str]:
+    """add_memory 的行拆分：规则与上限都在 hymem.core.split（CLI 共用一处）。
+
+    与 CLI 同口径的隐含假设：只按换行拆，不按标点/长度切；单行原样返回。
+    超出 SPLIT_MAX 的部分**不入库**，但 warning 如实说明还剩几条，绝不静默丢。
+    request_id 存在且真的拆出多片时，按片派生 `<rid>#<i>`（稳定且互不相同），
+    否则 SDK 会把后续分片当成第一片的重复，等于只落第一条。
+    """
+    if not split:
+        return [text], None, ""
+    parts, dropped = split_limited(text, True)
+    meta = {"requested": True, "submitted": 1, "parts": len(parts),
+            "truncated": dropped, "estimated_extractions": len(parts)}
+    if request_id and len(parts) > 1:
+        meta["request_id_derived"] = True
+        meta["request_id_prefix"] = f"{request_id}#"
+    return parts, meta, truncation_warning(len(parts), dropped)
 
 
 def _tool_queue_status(args: dict) -> str:
@@ -742,7 +830,20 @@ def _search_scene(args: dict, scene: str, ws: str | None, branch: str | None,
     if ws:
         out["workspace_id"] = ws
         out["branch"] = branch
+    # 观测字段（零行为变更）：scene 路的阈值由 SDK 的 working_* 参数决定
+    # （facts 缺省 0.30、experiences = facts + 0.10），传进来的 min_score 不参与。
+    out["diagnostics"] = {
+        "path": f"scene:{scene}",
+        "effective_min_score": 0.30,
+        "effective_experience_min_score": 0.40,
+        "min_score_ignored": min_score is not None,
+        "raw_candidates": len(facts) + len(experiences),
+        "after_time_filter": len(facts) + len(experiences),
+        "after_tag_filter": len(facts) + len(experiences),
+        "l6_state": {"state": "n/a", "vec_cache": "na", "schemas": 0},
+    }
     if not facts and not experiences:
+        out["diagnostics"]["empty_reason"] = "scene_empty"
         out["hint"] = (
             f"{scene} 库没命中。两点常见原因：①这个主题根本没写过 {scene} 记忆"
             "（chat 记忆不在这里——去掉 scene 再搜）；②写入时带了 workspace_id/branch，"
@@ -776,11 +877,19 @@ def _tool_search_memory(args: dict) -> str:
     # 只进 chat 路径——scene 双路检索有自己的融合口径，不混。
     queries = _str_list(args.get("queries"), "queries")
     if queries and len(queries) > 5:
-        raise ParamError("queries 最多 5 路（融合收益在 3~5 路，多了纯烧钱）")
+        raise ParamError(
+            "queries 最多 5 条（只有最后一条是检索目标，前面的仅用于上下文消解；"
+            "SDK 不并行召回、不融合去重）"
+        )
     if queries and query:
         raise ParamError("queries 与 query 二选一，不要都传")
     if not queries and not query:
         raise ParamError("query 不能为空：检索必须提供查询词")
+    # 标签是后过滤（SDK 无 tag 查询条件）；本轮只扩大调用面，不改过滤时机。
+    tags = _str_list(args.get("tags"), "tags")
+    tag_mode = str(args.get("tag_mode") or "all").strip().lower()
+    if tag_mode not in ("all", "any"):
+        raise ParamError("tag_mode 只能是 all（默认，全命中）或 any（任一命中）")
     search_mode = str(args.get("search_mode") or "default").strip()
     if search_mode not in ("default", "agentic"):
         raise ParamError(f"search_mode 只认 default/agentic（收到 {search_mode!r}）")
@@ -799,8 +908,9 @@ def _tool_search_memory(args: dict) -> str:
     # 单数 user_id 会被 SDK 拒收（TypeError: unexpected keyword argument）
     u = _identity()["user_id"]
     # 翻页 = 多取前 offset 条再切片（SDK search 按 score 排序，无原生 offset）；
-    # 拉取上限 200 防深翻页拖慢——语义检索翻到 200 名开外本来就没有意义
-    fetch = min(offset + limit, 200)
+    # 拉取上限 200 防深翻页拖慢——语义检索翻到 200 名开外本来就没有意义。
+    # 带 tags 时与 CLI 同口径 over-fetch ×10：标签是后过滤，不多取会空手。
+    fetch = min(offset + limit, 200) if not tags else min(200, max((offset + limit) * 10, 30))
 
     # L6 行为模式：独立字段，绝不混进 hits——混进去会在命中不足时补位冒充检索
     # 结果，宿主会把一条无关归纳当事实用。仅 ultra 有；pro 下明说「没有这条路」。
@@ -832,8 +942,11 @@ def _tool_search_memory(args: dict) -> str:
         ident={"user_ids": [u]},
         include_sources=inc or None,
         exclude_sources=exc or None,
+        tags=tags,
+        tag_mode=tag_mode,
         schema=want_schema,
-        schema_query=query,
+        # 与 SDK 的检索目标对齐：queries 时最后一条才是 target，query 只是空串
+        schema_query=(queries[-1] if queries else query),
         schema_limit=schema_limit,
         schema_min=schema_min,
         schema_user_id=u,
@@ -859,7 +972,34 @@ def _tool_search_memory(args: dict) -> str:
         }
         for it in page
     ]
-    resp = {"query": query, "count": len(out), "hits": out, "offset": offset}
+    resp = {
+        "query": query,
+        # queries 时 query 是空串；真实检索目标以这个字段为准（SDK 只认最后一条）
+        "target_query": res["target_query"],
+        "count": len(out),
+        "hits": out,
+        "offset": offset,
+    }
+    # 只加观测、不改行为：调用方据此判断 count=0 到底是哪一种空。
+    diag = {
+        "path": res["path"],
+        "effective_min_score": res["effective_min_score"],
+        "raw_candidates": res["raw_candidates"],
+        "after_time_filter": res["after_time_filter"],
+        "after_tag_filter": res["after_tag_filter"],
+        "l6_state": {
+            "state": res["schema_state"] or "ok",
+            "vec_cache": res["l6_cache"],
+            "schemas": len(res["schemas"]),
+        },
+    }
+    if res["l6_skipped"]:
+        diag["l6_state"]["skipped"] = res["l6_skipped"]
+    if res["library_total"] is not None:
+        diag["library_total"] = res["library_total"]
+    if res["empty_reason"]:
+        diag["empty_reason"] = res["empty_reason"]
+    resp["diagnostics"] = diag
     resp["schemas"] = [
         {"content": s.get("content"), "score": s.get("score"), "layer": "l6_schema"}
         for s in res["schemas"]
@@ -896,37 +1036,60 @@ def _tool_list_memories(args: dict) -> str:
         raise ParamError("order 只能是 desc（最新在前，默认）或 asc（最旧在前）")
     since = _parse_time(args.get("since"))
     until = _parse_time(args.get("until"))
+    tags = _str_list(args.get("tags"), "tags")
+    tag_mode = str(args.get("tag_mode") or "all").strip().lower()
+    if tag_mode not in ("all", "any"):
+        raise ParamError("tag_mode 只能是 all（默认，全命中）或 any（任一命中）")
     client = _client()
     # SDK 返回 dict（{"vdb": {"memories": [...]}}），与 CLI cmd_list 同解析
     # （vdb_memories，见 core.searchops）；直接当列表迭代会拿到 key 字符串、
     # 被 isinstance 过滤成恒 0 条
-    from hymem.core.searchops import vdb_memories
+    from hymem.core.searchops import _filter_by_tags, vdb_memories
 
     u = _identity()["user_id"]
-    if since is None and until is None:
-        # 无时间过滤：SDK 原生 offset 分页，多取 1 条判 has_more，精确且省
+    if since is None and until is None and not tags:
+        # 无过滤：SDK 原生 offset 分页，多取 1 条判 has_more，精确且省
         r = client.list_memories(limit=limit + 1, offset=offset, order=order, user_id=u) or {}
         rows = vdb_memories(r)
         has_more = len(rows) > limit
         rows = rows[:limit]
     else:
-        # SDK 无时间过滤参数：取窗口内全部（个人库量级，上限 500，可调
-        # HY_MEM_LIST_CAP），按时间过滤后本地切片——翻页按「过滤后的列表」算
+        # SDK 无时间/标签过滤参数：取窗口内全部（个人库量级，上限 500，可调
+        # HY_MEM_LIST_CAP），本地过滤后切片——翻页按「过滤后的列表」算。
+        # 注意：这里仍是「先取候选再过滤」，过滤时机的问题是另一批。
         cap = int(os.getenv("HY_MEM_LIST_CAP") or 500)
         r = client.list_memories(limit=cap, offset=0, order=order, user_id=u) or {}
         rows = vdb_memories(r)
-        rows = [m for m in rows if _in_range(_item_ts(m), since, until)]
+        if since is not None or until is not None:
+            rows = [m for m in rows if _in_range(_item_ts(m), since, until)]
+        if tags:
+            rows = _filter_by_tags(rows, tags, tag_mode)
         has_more = len(rows) > offset + limit
         rows = rows[offset : offset + limit]
+
+    # 手工标签在本地 sqlite tags 表（source='user'），SDK 从不返回 `_tags`。
+    manual: dict[str, list[str]] = {}
+    mids = [str(m.get("memory_id")) for m in rows if m.get("memory_id")]
+    if mids:
+        try:
+            from hymem.core import store as _store
+
+            conn = _store.connect()
+            try:
+                manual = _store.tags_for(conn, mids, source="user")
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            manual = {}
     out = [
         {
             "memory_id": m.get("memory_id"),
             "content": (m.get("content") or "")[:200],
             "when": m.get("when") or m.get("created_at"),
-            # 标签分列（2026-10-29）：tags=自动标签（LLM 抽取）、manual_tags=
-            # 手工标签（add 时传入，SDK 存 _tags）。只看 tags 会误判手工标签丢失。
+            # 标签分列：tags=SDK 自动标签（LLM 抽取）；manual_tags=本地 tags 表
+            # 里 add 时绑定的手工标签。只读 SDK 的 _tags 会得到恒空（已修正）。
             "tags": m.get("tags") or [],
-            "manual_tags": m.get("_tags") or [],
+            "manual_tags": manual.get(str(m.get("memory_id")), []),
         }
         for m in rows
     ]
@@ -945,18 +1108,27 @@ def _tool_get_memory(args: dict) -> str:
     r = client.get(mid)
     if r is None:
         return json.dumps({"found": False, "memory_id": mid}, ensure_ascii=False)
-    # 标签字段澄清（2026-10-29 实测误报）：SDK 返回里 tags 只含**自动标签**
-    # （LLM 抽取），add 时传入的手工标签（含 proj:/domain: 三件套）存在
-    # `_tags`。只看 tags 会误判「手工标签被 update 冲掉」。这里显式分列，
-    # 原字段不动（兼容既有消费方）。
+    # 标签字段澄清（2026-11-06 修正）：SDK 的返回只有**自动标签**（LLM 抽取），
+    # 从不返回 `_tags`；手工标签（add 时传入）在本地 sqlite tags 表（source='user'）。
+    # 之前读 `_tags` 导致 manual_tags 恒空，看起来像标签丢了。
     if isinstance(r, dict):
         auto_tags = r.get("tags") or []
-        manual_tags = r.get("_tags") or []
+        manual_tags: list[str] = []
+        try:
+            from hymem.core import store as _store
+
+            conn = _store.connect()
+            try:
+                manual_tags = _store.tags_for(conn, [mid], source="user").get(mid, [])
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            manual_tags = []
         r["auto_tags"] = auto_tags
         r["manual_tags"] = manual_tags
         r["tags_note"] = (
-            "tags 字段只含自动标签；手工标签（add 时传入的）在 manual_tags/_tags。"
-            "检索用 list --tag <名> 可精确命中两者。"
+            "tags 只含自动标签；手工标签（add 时传入）在 manual_tags，来源是本地 tags 表。"
+            "search/list 可用 tags 参数过滤。"
         )
     return json.dumps({"found": True, "memory": r}, ensure_ascii=False, default=str)
 
@@ -1140,11 +1312,11 @@ TOOLS = [
     {
         "name": "add_memory",
         "description": (
-            "写入一条长期记忆（用户说「记一下」、表达偏好/决策/项目事实时）。"
-            "写事实型内容（含主体+具体值），别写时间性流水（改投日志类工具）。"
-            "默认异步：入队即返回，pro 单条落库可达 2 分钟，确认落库用 queue_status。"
-            "scene 三选一：省略=chat；working/coding 记生产力/编码轨迹（必须传 messages，"
-            "同步写入，检索须带同样 scene）。"
+            "写入长期记忆（「记一下」、偏好/决策/项目事实），写事实而非流水账。\n"
+            "一次一条：多条独立事实分多次调用（边界自判），同主题用 tags 归类，"
+            "不确定是否存在先 search_memory；split=true 仅兜底（按行切、可能割裂语义）。\n"
+            "默认异步，pro 单条落库约 2 分钟。scene 省略=chat；working/coding 须带 messages，"
+            "检索同 scene。"
         ),
         "inputSchema": {
             "type": "object",
@@ -1175,6 +1347,21 @@ TOOLS = [
                 "workspace_id": {"type": "string", "description": "仓库/项目隔离（建议 git remote URL）；仅 scene=working/coding"},
                 "branch": {"type": "string", "description": "分支隔离，必须同时传 workspace_id"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "可选标签（仅 chat 路径生效）"},
+                "split": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "按行拆成多条独立记忆（对齐 CLI add --split）。默认 false = 原样写入一条。"
+                        "仅兜底：优先自行分条、分多次调用；确实无法拆分时才开——按行切可能割裂语义。"
+                        "拆成 N 条就会做 N 次抽取调用"
+                        "（split.estimated_extractions=N），耗时与 token 成倍增加；pro 模式单条"
+                        "落库可达 2 分钟，50 条会长时间占用队列。单次最多 50 条，超出部分不写入"
+                        "并在 warning 里说明。"
+                        "仅 chat 路径生效：scene=working/coding 是整段工具轨迹抽取，split 会被忽略"
+                        "并在回执里标 split_ignored。"
+                        "传 request_id 时各分片幂等 id 自动派生为 <rid>#<i>（回执 split.request_id_derived）。"
+                    ),
+                },
                 "async": {"type": "boolean", "description": "默认 true（入队即返回）。false 同步落库（约 3~15s；抢不到写锁 5s 返回 lock_timeout，本条零写入可重试）；多条/并发务必用默认 true。working/coding 恒同步，此参数忽略"},
                 "metadata": {"type": "object", "description": "附加元数据对象，如 {\"project\": \"iisw\"}"},
                 "memory_at": {
@@ -1223,7 +1410,11 @@ TOOLS = [
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "多路并行检索（≤5 条）：一次传多个措辞变体，SDK 融合去重，省得换措辞反复试；与 query 二选一",
+                    "description": (
+                        "≤5 条查询，**只有最后一条是检索目标**；前面的仅用于上下文消解"
+                        "（SDK 不并行召回、不融合去重，RRF 只在 scene='all'）。"
+                        "与 query 二选一；回执的 target_query 会如实回显实际检索的那条。"
+                    ),
                 },
                 "search_mode": {
                     "type": "string",
@@ -1232,7 +1423,14 @@ TOOLS = [
                 },
                 "rerank": {"type": "boolean", "description": "关闭重排可省时省 token（默认 true，排序质量优先就别传）"},
                 "limit": {"type": "integer", "description": "返回条数，默认 5，上限 20"},
-                "min_score": {"type": "number", "description": "相似度阈值，默认用配置值（0.35）"},
+                "min_score": {
+                    "type": "number",
+                    "description": (
+                        "相似度阈值。缺省时 chat 路由 SDK 取 0.3（不是 0.35）；"
+                        "scene 路的阈值由 SDK 的 working_* 参数决定（facts 0.30 / experiences 0.40），"
+                        "本参数在 scene 路不生效。回执 diagnostics.effective_min_score 是实际生效值。"
+                    ),
+                },
                 "scene": {
                     "type": "string",
                     "enum": ["chat", "working", "coding"],
@@ -1264,6 +1462,19 @@ TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "排除这些来源的记忆（如 [\"cli\"]）；与 include_sources 二选一",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "按标签过滤（本地手工标签 + SDK 自动标签）。标签是后过滤："
+                        "会多取候选再筛，可能比不传 tags 更慢；与 tag_mode 配合。"
+                    ),
+                },
+                "tag_mode": {
+                    "type": "string",
+                    "enum": ["all", "any"],
+                    "description": "all=必须命中全部标签（默认）；any=命中任一即可",
                 },
                 "since": {
                     "type": "string",
@@ -1307,6 +1518,16 @@ TOOLS = [
                     "description": "只要这段时间之后：相对值（30m/12h/7d/30d/1y）或 ISO 日期（2026-01-01）",
                 },
                 "until": {"type": "string", "description": "只要这段时间之前，格式同 since"},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "按标签过滤（本地手工标签 + SDK 自动标签）；后过滤，最多取 500 条候选再筛",
+                },
+                "tag_mode": {
+                    "type": "string",
+                    "enum": ["all", "any"],
+                    "description": "all=必须命中全部标签（默认）；any=命中任一即可",
+                },
             },
         },
     },

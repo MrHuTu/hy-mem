@@ -620,9 +620,12 @@ def _read_text(arg_text: str | None) -> str:
 
 
 def _split_lines(text: str) -> list[str]:
-    """按行拆条。一次 add 的多个事实会被压成一条 l2_fact，稀释向量拉低召回。"""
-    parts = [p.strip() for p in text.replace("\r", "").split("\n") if p.strip()]
-    return parts if len(parts) > 1 else [text]
+    """按行拆条。一次 add 的多个事实会被压成一条 l2_fact，稀释向量拉低召回。
+
+    实现在 hymem.core.split（CLI 与 MCP 共用同一套规则），这里保留旧入口名。
+    """
+    from hymem.core.split import split_lines as _f
+    return _f(text)
 
 
 def _bind_tags_to_new(client, ident: dict, before: set[str], returned: list[str],

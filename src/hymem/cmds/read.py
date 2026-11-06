@@ -72,6 +72,19 @@ def _cmd_search_scene(args, scene: str) -> int:
         "chain_block": (r.get("chain_block") or "")[:2000] or None,
         "chain_note": r.get("chain_note"),
         "elapsed_ms": r.get("elapsed_ms"),
+        # scene 路的阈值由 SDK 的 working_* 决定（facts 0.30 / experiences 0.40），
+        # CLI 的 --min-score 不参与；回显出来免得调用方误以为调了阈值。
+        "diagnostics": {
+            "path": f"scene:{scene}",
+            "effective_min_score": 0.30,
+            "effective_experience_min_score": 0.40,
+            "min_score_ignored": getattr(args, "min_score", None) is not None,
+            "raw_candidates": len(facts) + len(experiences),
+            "after_time_filter": len(facts) + len(experiences),
+            "after_tag_filter": len(facts) + len(experiences),
+            "l6_state": {"state": "n/a", "vec_cache": "na", "schemas": 0},
+            **({"empty_reason": "scene_empty"} if not facts and not experiences else {}),
+        },
     }
     human_parts = [f"[{scene}] 事实 {len(facts)} 条、经验 {len(experiences)} 条"]
     if ws:
@@ -170,12 +183,16 @@ def cmd_search(args) -> int:
         if not (args.query or "").strip() or getattr(args, "queries", None):
             return fail("scene 检索只支持单个位置参数 query（不支持 --queries）", EXIT_USAGE)
         return _cmd_search_scene(args, scene)
-    # 多路检索（S1，docs/specs/2026-11-02-sdk-alignment-gaps/）：--queries 逗号
-    # 分隔多个查询（SDK queries= 并行召回融合）；与位置参数 query 互斥。
+    # 多查询（S1）：--queries 逗号分隔。契约（2026-11-06 实测）：
+    # **只有最后一条是检索目标**，前面的仅用于上下文消解；SDK 不并行召回、
+    # 不做融合去重（RRF 只在 scene="all"）。与位置参数 query 互斥。
     raw_q = getattr(args, "queries", None) or ""
     queries = [q.strip() for q in raw_q.replace("，", ",").split(",") if q.strip()]
     if queries and len(queries) > 5:
-        return fail("--queries 最多 5 路（SDK 融合收益在 3~5 路，多了纯烧钱）", EXIT_USAGE)
+        return fail(
+            "--queries 最多 5 条（只有最后一条是检索目标，前面的仅用于上下文消解）",
+            EXIT_USAGE,
+        )
     if queries and (args.query or "").strip():
         return fail("--queries 与位置参数 query 二选一，不要都传", EXIT_USAGE)
     if not queries and not (args.query or "").strip():
@@ -235,7 +252,8 @@ def cmd_search(args) -> int:
             tags=want_tags,
             tag_mode=getattr(args, "tag_mode", "all"),
             schema=want_schema,
-            schema_query=primary,
+            # L6 必须跟检索目标同一条（queries 时是最后一条，不是第一条）
+            schema_query=(queries[-1] if queries else primary),
             schema_limit=schema_limit,
             schema_min=schema_min,
             schema_user_id=uid,
@@ -258,13 +276,34 @@ def cmd_search(args) -> int:
         schema_state = res["schema_state"]
 
         if args.json:
+            _diag = {
+                "path": res["path"],
+                "effective_min_score": res["effective_min_score"],
+                "raw_candidates": res["raw_candidates"],
+                "after_time_filter": res["after_time_filter"],
+                "after_tag_filter": res["after_tag_filter"],
+                "l6_state": {
+                    "state": schema_state or "ok",
+                    "vec_cache": res["l6_cache"],
+                    "schemas": len(schemas),
+                },
+            }
+            if res["l6_skipped"]:
+                _diag["l6_state"]["skipped"] = res["l6_skipped"]
+            if res["library_total"] is not None:
+                _diag["library_total"] = res["library_total"]
+            if res["empty_reason"]:
+                _diag["empty_reason"] = res["empty_reason"]
             _payload = {
                 "count": len(items),
+                # queries 时位置参数 query 为空；真实目标以这个字段为准
+                "target_query": res["target_query"],
                 "min_score": min_score,
                 "elapsed_ms": res["elapsed_ms"],
                 "tags_filter": want_tags,
                 "results": items,
                 "schemas": schemas,
+                "diagnostics": _diag,
             }
             # state → (available, note) 的唯一口径在 searchops.schema_state_meta：
             # disabled（非 ultra）/ graph_unavailable（kuzu 锁被抢）/ empty（有料被
