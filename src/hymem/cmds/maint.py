@@ -225,6 +225,40 @@ def _doctor_llm(args, check) -> None:
                     )
 
 
+def _doctor_graph(check) -> None:
+    """ultra 图库资源口径（SDK ≥2.0.15）：默认值与我们注入的覆盖值。"""
+    try:
+        from hymem.core import config as _cfg
+
+        cfg = _cfg.load()
+    except Exception as e:  # noqa: BLE001
+        check("graph", False, f"配置读取失败：{type(e).__name__}: {e}", fatal=False)
+        return
+    mode = str(cfg.get("mode") or "pro")
+    if mode != "ultra":
+        check("graph", True, f"未启用（mode={mode}，仅 ultra 建图）", fatal=False)
+        return
+    g = cfg.get("graph") or {}
+
+    def _fmt(val, sdk_default: str, kuzu_default: str) -> str:
+        if val is None or val == "":
+            return sdk_default
+        try:
+            return kuzu_default if int(val) == 0 else str(val)
+        except (TypeError, ValueError):
+            return f"{val!r}（非法，SDK 会忽略）"
+
+    pool = _fmt(g.get("bufferPoolMb"), "512MB（SDK 默认）", "Kuzu 默认≈80% 内存")
+    threads = _fmt(g.get("maxThreads"), "4（SDK 默认）", "Kuzu 默认全部核")
+    check(
+        "graph",
+        True,
+        f"buffer_pool={pool} / threads={threads}"
+        "（config graph.* 或 MEMORY_GRAPH_* 可调，同进程共享图库）",
+        fatal=False,
+    )
+
+
 def _doctor_queue(check) -> None:
     """异步队列与写锁（worker 依赖这两个，坏了会静默丢任务）。"""
     try:
@@ -280,6 +314,9 @@ def cmd_doctor(args) -> int:
 
     # 4. 模式与 LLM（lite 不需要 LLM）
     _doctor_llm(args, check)
+
+    # 4.5 图库资源（ultra；SDK ≥2.0.15 的 buffer pool / 线程默认值）
+    _doctor_graph(check)
 
     # 5. 异步队列与写锁（worker 依赖这两个，坏了会静默丢任务）
     _doctor_queue(check)

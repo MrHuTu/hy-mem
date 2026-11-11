@@ -10,7 +10,7 @@
 
 ## 0. 一句话定位
 
-**hy-mem = 给 AI 智能体用的本地长期记忆 CLI**，外层是一套零依赖终端 UI（方向键菜单 / 设置向导 / 按键解码），底层是 Hy-Memory SDK 2.0.13 + chromadb 向量库，可 PyInstaller 打成自包含目录 `dist/hy-mem/`（355 MB，整个拷走即可用，对方不需要 Python）。
+**hy-mem = 给 AI 智能体用的本地长期记忆 CLI**，外层是一套零依赖终端 UI（方向键菜单 / 设置向导 / 按键解码），底层是 Hy-Memory SDK 2.0.15 + chromadb 向量库，可 PyInstaller 打成自包含目录 `dist/hy-mem/`（355 MB，整个拷走即可用，对方不需要 Python）。
 
 核心能力：写入记忆（同步/异步）→ LLM 抽取成 `l2_fact` / `l3_schema` → 语义检索 → 标签归档；多智能体可用 `user_id` 共享或隔离记忆。
 
@@ -22,7 +22,7 @@
 |---|---|---|
 | 版本 | `1.0.0-rc.11`（`src/hymem/core/version.py: VERSION`） | `.venv/Scripts/python.exe -m hymem --version` |
 | 语言/运行时 | Python **3.12.10**，venv 在 `.venv/` | `.venv/Scripts/python.exe -V` |
-| 核心 SDK | `hy-memory 2.0.13` | `.venv/Scripts/python.exe -m pip show hy-memory` |
+| 核心 SDK | `hy-memory 2.0.15` | `.venv/Scripts/python.exe -m pip show hy-memory` |
 | 向量库 | `chromadb 1.5.9` | 同上 |
 | 打包器 | `PyInstaller 6.22.3` | 同上 |
 | 本地嵌入（备选） | `fastembed 0.9.1` + `onnxruntime 1.31.1` | 同上 |

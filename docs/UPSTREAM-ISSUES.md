@@ -8,7 +8,7 @@
 
 | # | 上游 Bug | 影响我们的能力 | 下游对策 | 对策落点 | 上游状态 | 我方状态 |
 |---|---|---|---|---|---|---|
-| U1 | GraphStore 锁冲突降级被 client 层否决 → ultra 多进程第二个 client 构造必炸 | 异步 add（worker 死信/影子写入）、CLI add/stats、多进程并发 | 方案 A：vendor 补丁接通降级（`_initialize_impl` 的 raise → warning） | `scripts/apply_upstream_patches.py`（幂等重放）+ `docs/specs/2026-11-02-ultra-graph-degrade/` | **未修**（main@3511153 仍在：client.py L613-617 raise / L528-529 ultra 硬编码开图） | **补丁已实施并验收**（2026-11-02，commit fa78cb5；red→green + 全量 14 套全绿 + 实战死信复活） |
+| U1 | GraphStore 锁冲突降级被 client 层否决 → ultra 多进程第二个 client 构造必炸 | 异步 add（worker 死信/影子写入）、CLI add/stats、多进程并发 | 方案 A：vendor 补丁接通降级（`_initialize_impl` 的 raise → warning） | `scripts/apply_upstream_patches.py`（幂等重放）+ `docs/specs/2026-11-02-ultra-graph-degrade/` | **部分修**：2.0.15 起同进程多 client 共享一个 `kuzu.Database`（不再互抢），但**跨进程文件锁未修**——2026-11-11 实测原版 `a641c546`（2.0.15）双进程仍 `RuntimeError: GraphStore (kuzu) init failed`（client.py L614） | **补丁仍必需**（同进程场景已不需降级，跨进程仍靠它） |
 | U2 | S2 归纳 auto 语言检测 `zh_ratio≥0.7` 对技术型中文误判为 en → 画像/模式归纳成英文 | evolve / L6 schema 语言 | 显式配置 `evolve.language=zh`（SDK 2.0.11 起原生支持，显式时换归纳提示词本体 + 11 语言 OUTPUT_LANGUAGE_DIRECTIVE 硬约束），**不用 auto** | `config.json` evolve.language=zh；运行时补丁已在 rc.9 退役 | **部分改善未根治**：2.0.12 补齐 11 语言提示词（PR #261/262）+ memhub 显式传 zh-Hans（PR #270），但 auto 检测阈值逐字未变（system2_agent.py L2336-2337，2026-11-02 实测） | 显式 zh 常态化；上游若修 auto 再评估回归 |
 | U3 | client 构造期冻结 `MEMORY_VECTOR_HOST/PORT`，serve 重启换端口后长驻 client 全部 ConnectError 10061 | MCP server 长驻 client 的 add sync（search 因动态发现幸存） | 暂无代码级对策；运营层保证 serve 常驻 + 出问题重启 MCP 会话 | —（见 `docs/specs/2026-11-02-ultra-graph-degrade/issue-draft.md` 附带发现段） | **未修** | 待定对策（候选：client 连接失败自动重建） |
 | U4 | scene 能力声明与实际生效条件不一致：`get_version.capabilities.scene` 只看 memoryMode，SDK 还需 `mode != lite` 且 `coding.enable` | MCP `add_memory` / `search_memory` 的 `scene=working/coding` | 能力声明对齐 SDK 真实条件；add/search 入口前同一检查，不可用即明确失败（零写入） | `src/hymem/mcp/server.py`（capabilities / `_add_productivity` / `_search_scene`）、`src/hymem/core/config.py`（`scene_status`） | SDK 行为本身合理（降级日志在 info 级），属我方声明口径问题 | 已修（2026-11-03，P2 后批次） |
@@ -31,6 +31,7 @@
 - **同步记录**：
   - 2026-11-02：发现（rc.10 打包验收实测死信/影子写入现场）；issue 稿完成待提交。
   - 2026-11-02：方案 A 补丁实施并验收（commit fa78cb5）：red（双进程 B 构造 RuntimeError）→ green（B 构造成功 + warning 降级）；test_cli 122/122（含 G2×2 补丁守护）；全量 14 套全绿；重打包覆盖安装后实战验证——先前死信 job 98/99 经 worker --once 全部落库可检索，队列清零。
+  - 2026-11-11：升 2.0.15（`a641c546`）后按上表验证方法实测——① 双进程同 `kuzu_db`：原版（未打补丁）构造 `RuntimeError`，补丁版 `warning 降级 + _available=False + no-op 查询成功`；② 同进程两个 ultra client：`same_db=True`、构造 0.0s，共享 DB 生效。**结论：补丁不能退役**，仅"同进程互相覆盖 checkpoint"这一成因被上游修掉；锚点仍在 client.py L614，脚本无需改。
 
 ## U2：S2 归纳语言 auto 误判（详细）
 

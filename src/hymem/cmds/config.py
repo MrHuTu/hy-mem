@@ -346,7 +346,18 @@ def cmd_config(args) -> int:
                 if not isinstance(node, dict):
                     return fail(f"路径冲突：{keypath}", EXIT_USAGE)
             old = node.get(parts[-1])
-            if isinstance(old, bool):
+            if keypath.strip() in ("graph.bufferPoolMb", "graph.maxThreads"):
+                # 默认值是 null，泛型分支会把它当字符串存进 JSON；这里显式转 int。
+                try:
+                    value = int(value)
+                except ValueError:
+                    return fail(
+                        f"{keypath.strip()} 需要整数（0 = 交回 Kuzu 默认），得到 {value!r}",
+                        EXIT_USAGE,
+                    )
+                if value < 0:
+                    return fail(f"{keypath.strip()} 不能为负，得到 {value}", EXIT_USAGE)
+            elif isinstance(old, bool):
                 value = value.strip().lower() in ("1", "true", "yes", "on")
             elif isinstance(old, int):
                 try:

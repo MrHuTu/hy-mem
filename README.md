@@ -1,6 +1,6 @@
 # hy-mem
 
-本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 [Tencent Hy-Memory SDK](https://github.com/Tencent-Hunyuan/Hy-Memory) 2.0.13 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
+本地长期记忆服务，为 AI Agent 提供跨会话的记忆存储与语义检索能力。基于 [Tencent Hy-Memory SDK](https://github.com/Tencent-Hunyuan/Hy-Memory) 2.0.15 构建，内置多厂商模型预设（OpenAI 兼容 / 智谱 / 百炼 / DeepSeek，含自定义网关）。
 
 > A local long-term memory CLI for AI agents — write, fact-extract via LLM, semantic search, and tag archiving, with a built-in MCP stdio server (9 tools).
 
@@ -82,6 +82,7 @@ python -m hymem menu
 - **search**: 检索参数（min_score 等）
 - **servePort**: serve 固定端口（0=随机默认；设为固定值后 serve 重启不再换端口，长驻 MCP client 端点恒有效）
 - **backend.memory**: 记忆后端选择（默认 `hy-memory`；JDBC 式协议层，实现在 `backends/`，未来可注册其他实现）
+- **graph**: ultra 图库资源（`graph.bufferPoolMb` / `graph.maxThreads`）。留空沿用 SDK 2.0.15 默认（512MB / 4 线程），`0` 表示交回 Kuzu 默认（≈80% 物理内存 / 全部核）。等价环境变量 `MEMORY_GRAPH_BUFFER_POOL_MB` / `MEMORY_GRAPH_MAX_THREADS`；两处都设时 config 覆盖 env（与其它字段一致）。`doctor` 会回显生效值。SDK 2.0.15 起同进程多个 client 共享一个 `kuzu.Database`，跨进程仍受文件锁约束
 
 **密钥存储**：默认直接固化在 `config.json` 的 `apiKey` 字段（`config.json` 恒被 `.gitignore` 保护，不会入库）；也兼容从环境变量读取（`MEMORY_EMBEDDER_API_KEY` / `MEMORY_LLM_API_KEY`，老配置无需改动）。
 

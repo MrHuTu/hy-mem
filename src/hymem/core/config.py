@@ -154,6 +154,13 @@ DEFAULTS: dict[str, Any] = {
         "lockTimeout": 180,
         "staleSec": 900,
     },
+    # 图库资源（ultra，SDK ≥2.0.15）。SDK 默认 buffer_pool 512MB / 4 线程，
+    # 大图或低配机器需要调；null 表示不注入，沿用 SDK 默认。
+    # 0 = Kuzu 自己的默认（buffer pool ≈ 80% 物理内存 / 全部核）。
+    "graph": {
+        "bufferPoolMb": None,
+        "maxThreads": None,
+    },
     "health": {
         "countWarn": 200,
         "countCrit": 500,
@@ -547,6 +554,16 @@ def to_env(cfg: dict) -> dict[str, str]:
     # 表现为「deepseek 时好时坏」，其实是截断。max_tokens 只是上限，放宽不会让
     # S1 抽取多写内容（它本来就输出很短）。
     env["MEMORY_AGENT_MAX_TOKENS"] = str((cfg.get("evolve") or {}).get("maxTokens", 8000))
+    # 图库内存/线程（SDK ≥2.0.15 读取）。只在显式配置时注入，null 保持 SDK 默认，
+    # 避免升级后行为被我们悄悄改掉。
+    graph = cfg.get("graph") or {}
+    for env_name, key in (
+        ("MEMORY_GRAPH_BUFFER_POOL_MB", "bufferPoolMb"),
+        ("MEMORY_GRAPH_MAX_THREADS", "maxThreads"),
+    ):
+        val = graph.get(key)
+        if val is not None:
+            env[env_name] = str(val)
     # coding diff 链（S4）：只在填了仓库根时注入，空值不写——SDK 拿不到这个
     # 变量就退回「只认工具轨迹里的 path/old/new」，不会去猜仓库。
     chain_repo = str((cfg.get("coding") or {}).get("chainRepo") or "")
